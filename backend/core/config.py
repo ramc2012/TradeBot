@@ -48,6 +48,31 @@ class Settings(BaseSettings):
     LOG_LEVEL: str = "INFO"
     BACKEND_CORS_ORIGINS: List[str] = ["http://localhost:3000"]
     BACKEND_CORS_ORIGIN_REGEX: str | None = None
+    # ── Phase-1 process split (owner-approved 2026-07-18) ──────────────────
+    # LANESET selects which boot plane this process runs:
+    #   "all"        (DEFAULT) — byte-identical single-process boot, exactly
+    #                today's behavior. Deploy-safe with no compose changes.
+    #   "core"       — market-data ingest (the ONE Fyers WS via data_router,
+    #                live_candle_store, quote_bus, option/held/commodity
+    #                subscription managers, MI/watchlist/chain service via the
+    #                supervisor's core runners), API routers + websockets,
+    #                health, auth/token plumbing, data-maintenance daemons.
+    #   "strategies" — the market_hours_paper_supervisor strategy runners +
+    #                the two own-loop agents (S1 paper_strategy_agent,
+    #                commodity_strategy_agent). NEVER opens a broker WS
+    #                (data_router.subscribe is gated); reads ticks/marks from
+    #                Redis tick:*/quotes:bus and PG tables. Broker REST is
+    #                allowed (chains/premium).
+    # Unknown values fail SAFE to "all" (single-process) with a CRITICAL log —
+    # a typo must never dark a plane. See core/laneset.py.
+    LANESET: str = "all"
+    # Cross-process broker REST budget (Phase-1 stopgap): the in-process rate
+    # limiters (brokers/rate_limiter.py) are per-process, so TWO planes could
+    # jointly reach ~2× the per-token caps. Each plane scales its limiter
+    # window counts by this fraction (split compose profile: core=0.6,
+    # strategies=0.4). 1.0 (default) = today's exact limits, provable no-op.
+    # Phase 2 replaces this with a shared Redis token bucket.
+    BROKER_REST_BUDGET_FRACTION: float = 1.0
 
     # DB / Redis
     DATABASE_URL: str = "postgresql+asyncpg://nomadcurie:nomadcurie@localhost:5433/nomadcurie"

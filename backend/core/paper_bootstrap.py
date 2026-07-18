@@ -42,7 +42,12 @@ async def bootstrap_paper_trading_runtime() -> dict[str, Any]:
     commodity_status = commodity_strategy_agent.get_status()
 
     prewarm_tasks: list[asyncio.Task[None]] = []
-    if settings.PAPER_RUNTIME_PREWARM_ENABLED and broker_snapshot.get("broker_ready"):
+    # Split boot: the prewarm's MI refresh is broker REST that belongs to the
+    # CORE plane's market_intelligence runner — skip it on LANESET=strategies
+    # (and on core the bootstrap itself never runs). Inert when LANESET=all.
+    from core.laneset import is_split
+
+    if settings.PAPER_RUNTIME_PREWARM_ENABLED and broker_snapshot.get("broker_ready") and not is_split():
         prewarm_tasks.append(asyncio.create_task(_prewarm_market_intelligence_runtime()))
         if commodity_strategy_agent.get_symbols():
             prewarm_tasks.append(

@@ -14,6 +14,7 @@ from loguru import logger
 
 from core import metrics as app_metrics
 from core.config import settings
+from core.laneset import boots_core, boots_strategies, normalized_laneset
 from core.market_hours_paper_supervisor import market_hours_paper_supervisor
 from core.paper_bootstrap import bootstrap_paper_trading_runtime
 from db.redis_client import get_redis, close_redis
@@ -74,8 +75,20 @@ OAUTH_CALLBACK_PATHS = {"/api/auth/fyers/callback", "/api/auth/upstox/callback"}
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    """Startup / shutdown lifecycle."""
+    """Startup / shutdown lifecycle.
+
+    Phase-1 process split (2026-07-18): boot blocks are gated by LANESET via
+    core.laneset.boots_core()/boots_strategies(). LANESET=all (the default)
+    makes EVERY guard True — the executed call sequence is byte-identical to
+    the pre-split single-process boot.
+    """
     logger.info("═══ Nomad Curie starting up ═══")
+    _laneset = normalized_laneset()
+    if _laneset != "all":
+        logger.info(
+            f"LANESET={_laneset}: booting the "
+            f"{'data/API (core)' if _laneset == 'core' else 'strategy'} plane only"
+        )
 
     # ── Production security guardrails (gap-audit B1/H7) ─────────────────────────
     # During the PAPER-TRADING test phase auth is intentionally off (no real money
@@ -135,23 +148,28 @@ async def lifespan(app: FastAPI):
         logger.warning(f"Session auto-restore failed: {e}")
         adapter = None
 
-    # Wire market profile builder to data router
-    from market_data.market_profile import market_profile_builder
-    for symbol in LIVE_INDEX_APP_SYMBOLS:
-        market_data_router.register_callback(symbol, market_profile_builder.on_tick)
-    market_data_router.register_global_callback(live_candle_store.on_tick)
-    await live_candle_store.start()
+    # ── CORE plane: tick construction + the ONE broker WS ────────────────────
+    # (LANESET=all keeps every guard True — byte-identical single-process boot.)
+    if boots_core():
+        # Wire market profile builder to data router
+        from market_data.market_profile import market_profile_builder
+        for symbol in LIVE_INDEX_APP_SYMBOLS:
+            market_data_router.register_callback(symbol, market_profile_builder.on_tick)
+        market_data_router.register_global_callback(live_candle_store.on_tick)
+        await live_candle_store.start()
 
-    # Terminal-grade low-latency quote fan-out: the quote_bus taps the same tick
-    # feed and coalesces it into ~150ms multi-symbol frames on Redis 'quotes:bus'
-    # for the event-driven /ws/quotes endpoint (no snapshot-timer latency floor).
-    from market_data.quote_bus import quote_bus
-    await quote_bus.start()
+        # Terminal-grade low-latency quote fan-out: the quote_bus taps the same tick
+        # feed and coalesces it into ~150ms multi-symbol frames on Redis 'quotes:bus'
+        # for the event-driven /ws/quotes endpoint (no snapshot-timer latency floor).
+        from market_data.quote_bus import quote_bus
+        await quote_bus.start()
 
     # Prefer the real broker feed when a session exists. Without a broker, keep
     # the shared header feed idle so the UI falls back to stored spot closes
     # instead of publishing synthetic 100-based index ticks.
-    if adapter:
+    # Strategy plane: data_router.subscribe() is a laneset-gated no-op, and this
+    # whole block is skipped — the core plane owns the ONE Fyers WS.
+    if adapter and boots_core():
         from api.routers.auth import get_active_adapter
         from market_data.source_policy import choose_active_adapter, source_policy_snapshot
 
@@ -211,83 +229,90 @@ async def lifespan(app: FastAPI):
         await market_data_router.stop_mock_feed()
         await market_data_router.unsubscribe()
 
-    # WS-0.5c — bound these starts so a hang can't block the process from ever
-    # becoming healthy. They normally just spawn background loops and return fast.
-    try:
-        await asyncio.wait_for(paper_strategy_agent.start(), timeout=60.0)
-    except Exception as e:
-        logger.warning(f"NSE paper strategy agent start degraded: {e}")
-    try:
-        await asyncio.wait_for(commodity_strategy_agent.start(), timeout=60.0)
-    except Exception as e:
-        logger.warning(f"Commodity strategy agent start degraded: {e}")
-    try:
-        await bootstrap_paper_trading_runtime()
-    except Exception as e:
-        logger.warning(f"Paper bootstrap skipped: {e}")
+    # ── STRATEGY plane: own-loop agents + RL trainer ─────────────────────────
+    if boots_strategies():
+        # WS-0.5c — bound these starts so a hang can't block the process from ever
+        # becoming healthy. They normally just spawn background loops and return fast.
+        try:
+            await asyncio.wait_for(paper_strategy_agent.start(), timeout=60.0)
+        except Exception as e:
+            logger.warning(f"NSE paper strategy agent start degraded: {e}")
+        try:
+            await asyncio.wait_for(commodity_strategy_agent.start(), timeout=60.0)
+        except Exception as e:
+            logger.warning(f"Commodity strategy agent start degraded: {e}")
+        try:
+            await bootstrap_paper_trading_runtime()
+        except Exception as e:
+            logger.warning(f"Paper bootstrap skipped: {e}")
 
-    # Load RL Q-table cache into memory (non-fatal if table doesn't exist yet)
-    try:
-        from auction_intelligence.rl.policy import rl_policy
-        await rl_policy.load_cache()
-        logger.info("✓ RL Q-table cache loaded")
-    except Exception as e:
-        logger.warning(f"RL Q-table cache load skipped: {e}")
-    try:
-        await rl_auto_trainer.start()
-        logger.info("✓ RL auto-trainer scheduled")
-    except Exception as e:
-        logger.warning(f"RL auto-trainer start skipped: {e}")
+        # Load RL Q-table cache into memory (non-fatal if table doesn't exist yet)
+        try:
+            from auction_intelligence.rl.policy import rl_policy
+            await rl_policy.load_cache()
+            logger.info("✓ RL Q-table cache loaded")
+        except Exception as e:
+            logger.warning(f"RL Q-table cache load skipped: {e}")
+        try:
+            await rl_auto_trainer.start()
+            logger.info("✓ RL auto-trainer scheduled")
+        except Exception as e:
+            logger.warning(f"RL auto-trainer start skipped: {e}")
     try:
         await market_hours_paper_supervisor.start()
         logger.info("✓ Market-hours paper supervisor started")
     except Exception as e:
         logger.warning(f"Market-hours paper supervisor start skipped: {e}")
 
-    # P2 streaming: option WS subscription manager. Computes the ATM
-    # option symbol set every 5 min and reconciles against data_router's
-    # current subscriptions. DRY-RUN by default — set
-    # OPTION_WS_SUBSCRIPTIONS_ENABLED=true to actually subscribe.
-    try:
-        from market_data.option_subscription_manager import run_subscription_loop, _is_enabled
-        option_ws_task = asyncio.create_task(
-            run_subscription_loop(),
-            name="option-ws-subscription-manager",
-        )
-        mode = "ACTIVE" if _is_enabled() else "DRY-RUN"
-        logger.info(f"✓ Option WS subscription manager started ({mode})")
-    except Exception as e:
-        logger.warning(f"Option WS subscription manager start skipped: {e}")
-        option_ws_task = None
+    # ── CORE plane: WS subscription managers + data-maintenance daemons ─────
+    option_ws_task = None
+    held_position_ws_task = None
+    commodity_mark_task = None
+    if boots_core():
+        # P2 streaming: option WS subscription manager. Computes the ATM
+        # option symbol set every 5 min and reconciles against data_router's
+        # current subscriptions. DRY-RUN by default — set
+        # OPTION_WS_SUBSCRIPTIONS_ENABLED=true to actually subscribe.
+        try:
+            from market_data.option_subscription_manager import run_subscription_loop, _is_enabled
+            option_ws_task = asyncio.create_task(
+                run_subscription_loop(),
+                name="option-ws-subscription-manager",
+            )
+            mode = "ACTIVE" if _is_enabled() else "DRY-RUN"
+            logger.info(f"✓ Option WS subscription manager started ({mode})")
+        except Exception as e:
+            logger.warning(f"Option WS subscription manager start skipped: {e}")
+            option_ws_task = None
 
-    # Keep open-position option legs subscribed so the dashboard's P&L marks
-    # stream per-tick instead of per-60s-scan. Registers each leg's feed
-    # symbol with market_data.live_marks for the WS overlay.
-    try:
-        from market_data.option_subscription_manager import run_held_position_subscription_loop
-        held_position_ws_task = asyncio.create_task(
-            run_held_position_subscription_loop(),
-            name="held-position-subscription-refresh",
-        )
-        logger.info("✓ Held-position subscription refresh started")
-    except Exception as e:
-        logger.warning(f"Held-position subscription refresh start skipped: {e}")
-        held_position_ws_task = None
+        # Keep open-position option legs subscribed so the dashboard's P&L marks
+        # stream per-tick instead of per-60s-scan. Registers each leg's feed
+        # symbol with market_data.live_marks for the WS overlay.
+        try:
+            from market_data.option_subscription_manager import run_held_position_subscription_loop
+            held_position_ws_task = asyncio.create_task(
+                run_held_position_subscription_loop(),
+                name="held-position-subscription-refresh",
+            )
+            logger.info("✓ Held-position subscription refresh started")
+        except Exception as e:
+            logger.warning(f"Held-position subscription refresh start skipped: {e}")
+            held_position_ws_task = None
 
-    # MCX futures have no WS feed; bridge a fast REST LTP poll into the tick
-    # hot-cache so commodity position marks stream at ~12s instead of 60s.
-    try:
-        from market_data.option_subscription_manager import run_commodity_mark_refresh_loop
-        commodity_mark_task = asyncio.create_task(
-            run_commodity_mark_refresh_loop(),
-            name="commodity-mark-refresh",
-        )
-        logger.info("✓ Commodity mark refresh started")
-    except Exception as e:
-        logger.warning(f"Commodity mark refresh start skipped: {e}")
-        commodity_mark_task = None
+        # MCX futures have no WS feed; bridge a fast REST LTP poll into the tick
+        # hot-cache so commodity position marks stream at ~12s instead of 60s.
+        try:
+            from market_data.option_subscription_manager import run_commodity_mark_refresh_loop
+            commodity_mark_task = asyncio.create_task(
+                run_commodity_mark_refresh_loop(),
+                name="commodity-mark-refresh",
+            )
+            logger.info("✓ Commodity mark refresh started")
+        except Exception as e:
+            logger.warning(f"Commodity mark refresh start skipped: {e}")
+            commodity_mark_task = None
 
-    if settings.RESEARCH_SYNC_EMBEDDED_ENABLED:
+    if settings.RESEARCH_SYNC_EMBEDDED_ENABLED and boots_core():
         async def _embedded_research_sync_worker() -> None:
             try:
                 from data.run_upstox_research_sync import run_daemon_from_env
@@ -307,7 +332,7 @@ async def lifespan(app: FastAPI):
     # MACD diffusion: hourly CE/PE-above-zero breadth snapshot (market sentiment),
     # seeded from option_premium_candles at startup. Lightweight; gated ON.
     macd_diffusion_task = None
-    if settings.MACD_DIFFUSION_ENABLED:
+    if settings.MACD_DIFFUSION_ENABLED and boots_core():
         async def _macd_diffusion_worker() -> None:
             try:
                 from market_data.macd_diffusion import run_daemon
@@ -329,7 +354,7 @@ async def lifespan(app: FastAPI):
     # onto greeks-null index option candles — restores what the dead 2026-06-23
     # Fyers greeks writer filled, at zero broker cost. Lightweight; gated ON.
     greeks_enrich_task = None
-    if settings.GREEKS_ENRICHMENT_ENABLED:
+    if settings.GREEKS_ENRICHMENT_ENABLED and boots_core():
         async def _greeks_enrichment_worker() -> None:
             try:
                 from market_data.greeks_enrichment import run_daemon as run_greeks_enrichment
@@ -349,7 +374,7 @@ async def lifespan(app: FastAPI):
 
     # F1 feed: full-universe option-chain → 3m CE+PE OHLC (S1's headline feed).
     # Gated OFF by default; the poll self-staggers through FYERS_DATA_LIMITER.
-    if settings.CHAIN_CANDLE_BUILDER_ENABLED:
+    if settings.CHAIN_CANDLE_BUILDER_ENABLED and boots_core():
         try:
             from market_data.chain_candle_builder import chain_candle_builder
             await chain_candle_builder.start()
@@ -400,20 +425,22 @@ async def lifespan(app: FastAPI):
                 pass
             except Exception as _exc:  # noqa: BLE001
                 logger.debug(f"shutdown: {_name} task stop error: {_exc}")
-    if settings.CHAIN_CANDLE_BUILDER_ENABLED:
+    if settings.CHAIN_CANDLE_BUILDER_ENABLED and boots_core():
         try:
             from market_data.chain_candle_builder import chain_candle_builder
             await chain_candle_builder.stop()
         except Exception:
             pass
     await market_hours_paper_supervisor.stop()
-    await rl_auto_trainer.stop()
-    await paper_strategy_agent.stop()
-    await commodity_strategy_agent.stop()
-    await live_candle_store.stop()
-    from market_data.quote_bus import quote_bus
-    await quote_bus.stop()
-    await market_data_router.stop_mock_feed()
+    if boots_strategies():
+        await rl_auto_trainer.stop()
+        await paper_strategy_agent.stop()
+        await commodity_strategy_agent.stop()
+    if boots_core():
+        await live_candle_store.stop()
+        from market_data.quote_bus import quote_bus
+        await quote_bus.stop()
+        await market_data_router.stop_mock_feed()
     await close_redis()
     await market_data_router.unsubscribe()
     try:

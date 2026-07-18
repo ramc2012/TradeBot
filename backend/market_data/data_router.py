@@ -167,6 +167,24 @@ class DataRouter:
         return out
 
     async def subscribe(self, symbols: List[str]):
+        # Phase-1 process split: the strategy plane must NEVER open the broker
+        # WS — the core plane owns the ONE Fyers socket. This single public
+        # chokepoint also covers add/remove_subscriptions, the required-feed
+        # watchdog reopen, the auth-restore/token-callback resync
+        # (api/routers/auth._sync_market_data_feed), and the option WS
+        # subscription manager. get_live_mark's Redis tick:* fallback and all
+        # REST paths stay fully live for the strategy plane. Inert when
+        # LANESET=all (boots_core() is True).
+        from core.laneset import boots_core
+
+        if not boots_core():
+            if not getattr(self, "_laneset_ws_gate_logged", False):
+                self._laneset_ws_gate_logged = True
+                logger.info(
+                    "[DataRouter] LANESET=strategies — broker WS subscribe suppressed; "
+                    "this plane reads ticks/marks from Redis tick:* / quotes:bus"
+                )
+            return
         async with self._subscription_lock:
             await self._subscribe_unlocked(symbols)
 

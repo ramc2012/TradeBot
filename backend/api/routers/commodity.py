@@ -164,11 +164,20 @@ async def commodity_overview():
 
 @router.post("/strategy-agent/start")
 async def start_commodity_strategy_agent():
+    # Split boot: starting the commodity loop on the CORE plane would run the
+    # agent in the WRONG process (it lives in backend-strategies) → 409.
+    # Inert when LANESET=all.
+    from core.laneset import require_strategy_plane
+
+    require_strategy_plane("commodity strategy-agent start")
     return await commodity_strategy_agent.start_loop()
 
 
 @router.post("/strategy-agent/run-once")
 async def run_commodity_strategy_once(force: bool = True):
+    from core.laneset import require_strategy_plane
+
+    require_strategy_plane("commodity strategy-agent run-once")
     return await commodity_strategy_agent.run_once(force=force)
 
 

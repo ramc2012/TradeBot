@@ -486,10 +486,35 @@ def parse_first_json(text_body: str):
 # ── Process-global shared limiters ────────────────────────────────────────────
 # Set a hair under the hard caps to leave headroom for clock skew + the trading
 # (order/position) endpoints that share the same Fyers REST budget.
+#
+# Phase-1 process split (2026-07-18): these limiters are PER-PROCESS, so a
+# split boot's two planes could jointly reach ~2× the per-token caps.
+# BROKER_REST_BUDGET_FRACTION scales each window/day count down to this
+# plane's share (split compose profile: core=0.6, strategies=0.4). Default
+# 1.0 returns the input unchanged — provable no-op for the single-process
+# boot. Phase 2 replaces this with a shared Redis token bucket.
+
+
+def _budget_scaled(count: int | None) -> int | None:
+    if count is None:
+        return None
+    try:
+        from core.config import settings
+
+        fraction = float(getattr(settings, "BROKER_REST_BUDGET_FRACTION", 1.0) or 1.0)
+    except Exception:  # noqa: BLE001 — a config problem must never break the limiter
+        fraction = 1.0
+    if not (0.0 < fraction < 1.0):
+        return count
+    return max(1, int(count * fraction))
+
+
 FYERS_DATA_LIMITER = AsyncRateLimiter(
-    windows=[(9, 1.0), (190, 60.0)], per_day=95_000, name="fyers-rest",
+    windows=[(_budget_scaled(9), 1.0), (_budget_scaled(190), 60.0)],
+    per_day=_budget_scaled(95_000), name="fyers-rest",
 )
 # Upstox: 50/s, 2000/30min. Keep well under both (8/s, 1800/30min) for off-hours backfill.
 UPSTOX_DATA_LIMITER = AsyncRateLimiter(
-    windows=[(8, 1.0), (1800, 1800.0)], per_day=None, name="upstox-rest",
+    windows=[(_budget_scaled(8), 1.0), (_budget_scaled(1800), 1800.0)],
+    per_day=None, name="upstox-rest",
 )

@@ -734,6 +734,12 @@ class PaperStrategyAgent(StrategyExitMixin, StrategyEntryMixin, BaseStrategyAgen
         self._closed_prep_done = False
         self._closed_prep_attempts = 0
         self._state_synced_at: Optional[datetime] = None
+        # Phase-1 process split (2026-07-18): scan-loop heartbeat persisted in
+        # the state blob so the CORE plane (which has no local loop task) can
+        # answer loop_active honestly from the store. Stamped by _loop each
+        # cycle; consulted by _loop_alive() ONLY in split boots.
+        self._loop_heartbeat_at: Optional[str] = None
+        self._last_store_refresh_at: Optional[datetime] = None
         saved_state, saved_updated_at = _load_saved_strategy_state()
         self._restore_saved_state(saved_state)
         self._state_synced_at = saved_updated_at
@@ -774,6 +780,12 @@ class PaperStrategyAgent(StrategyExitMixin, StrategyEntryMixin, BaseStrategyAgen
                     self._kill_switch_active,
                 )
             )
+            # Split seam: mirror the OTHER process's scan-loop heartbeat. Never
+            # regress our own fresher stamp (string ISO compare is safe for
+            # same-format IST timestamps; fall back to keeping the newer-none).
+            hb = control_payload.get("loop_heartbeat_at")
+            if hb and (not self._loop_heartbeat_at or str(hb) > str(self._loop_heartbeat_at)):
+                self._loop_heartbeat_at = str(hb)
         self._last_expiry = payload.get("last_expiry") or self._last_expiry
         self._last_candidate_expiries = [
             str(item)
@@ -970,6 +982,8 @@ class PaperStrategyAgent(StrategyExitMixin, StrategyEntryMixin, BaseStrategyAgen
                 "auto_run_enabled": self._auto_run_enabled,
                 "kill_switch_active": self._kill_switch_active,
                 "manual_restart_required": self._manual_restart_required,
+                # Split seam: lets the other process derive loop_active.
+                "loop_heartbeat_at": self._loop_heartbeat_at,
             },
             "commentary": [asdict(entry) for entry in self._commentary],
             "strategies": {
@@ -998,6 +1012,7 @@ class PaperStrategyAgent(StrategyExitMixin, StrategyEntryMixin, BaseStrategyAgen
             self._state_synced_at = updated_at
 
     def _refresh_state_from_store(self, *, force: bool = False) -> bool:
+        self._last_store_refresh_at = _now_ist()
         payload, updated_at = _load_saved_strategy_state_from_database()
         if payload is None:
             return False
@@ -1095,6 +1110,10 @@ class PaperStrategyAgent(StrategyExitMixin, StrategyEntryMixin, BaseStrategyAgen
             if not slow_lanes_enabled:
                 await asyncio.sleep(self.scan_interval_seconds)
                 continue
+            # Split seam: heartbeat for cross-process loop_active (persisted by
+            # run_once's per-scan _apersist_state). Harmless extra field when
+            # LANESET=all — nothing consults it in a single-process boot.
+            self._loop_heartbeat_at = _now_ist().isoformat()
             try:
                 with lane_broker_profile(LANE_PROFILE_SLOW):
                     await self.run_once(force=False)
@@ -2273,6 +2292,26 @@ class PaperStrategyAgent(StrategyExitMixin, StrategyEntryMixin, BaseStrategyAgen
     # ── Main Scan ────────────────────────────────────────────────────────────
 
     async def run_once(self, *, force: bool = False) -> dict[str, Any]:
+        # Phase-1 split control seam: in a split boot the CORE plane mutates
+        # control flags (kill switch / auto-run) via the shared state store —
+        # this loop never sees a local task cancel. Re-read the store at cycle
+        # start (one small DB row read per ~60s scan) and honor the flags.
+        # Strictly inert when LANESET=all. Known Phase-2 gap: a scan persisting
+        # between core's refresh→persist can clobber a concurrent control write
+        # (control flags move to their own store row in Phase 2).
+        from core.laneset import is_split as _laneset_is_split
+
+        if _laneset_is_split():
+            try:
+                self._refresh_state_from_store()
+            except Exception as exc:  # noqa: BLE001 — a store hiccup must not kill the loop
+                logger.debug(f"[Strategy] split-cycle store refresh failed: {exc}")
+            if not force and (
+                self._kill_switch_active
+                or self._manual_restart_required
+                or not self._auto_run_enabled
+            ):
+                return self.get_status(refresh=False)
         if self._lock.locked() and not force:
             return self.get_status()
 
@@ -5020,8 +5059,13 @@ class PaperStrategyAgent(StrategyExitMixin, StrategyEntryMixin, BaseStrategyAgen
         self._auto_run_enabled = bool(enabled)
         if self._auto_run_enabled:
             self._manual_restart_required = False
-            # Start background loop if not already running
-            if not self._task or self._task.done():
+            # Start background loop if not already running. Split boot: the
+            # CORE plane must never spawn the scan loop locally — the flag
+            # persists below and the strategy plane's idling loop resumes on
+            # its next cycle-start store refresh. Inert when LANESET=all.
+            from core.laneset import boots_strategies as _boots_strategies
+
+            if (not self._task or self._task.done()) and _boots_strategies():
                 self._task = asyncio.create_task(self._loop(), name="paper-strategy-agent")
             self._last_message = "Auto-run enabled. Agent will scan every 60 s during market hours."
             self._append_commentary("System", self._last_message, tone="success")
@@ -5039,6 +5083,30 @@ class PaperStrategyAgent(StrategyExitMixin, StrategyEntryMixin, BaseStrategyAgen
         self._persist_state()
         return self.get_control_state()
 
+    def _loop_alive(self) -> bool:
+        """loop_active across the process split.
+
+        Single-process (LANESET=all): EXACTLY the legacy local-task check —
+        the heartbeat is never consulted, so default behavior is unchanged.
+        Split boot: a process without the local task (the core plane) treats a
+        store heartbeat younger than 2× the scan interval as a live loop in
+        the strategy plane.
+        """
+        if self._task and not self._task.done():
+            return True
+        from core.laneset import is_split as _laneset_is_split
+
+        if not _laneset_is_split():
+            return False
+        heartbeat = _parse_iso_timestamp(self._loop_heartbeat_at)
+        if heartbeat is None:
+            return False
+        try:
+            age = (_now_ist() - heartbeat).total_seconds()
+        except TypeError:
+            return False
+        return -60.0 <= age <= 2.0 * float(self.scan_interval_seconds)
+
     def get_control_state(
         self,
         *,
@@ -5051,7 +5119,7 @@ class PaperStrategyAgent(StrategyExitMixin, StrategyEntryMixin, BaseStrategyAgen
             "auto_run_enabled": self._auto_run_enabled,
             "kill_switch_active": self._kill_switch_active,
             "manual_restart_required": self._manual_restart_required,
-            "loop_active": bool(self._task and not self._task.done()),
+            "loop_active": self._loop_alive(),
             "cancelled_orders": cancelled_orders,
             "closed_positions": closed_positions or [],
         }
@@ -5186,6 +5254,18 @@ class PaperStrategyAgent(StrategyExitMixin, StrategyEntryMixin, BaseStrategyAgen
         return lanes
 
     def get_status(self, *, refresh: bool = True) -> dict[str, Any]:
+        if not refresh:
+            # Split boot, CORE plane: refresh=False callers (e.g. the REST
+            # /strategy-agent/status) would otherwise serve whatever the last
+            # refresh=True call happened to load. Make the mirror deterministic:
+            # refresh anyway when the last store read is older than 5s. Inert
+            # when LANESET=all (is_core_only() is False).
+            from core.laneset import is_core_only as _laneset_is_core_only
+
+            if _laneset_is_core_only():
+                last = self._last_store_refresh_at
+                if last is None or (_now_ist() - last).total_seconds() > 5.0:
+                    refresh = True
         if refresh:
             self._refresh_state_from_store()
         next_scan_at = None
@@ -5202,7 +5282,7 @@ class PaperStrategyAgent(StrategyExitMixin, StrategyEntryMixin, BaseStrategyAgen
             "auto_run_enabled": self._auto_run_enabled,
             "kill_switch_active": self._kill_switch_active,
             "manual_restart_required": self._manual_restart_required,
-            "loop_active": bool(self._task and not self._task.done()),
+            "loop_active": self._loop_alive(),
             "running": self._running,
             "scan_interval_seconds": self.scan_interval_seconds,
             "last_run_at": self._last_run_at,

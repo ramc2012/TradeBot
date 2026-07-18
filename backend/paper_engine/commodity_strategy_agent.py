@@ -350,6 +350,8 @@ def _default_saved_state() -> dict[str, Any]:
             "last_run_at": None,
             "last_error": None,
             "last_message": None,
+            # Phase-1 split seam: scan-loop heartbeat for cross-process loop_active.
+            "loop_heartbeat_at": None,
         },
         "runtime": {
             "watchlist": [],
@@ -405,6 +407,7 @@ def _normalize_saved_state(payload: Optional[dict[str, Any]]) -> dict[str, Any]:
         "last_run_at": control_payload.get("last_run_at"),
         "last_error": control_payload.get("last_error"),
         "last_message": control_payload.get("last_message"),
+        "loop_heartbeat_at": control_payload.get("loop_heartbeat_at"),
     }
     runtime_state = default_state["runtime"]
     runtime_state["watchlist"] = [
@@ -1078,6 +1081,9 @@ class CommodityStrategyAgent(BaseStrategyAgent):
         self._commentary: list[CommodityCommentaryEntry] = []
         self._state_synced_at: Optional[datetime] = None
         self._fyers_ltp_backoff_until: Optional[datetime] = None
+        # Phase-1 split seam: scan-loop heartbeat persisted in the control blob
+        # so the CORE plane can derive loop_active without the local task.
+        self._loop_heartbeat_at: Optional[str] = None
         self._apply_saved_state(saved_state)
         self._state_synced_at = saved_updated_at
         self._persist_state()
@@ -1092,6 +1098,11 @@ class CommodityStrategyAgent(BaseStrategyAgent):
         self._start_required = bool(saved_control.get("start_required", self._kill_switch_active))
         self._manual_restart_required = bool(saved_control.get("manual_restart_required", self._start_required))
         self._last_run_at = saved_control.get("last_run_at")
+        # Split seam: mirror the other process's loop heartbeat; never regress
+        # our own fresher stamp (ISO strings of the same format sort correctly).
+        hb = saved_control.get("loop_heartbeat_at")
+        if hb and (not getattr(self, "_loop_heartbeat_at", None) or str(hb) > str(self._loop_heartbeat_at)):
+            self._loop_heartbeat_at = str(hb)
         self._last_error = saved_control.get("last_error")
         self._last_message = (
             saved_control.get("last_message")
@@ -1138,7 +1149,14 @@ class CommodityStrategyAgent(BaseStrategyAgent):
             and updated_at <= self._state_synced_at
         ):
             return False
-        self._apply_saved_state(saved_state, preserve_runtime=self._loop_active())
+        # preserve_runtime protects the LOCAL running loop's authority over its
+        # own in-memory positions — it must key off the local task only. (The
+        # split-aware _loop_active() would wrongly return True on the CORE
+        # plane via the foreign heartbeat and freeze core's mirrored runtime.)
+        self._apply_saved_state(
+            saved_state,
+            preserve_runtime=bool(self._task is not None and not self._task.done()),
+        )
         if updated_at is not None:
             self._state_synced_at = updated_at
         return True
@@ -1332,6 +1350,7 @@ class CommodityStrategyAgent(BaseStrategyAgent):
                 "last_run_at": self._last_run_at,
                 "last_error": self._last_error,
                 "last_message": self._last_message,
+                "loop_heartbeat_at": self._loop_heartbeat_at,
             },
             "runtime": {
                 "watchlist": list(self._runtime.futures_watchlist),
@@ -1388,7 +1407,23 @@ class CommodityStrategyAgent(BaseStrategyAgent):
         self._state_synced_at = updated_at or self._state_synced_at
 
     def _loop_active(self) -> bool:
-        return self._task is not None and not self._task.done()
+        if self._task is not None and not self._task.done():
+            return True
+        # Split boot only: the CORE plane (no local task) derives loop_active
+        # from the strategy plane's persisted heartbeat. Never consulted when
+        # LANESET=all — legacy local-task semantics stay byte-identical.
+        from core.laneset import is_split as _laneset_is_split
+
+        if not _laneset_is_split():
+            return False
+        heartbeat = _parse_iso_timestamp(self._loop_heartbeat_at)
+        if heartbeat is None:
+            return False
+        try:
+            age = (_now_ist() - heartbeat).total_seconds()
+        except TypeError:
+            return False
+        return -60.0 <= age <= 2.0 * float(self.scan_interval_seconds)
 
     async def _stop_loop(self) -> None:
         task = self._task
@@ -1434,7 +1469,13 @@ class CommodityStrategyAgent(BaseStrategyAgent):
         self._last_error = None
         if self._symbols:
             self._last_message = "Commodity agent running continuously."
-        self._task = asyncio.create_task(self._loop(), name="commodity-strategy-agent")
+        # Split boot: the CORE plane must never spawn the commodity loop —
+        # control flags persist below and the strategy plane owns the task.
+        # Inert when LANESET=all.
+        from core.laneset import boots_strategies as _boots_strategies
+
+        if _boots_strategies():
+            self._task = asyncio.create_task(self._loop(), name="commodity-strategy-agent")
         self._persist_state()
 
     async def stop(self) -> None:
@@ -2229,6 +2270,9 @@ class CommodityStrategyAgent(BaseStrategyAgent):
                 if not lane_gate_open:
                     await asyncio.sleep(self.scan_interval_seconds)
                     continue
+                # Split seam: heartbeat for cross-process loop_active (persisted
+                # by run_once's per-scan state save). Inert when LANESET=all.
+                self._loop_heartbeat_at = _now_ist().isoformat()
                 scan_timeout_seconds = self._scan_timeout_seconds()
                 try:
                     with lane_broker_profile(profile):

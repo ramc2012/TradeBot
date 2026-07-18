@@ -155,6 +155,13 @@ class RunnerConfig:
     # profile is a provable no-op while the flag is off. See
     # market_data.source_policy.route_order and brokers.rate_limiter.
     broker_profile: str = "default"
+    # Phase-1 process split (2026-07-18): which boot plane owns this runner.
+    # "core" = data-plane/auth/freshness runners (MI watchlist build, token
+    # readiness, option-flow watchdog) that live with the WS/watchlist plane;
+    # "strategies" (default) = every trading lane. Only consulted when
+    # LANESET != "all" — the default single-process boot schedules ALL runners
+    # exactly as today.
+    plane: str = "strategies"
 
 
 @dataclass
@@ -389,9 +396,19 @@ class MarketHoursPaperSupervisor:
         # 15:35 re-fired the whole catch-up batch (observed 3× on 2026-07-15).
         # None (the default, used by tests) keeps the state in-memory only.
         self._catchup_state_path = catchup_state_path
+        # Phase-1 process split: which plane THIS supervisor instance schedules.
+        # "all" (default) keeps every runner — byte-identical scheduling. In a
+        # split boot each plane keeps only its own runners and mirrors the
+        # other plane's runner status via Redis (see _publish_plane_status).
+        from core.laneset import normalized_laneset
+
+        self._laneset = normalized_laneset()
+        self._foreign_plane_status: dict[str, Any] | None = None
         self._runners: dict[str, RunnerRuntime] = {
             runner.key: RunnerRuntime(config=runner)
             for runner in (runners or self._default_runners())
+            if self._laneset == "all"
+            or str(getattr(runner, "plane", "strategies") or "strategies") == self._laneset
         }
         self._load_catchup_state()
 
@@ -1112,6 +1129,9 @@ class MarketHoursPaperSupervisor:
                 next_open_fn=_next_nse_market_open,
                 # A stall watcher has nothing to catch up after the close.
                 post_close_catchup=False,
+                # Data-plane freshness monitor — watches option_premium_candles
+                # persistence, which the CORE plane's feed pipeline owns.
+                plane="core",
             ),
             RunnerConfig(
                 key="token_readiness",
@@ -1127,6 +1147,8 @@ class MarketHoursPaperSupervisor:
                 # Observed running post-close 3× on 2026-07-15 via the generic
                 # catch-up path; this pins it to its pre-open window only.
                 post_close_catchup=False,
+                # Auth/token plumbing lives with the broker-session owner (core).
+                plane="core",
             ),
             RunnerConfig(
                 key="market_intelligence",
@@ -1135,6 +1157,9 @@ class MarketHoursPaperSupervisor:
                 callback=_market_intelligence_runner,
                 broker_profile="slow",
                 enabled=settings.MARKET_INTELLIGENCE_AUTO_ENABLED,
+                # The dominant SLOW-quota watchlist/chain REST consumer stays
+                # with the WS/watchlist (core) plane per the Friday study.
+                plane="core",
             ),
             RunnerConfig(
                 key="auction_intelligence",
@@ -1439,6 +1464,10 @@ class MarketHoursPaperSupervisor:
             while True:
                 # Dispatch only: no lane is allowed to hold the scheduler clock.
                 await self._schedule_due_once()
+                # Split boot only: mirror this plane's runner status to Redis and
+                # cache the other plane's snapshot for merged status endpoints.
+                # No-op (not even a Redis call) when LANESET=all.
+                await self._publish_plane_status()
                 now = self._now_fn()
                 enabled_runners = [
                     runtime for runtime in self._runners.values()
@@ -1874,11 +1903,79 @@ class MarketHoursPaperSupervisor:
             "at": now,
         }
 
+    # ── Phase-1 split: cross-plane status mirroring (Redis) ──────────────────
+    # Each plane's supervisor publishes its own get_status() payload to
+    # supervisor:status:{laneset} every scheduler pass and caches the OTHER
+    # plane's snapshot, so the status endpoints (which only core serves to the
+    # UI) can present a MERGED runner map without touching api/routers/system.py.
+    _PLANE_STATUS_KEY_PREFIX = "supervisor:status:"
+    _PLANE_STATUS_TTL_SECONDS = 600
+
+    async def _publish_plane_status(self) -> None:
+        if self._laneset == "all":
+            return
+        try:
+            from db.redis_client import get_redis
+
+            redis = await get_redis()
+            payload = self.get_status(merge_foreign=False)
+            payload["plane"] = self._laneset
+            payload["published_at"] = self._now_fn().isoformat()
+            await redis.set(
+                f"{self._PLANE_STATUS_KEY_PREFIX}{self._laneset}",
+                json.dumps(payload, default=str),
+                ex=self._PLANE_STATUS_TTL_SECONDS,
+            )
+            other = "core" if self._laneset == "strategies" else "strategies"
+            raw = await redis.get(f"{self._PLANE_STATUS_KEY_PREFIX}{other}")
+            if raw:
+                self._foreign_plane_status = json.loads(
+                    raw.decode() if isinstance(raw, (bytes, bytearray)) else raw
+                )
+            else:
+                self._foreign_plane_status = None
+        except Exception as exc:  # noqa: BLE001 — status mirroring is best-effort
+            logger.debug("[MarketHoursSupervisor] plane status publish failed: {}", exc)
+
+    def _foreign_runner_entries(self, now: datetime) -> dict[str, dict[str, Any]]:
+        """The other plane's runner payloads, staleness-tagged. {} when not split."""
+        if self._laneset == "all":
+            return {}
+        foreign = self._foreign_plane_status or {}
+        runners = foreign.get("runners")
+        if not isinstance(runners, dict):
+            return {}
+        age_seconds: float | None = None
+        published_raw = foreign.get("published_at")
+        if published_raw:
+            try:
+                published_at = datetime.fromisoformat(str(published_raw))
+                age_seconds = round((now - published_at).total_seconds(), 1)
+            except (TypeError, ValueError):
+                age_seconds = None
+        plane = str(foreign.get("plane") or "unknown")
+        out: dict[str, dict[str, Any]] = {}
+        for key, item in runners.items():
+            if not isinstance(item, dict):
+                continue
+            out[str(key)] = {
+                **item,
+                "plane": plane,
+                "foreign": True,
+                "snapshot_age_seconds": age_seconds,
+                # The foreign snapshot's own loop_active refers to THAT process.
+                "snapshot_stale": bool(age_seconds is None or age_seconds > 180.0),
+            }
+        return out
+
     def get_runner_status(self, key: str) -> dict[str, Any]:
         now = self._now_fn()
         runtime = self._runners.get(key)
         loop_active = bool(self._task and not self._task.done())
         if runtime is None:
+            foreign = self._foreign_runner_entries(now).get(key)
+            if foreign is not None:
+                return foreign
             return {
                 "key": key,
                 "enabled": False,
@@ -1905,7 +2002,7 @@ class MarketHoursPaperSupervisor:
     def _runtime_next_open(self, runtime: RunnerRuntime, now: datetime) -> datetime:
         return self._runtime_next_open_fn(runtime)(now)
 
-    def get_status(self) -> dict[str, Any]:
+    def get_status(self, *, merge_foreign: bool = True) -> dict[str, Any]:
         now = self._now_fn()
         market_open = self._market_hours_fn(now)
         next_open = self._next_open_fn(now)
@@ -1919,6 +2016,12 @@ class MarketHoursPaperSupervisor:
             )
             for key, runtime in self._runners.items()
         }
+        # Split boot: overlay the OTHER plane's runners (staleness-tagged) so
+        # the existing status endpoints keep showing the full 17-runner map.
+        # No-op when LANESET=all (payload stays byte-identical).
+        if merge_foreign and self._laneset != "all":
+            for key, item in self._foreign_runner_entries(now).items():
+                runners.setdefault(key, item)
         any_runner_market_open = any(
             self._runtime_market_open(runtime, now)
             for runtime in self._runners.values()
@@ -1932,6 +2035,9 @@ class MarketHoursPaperSupervisor:
         )
         stale_runner_count = sum(1 for item in runners.values() if item.get("stale"))
         return {
+            # `laneset` appears ONLY in split boots so the LANESET=all payload
+            # stays byte-identical to the pre-split shape.
+            **({"laneset": self._laneset} if self._laneset != "all" else {}),
             "enabled": self._enabled,
             "loop_active": loop_active,
             "market_open": market_open,
@@ -1949,6 +2055,27 @@ class MarketHoursPaperSupervisor:
 # The live singleton persists its post-close catch-up markers so a backend
 # restart after 15:35 IST cannot re-run the "once per session" passes. Tests
 # construct their own instances without a path (in-memory only).
-_CATCHUP_STATE_PATH = Path(__file__).resolve().parents[1] / "runtime" / "supervisor" / "post_close_catchup.json"
+#
+# Phase-1 split: the runtime/ dir is bind-mounted into BOTH containers, so each
+# plane gets its OWN marker file (post_close_catchup.{laneset}.json) — two
+# supervisors last-writer-wins clobbering one JSON would re-fire "once per
+# session" passes. LANESET=all keeps the exact legacy path.
+
+
+def catchup_state_path_for(laneset: str) -> Path:
+    base = Path(__file__).resolve().parents[1] / "runtime" / "supervisor"
+    ls = str(laneset or "all").strip().lower()
+    if ls in ("core", "strategies"):
+        return base / f"post_close_catchup.{ls}.json"
+    return base / "post_close_catchup.json"
+
+
+def _singleton_catchup_state_path() -> Path:
+    from core.laneset import normalized_laneset
+
+    return catchup_state_path_for(normalized_laneset())
+
+
+_CATCHUP_STATE_PATH = _singleton_catchup_state_path()
 
 market_hours_paper_supervisor = MarketHoursPaperSupervisor(catchup_state_path=_CATCHUP_STATE_PATH)

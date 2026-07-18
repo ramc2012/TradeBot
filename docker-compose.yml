@@ -66,6 +66,13 @@ services:
       RESEARCH_SYNC_EMBEDDED_ENABLED: ${RESEARCH_SYNC_EMBEDDED_ENABLED:-false}
       BACKEND_CORS_ORIGINS: '${BACKEND_CORS_ORIGINS:-["http://localhost:3000","http://127.0.0.1:3000"]}'
       BACKEND_CORS_ORIGIN_REGEX: "${BACKEND_CORS_ORIGIN_REGEX:-^https?://[^/]+(:[0-9]+)?$}"
+      # Phase-1 process split (opt-in). Default `docker compose up` keeps this
+      # single all-in-one backend (LANESET=all → byte-identical boot). To split:
+      #   LANESET=core BROKER_REST_BUDGET_FRACTION=0.6 \
+      #     docker compose --profile split up -d backend backend-strategies
+      # Rollback: `docker compose up -d backend` with LANESET unset.
+      LANESET: ${LANESET:-all}
+      BROKER_REST_BUDGET_FRACTION: ${BROKER_REST_BUDGET_FRACTION:-1.0}
     volumes:
       - ./backend:/app
       # MACD Refined research dataset and live catalog/lot-size lookup.
@@ -88,6 +95,59 @@ services:
     command: >
       sh -c "python scripts/wait_for_db.py &&
              alembic upgrade head &&
+             uvicorn main:app --host 0.0.0.0 --port 8000"
+    restart: unless-stopped
+
+  # ── Phase-1 process split: strategy plane (opt-in via `--profile split`) ──
+  # Same image + bind mounts as `backend`, but LANESET=strategies boots ONLY
+  # the strategy runners + own-loop agents. It never opens a broker WS (the
+  # core plane owns the ONE Fyers socket); ticks/marks come from the shared
+  # Redis (tick:*/quotes:bus) and PG. No published port — its /health stays on
+  # the internal Docker network, so the frontend keeps talking to the ONE core
+  # backend. Its own healthcheck + restart policy give per-plane autoheal: a
+  # strategy stall restarts THIS container only; quotes/marks/API unaffected.
+  # Default `docker compose up` ignores this service entirely (profiles).
+  backend-strategies:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: nomadcurie_backend_strategies
+    profiles: ["split"]
+    env_file:
+      - .env
+    environment:
+      APP_ENV: production
+      DATABASE_URL: postgresql+asyncpg://nomadcurie:nomadcurie@db:5432/nomadcurie
+      REDIS_URL: redis://redis:6379/0
+      APP_TOKEN_AUTH_ENABLED: ${APP_TOKEN_AUTH_ENABLED:-false}
+      APP_WRITE_TOKEN: ${APP_WRITE_TOKEN:-}
+      RESEARCH_SYNC_AUTO_ENABLED: ${RESEARCH_SYNC_AUTO_ENABLED:-true}
+      RESEARCH_SYNC_EMBEDDED_ENABLED: "false"
+      BACKEND_CORS_ORIGINS: '${BACKEND_CORS_ORIGINS:-["http://localhost:3000","http://127.0.0.1:3000"]}'
+      BACKEND_CORS_ORIGIN_REGEX: "${BACKEND_CORS_ORIGIN_REGEX:-^https?://[^/]+(:[0-9]+)?$}"
+      # Hard-set (not env-substituted): this service IS the strategy plane.
+      LANESET: strategies
+      # Phase-1 REST budget share (core=0.6 / strategies=0.4); Phase 2 replaces
+      # the static fractions with a shared Redis token bucket.
+      BROKER_REST_BUDGET_FRACTION: "0.4"
+    volumes:
+      - ./backend:/app
+      - ./data:/data:ro
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 150s
+    # No alembic here — the CORE backend owns migrations (avoids a two-process
+    # migration race on `--profile split up`).
+    command: >
+      sh -c "python scripts/wait_for_db.py &&
              uvicorn main:app --host 0.0.0.0 --port 8000"
     restart: unless-stopped
 
