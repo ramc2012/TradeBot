@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 import asyncio
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any
 
 from loguru import logger
@@ -29,6 +29,7 @@ _PERSIST_LOCKS: dict[tuple[str, str], asyncio.Lock] = {}
 # Track the latest in-DB time per (instrument_key, interval) once observed,
 # so subsequent calls only insert genuinely new rows without re-querying.
 _LATEST_PERSISTED: dict[tuple[str, str], datetime] = {}
+_RECENT_REPAIR_WINDOW = timedelta(hours=3)
 
 
 def _parse_time(value: Any) -> datetime | None:
@@ -101,6 +102,7 @@ async def _persist_commodity_spot_rows(
                 _LATEST_PERSISTED[cache_key] = latest_known or datetime.min.replace(tzinfo=UTC)
                 latest_known = _LATEST_PERSISTED[cache_key]
 
+            repair_cutoff = latest_known - _RECENT_REPAIR_WINDOW
             payload: list[dict[str, Any]] = []
             newest_seen = latest_known
             for row in rows:
@@ -108,8 +110,9 @@ async def _persist_commodity_spot_rows(
                 if ts is None:
                     continue
                 ts = ts.astimezone(UTC)
-                # Only insert rows strictly newer than what we've already persisted.
-                if latest_known is not None and ts <= latest_known:
+                # Re-upsert a bounded recent window so small holes behind the tip
+                # can self-heal on later reads without replaying the full lookback.
+                if latest_known is not None and ts <= repair_cutoff:
                     continue
                 close = row.get("close")
                 try:
