@@ -20,7 +20,7 @@
  */
 import { useMemo } from "react";
 import { useQuery } from "@tanstack/react-query";
-import { Activity, LayoutGrid, ListChecks, Map as MapIcon, ShieldCheck } from "lucide-react";
+import { LayoutGrid, ListChecks, Map as MapIcon, Network, ShieldCheck } from "lucide-react";
 
 import {
   DeskShell,
@@ -41,6 +41,7 @@ import { api as apiClient } from "@/lib/api";
 import type { Snapshot as AuctionSnapshot } from "@/components/strategies/auction/types";
 
 import { LaneSummaryCard } from "./LaneSummaryCard";
+import { LaneInventoryTab } from "./LaneInventoryTab";
 import { SignalBoardTab } from "./SignalBoardTab";
 import { MarketStructureTab } from "./MarketStructureTab";
 import { SignalQualityTab } from "./SignalQualityTab";
@@ -54,6 +55,7 @@ import {
 
 const TABS = [
   { key: "overview", label: "Overview", icon: LayoutGrid },
+  { key: "inventory", label: "Lane inventory", icon: Network },
   { key: "signals", label: "Signals", icon: ListChecks },
   { key: "signal-quality", label: "Signal quality", icon: ShieldCheck },
   { key: "market-structure", label: "Market structure", icon: MapIcon },
@@ -488,7 +490,7 @@ export default function StrategiesOverviewDesk() {
         />
       }
     >
-      {activeTab !== "signal-quality" ? (
+      {activeTab !== "signal-quality" && activeTab !== "inventory" ? (
         <section className="grid grid-cols-2 gap-3 md:grid-cols-4">
           <MetricTile
             label="Lanes running"
@@ -513,6 +515,8 @@ export default function StrategiesOverviewDesk() {
           ))}
         </section>
       ) : null}
+
+      {activeTab === "inventory" ? <LaneInventoryTab /> : null}
 
       {activeTab === "signals" ? <SignalBoardTab lanes={lanes} /> : null}
 
