@@ -32,6 +32,17 @@ IST = timezone(timedelta(hours=5, minutes=30))
 LATEST_TICK_KEY_PREFIX = "tick:"
 LATEST_TICK_TTL_SECONDS = 300
 
+# Redis P0 (2026-07-18): tick → Redis fan-out is COALESCED. The old path spawned
+# one asyncio task per tick, each doing a publish + SET on its own pooled
+# connection; during event-loop stalls thousands of tasks piled up and demanded
+# the whole pool at once ("Too many connections", 5662/24h on 07-17). Now ticks
+# land in a last-write-wins pending map and ONE pipeline per flush window writes
+# every changed symbol (publish ticks:{sym} + SET tick:{sym}). 150ms matches the
+# quote_bus coalesce window, so per-symbol subscribers and the hot-cache carry
+# the same worst-case added latency the terminal tape already accepts — bounded,
+# and far inside the 300s staleness budgets of every tick:* consumer.
+TICK_FLUSH_INTERVAL_SECONDS = 0.15
+
 
 class DataRouter:
     """
@@ -79,6 +90,12 @@ class DataRouter:
         self._callbacks: Dict[str, List[Callable[[Tick], None]]] = {}
         self._global_callbacks: List[Callable[[Tick], None]] = []
         self._tick_buffer: Dict[str, Tick] = {}  # latest tick per symbol
+        # Redis P0: last-write-wins staging map for the coalesced Redis flusher
+        # (see TICK_FLUSH_INTERVAL_SECONDS). Written synchronously from the tick
+        # thread (dict item assignment is atomic under the GIL); drained by
+        # _redis_flush_loop on the event loop.
+        self._pending_redis_ticks: Dict[str, Tick] = {}
+        self._redis_flush_task: Optional[asyncio.Task] = None
         self._depth_refs: Dict[str, int] = {}  # ref-counted DepthUpdate subscriptions
         self._tbt_client: Any = None  # Phase 6 — lazily-created TBT 50-level socket
         self._mock_task: Optional[asyncio.Task] = None
@@ -445,6 +462,9 @@ class DataRouter:
         # subsequently quiet: without clearing both caches, that bad mark stays
         # on screen for the full Redis TTL.
         self._tick_buffer.clear()
+        # Also drop any staged-but-unflushed ticks: a retired symbol's pending
+        # entry must not resurrect its tick:{symbol} key after the delete below.
+        self._pending_redis_ticks.clear()
         if retired_symbols:
             try:
                 redis = await get_redis()
@@ -563,46 +583,87 @@ class DataRouter:
                 cb(tick)
             except Exception as e:
                 logger.error(f"[DataRouter] Global callback error for {tick.symbol}: {e}")
-        # Fyers websocket callbacks can arrive on a non-async thread.
-        try:
-            running_loop = asyncio.get_running_loop()
-        except RuntimeError:
-            running_loop = None
-        if running_loop and running_loop is self._loop:
-            asyncio.create_task(self._publish_tick(tick))
-        elif self._loop and self._loop.is_running():
-            asyncio.run_coroutine_threadsafe(self._publish_tick(tick), self._loop)
+        # Redis P0: NO per-tick task/publish — stage for the coalesced flusher.
+        # Fyers websocket callbacks can arrive on a non-async thread; the dict
+        # write below is thread-safe (atomic under the GIL) and the flusher task
+        # is only ever (re)started on the event-loop thread.
+        self._pending_redis_ticks[tick.symbol] = tick
+        if self._redis_flush_task is None or self._redis_flush_task.done():
+            try:
+                running_loop = asyncio.get_running_loop()
+            except RuntimeError:
+                running_loop = None
+            if running_loop and running_loop is self._loop:
+                self._ensure_redis_flusher()
+            elif self._loop and self._loop.is_running():
+                self._loop.call_soon_threadsafe(self._ensure_redis_flusher)
 
-    async def _publish_tick(self, tick: Tick):
+    def _ensure_redis_flusher(self) -> None:
+        """Start the coalesced Redis tick flusher (event-loop thread only)."""
+        if self._redis_flush_task is not None and not self._redis_flush_task.done():
+            return
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            return
+        self._redis_flush_task = loop.create_task(self._redis_flush_loop())
+
+    async def _redis_flush_loop(self) -> None:
+        try:
+            while True:
+                await asyncio.sleep(TICK_FLUSH_INTERVAL_SECONDS)
+                await self._flush_pending_ticks()
+        except asyncio.CancelledError:
+            pass
+
+    async def _flush_pending_ticks(self) -> None:
+        """Write every pending symbol to Redis in ONE pipeline round-trip.
+
+        Per symbol (latest value wins within the window):
+          (1) publish ticks:{symbol} — per-symbol pub/sub fan-out for live WS
+              subscribers (payload schema unchanged from the per-tick era).
+          (2) SET tick:{symbol} — last-value hot-cache. Unlike pub/sub this
+              survives between ticks so late subscribers and *other processes*
+              (workers, supervisors, the positions WS) can read the latest mark
+              without the process-local _tick_buffer.
+        """
+        if not self._pending_redis_ticks:
+            return
+        # Swap out the batch atomically (rebind, don't mutate) — ticks landing
+        # mid-flush go to the fresh map and ride the next window.
+        batch = self._pending_redis_ticks
+        self._pending_redis_ticks = {}
         try:
             redis = await get_redis()
-            timestamp = self._ensure_utc_timestamp(tick.timestamp)
-            payload = json.dumps({
-                "symbol": tick.symbol,
-                "ltp": tick.ltp,
-                "open": tick.open,
-                "high": tick.high,
-                "low": tick.low,
-                "close": tick.close,
-                "volume": tick.volume,
-                "oi": tick.oi,
-                "bid": tick.bid,
-                "ask": tick.ask,
-                "timestamp": timestamp.isoformat(),
-            })
-            # (1) pub/sub fan-out for live WS subscribers (fire-and-forget).
-            await redis.publish(f"ticks:{tick.symbol}", payload)
-            # (2) last-value hot-cache. Unlike pub/sub, this survives between
-            # ticks so late subscribers and *other processes* (workers,
-            # supervisors, the positions WS) can read the latest mark without
-            # depending on the process-local _tick_buffer.
-            await redis.set(
-                f"{LATEST_TICK_KEY_PREFIX}{tick.symbol}",
-                payload,
-                ex=LATEST_TICK_TTL_SECONDS,
-            )
+            pipe = redis.pipeline(transaction=False)
+            for symbol, tick in batch.items():
+                payload = self._tick_payload(tick)
+                pipe.publish(f"ticks:{symbol}", payload)
+                pipe.set(
+                    f"{LATEST_TICK_KEY_PREFIX}{symbol}",
+                    payload,
+                    ex=LATEST_TICK_TTL_SECONDS,
+                )
+            await pipe.execute()
         except Exception as e:
-            logger.debug(f"[DataRouter] Redis publish error: {e}")
+            logger.debug(f"[DataRouter] Redis tick flush error: {e}")
+
+    def _tick_payload(self, tick: Tick) -> str:
+        """Serialize a tick to the wire/cache JSON (schema is a consumer contract)."""
+        timestamp = self._ensure_utc_timestamp(tick.timestamp)
+        return json.dumps({
+            "symbol": tick.symbol,
+            "ltp": tick.ltp,
+            "open": tick.open,
+            "high": tick.high,
+            "low": tick.low,
+            "close": tick.close,
+            "volume": tick.volume,
+            "oi": tick.oi,
+            "bid": tick.bid,
+            "ask": tick.ask,
+            "timestamp": timestamp.isoformat(),
+        })
 
     # ── Depth (5-level DOM ladder) ───────────────────────────────────────────
     def _on_depth(self, depth: dict):

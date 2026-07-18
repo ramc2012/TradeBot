@@ -1175,3 +1175,29 @@ async def rate_budget_status() -> dict[str, Any]:
     except Exception:  # noqa: BLE001
         pass
     return payload
+
+
+@router.get("/pools")
+async def connection_pools() -> dict[str, Any]:
+    """Connection-pool telemetry (Redis P0, 2026-07-18).
+
+    Redis: both bounded blocking pools (command + pub/sub) with in_use /
+    available / max plus wait-and-timeout counters — makes Monday-open
+    connection demand observable instead of a mystery "Too many connections"
+    storm. Postgres: the SQLAlchemy engine pool's checked-out/size/overflow.
+    """
+    from db.database import engine
+    from db.redis_client import redis_pool_stats
+
+    payload: dict[str, Any] = {"redis": redis_pool_stats()}
+    try:
+        pool = engine.pool
+        payload["database"] = {
+            "size": pool.size(),
+            "checked_out": pool.checkedout(),
+            "checked_in": pool.checkedin(),
+            "overflow": pool.overflow(),
+        }
+    except Exception as exc:  # noqa: BLE001 — telemetry must never 500
+        payload["database"] = {"error": str(exc)}
+    return payload

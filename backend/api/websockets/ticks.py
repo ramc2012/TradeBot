@@ -13,7 +13,11 @@ from loguru import logger
 from starlette.websockets import WebSocketState
 
 from api.routers.auth import authenticate_websocket_client
-from db.redis_client import get_redis
+# Redis P0 (2026-07-18): WS subscribers acquire their pub/sub connections from
+# the DEDICATED pub/sub pool (get_redis_pubsub) so long-lived per-client
+# subscriber connections can never starve command/publish traffic on the
+# command pool (and vice versa). _close_pubsub remains the release path.
+from db.redis_client import get_redis_pubsub
 
 
 @dataclass
@@ -111,7 +115,7 @@ async def ws_ticks(websocket: WebSocket, symbol: str):
     await _accept_authenticated_socket(websocket, f"ticks:{symbol}")
     pubsub = None
     try:
-        redis = await get_redis()
+        redis = await get_redis_pubsub()
         pubsub = redis.pubsub()
         await pubsub.subscribe(f"ticks:{symbol}")
     except Exception as exc:
@@ -624,7 +628,7 @@ async def ws_positions_overview(websocket: WebSocket):
 
     pubsub = None
     try:
-        redis = await get_redis()
+        redis = await get_redis_pubsub()
         pubsub = redis.pubsub()
         await pubsub.subscribe(QUOTES_BUS_CHANNEL)
     except Exception as exc:  # noqa: BLE001 — degrade to a timer loop
@@ -935,7 +939,7 @@ async def ws_quotes(websocket: WebSocket):
 
     pubsub = None
     try:
-        redis = await get_redis()
+        redis = await get_redis_pubsub()
         pubsub = redis.pubsub()
         await pubsub.subscribe(QUOTES_BUS_CHANNEL)
     except Exception as exc:  # noqa: BLE001 — Redis down → degrade, don't blackout
@@ -983,7 +987,7 @@ async def ws_depth(websocket: WebSocket, symbol: str):
 
     pubsub = None
     try:
-        redis = await get_redis()
+        redis = await get_redis_pubsub()
         pubsub = redis.pubsub()
         await pubsub.subscribe(f"depth:{symbol}")
     except Exception as exc:  # noqa: BLE001
@@ -1026,7 +1030,7 @@ async def ws_proposals(websocket: WebSocket):
     await _accept_authenticated_socket(websocket, "proposals")
     pubsub = None
     try:
-        redis = await get_redis()
+        redis = await get_redis_pubsub()
         pubsub = redis.pubsub()
         await pubsub.subscribe("proposals")
     except Exception as exc:  # B3: init was previously unguarded → a subscribe() failure leaked the conn
