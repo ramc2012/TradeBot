@@ -63,6 +63,22 @@ _fyers_token_health_cache: dict = {
     "checked_at": None,
     "result": None,
 }
+# Negative-readiness backoff cache. Once a broker's saved session is known
+# expired-and-unrefreshable, we mark it here so subsequent readiness checks
+# short-circuit the refresh attempt (no DB reload, no network) and emit at most
+# one throttled log line per BROKER_NEGATIVE_READINESS_BACKOFF_SECONDS window.
+# Cleared whenever a fresh token is persisted (see the token-health reset
+# helpers), which is exactly the owner-supplies-a-new-token moment.
+_fyers_negative_readiness: dict = {
+    "blocked_until": None,
+    "marked_at": None,
+    "last_logged": None,
+}
+_upstox_negative_readiness: dict = {
+    "blocked_until": None,
+    "marked_at": None,
+    "last_logged": None,
+}
 IST = timezone(timedelta(hours=5, minutes=30))
 BROKER_STATUS_ORDER = ("fyers", "upstox", "icici_breeze", "fivepaisa")
 BROKER_STATUS_LABELS = {
@@ -312,6 +328,45 @@ def _persist_credentials(creds: dict) -> None:
     _save_credentials_to_database(creds)
 
 
+def _reset_negative_readiness(cache: dict) -> None:
+    """Clear a broker's negative-readiness backoff (owner supplied a new token)."""
+    cache.update(
+        {
+            "blocked_until": None,
+            "marked_at": None,
+            "last_logged": None,
+        }
+    )
+
+
+def _negative_readiness_active(cache: dict) -> bool:
+    """True while a broker is inside its known-unrefreshable backoff window."""
+    until = cache.get("blocked_until")
+    return isinstance(until, datetime) and datetime.now(timezone.utc) < until
+
+
+def _mark_negative_readiness(cache: dict) -> None:
+    """Open (or extend) the backoff window after a confirmed dead-end refresh."""
+    backoff = int(getattr(settings, "BROKER_NEGATIVE_READINESS_BACKOFF_SECONDS", 300) or 0)
+    if backoff <= 0:
+        # Backoff disabled — never suppress; each check behaves as before.
+        return
+    now = datetime.now(timezone.utc)
+    cache["marked_at"] = now
+    cache["blocked_until"] = now + timedelta(seconds=backoff)
+
+
+def _negative_readiness_should_log(cache: dict) -> bool:
+    """Throttle the backoff log to one line per backoff window."""
+    backoff = int(getattr(settings, "BROKER_NEGATIVE_READINESS_BACKOFF_SECONDS", 300) or 0)
+    now = datetime.now(timezone.utc)
+    last = cache.get("last_logged")
+    if isinstance(last, datetime) and now - last < timedelta(seconds=max(backoff, 1)):
+        return False
+    cache["last_logged"] = now
+    return True
+
+
 def _reset_upstox_token_health_cache() -> None:
     _upstox_token_health_cache.update(
         {
@@ -320,6 +375,7 @@ def _reset_upstox_token_health_cache() -> None:
             "result": None,
         }
     )
+    _reset_negative_readiness(_upstox_negative_readiness)
 
 
 def _reset_fyers_token_health_cache() -> None:
@@ -330,6 +386,7 @@ def _reset_fyers_token_health_cache() -> None:
             "result": None,
         }
     )
+    _reset_negative_readiness(_fyers_negative_readiness)
 
 
 def _cached_token_health_invalid(cache: dict, token: str) -> bool:
@@ -810,11 +867,34 @@ def _has_saved_fyers_refresh_material() -> bool:
 
 
 async def _refresh_fyers_session_from_saved_credentials() -> bool:
+    # Negative-readiness gate: once Fyers is known expired-and-unrefreshable we
+    # stop re-attempting the refresh entirely — no forced DB/disk credential
+    # reload, no network — until a fresh token is persisted (which clears the
+    # backoff via _reset_fyers_token_health_cache). Under the SEBI daily-OAuth
+    # flow there is no durable refresh material, so without this gate every
+    # readiness check (~45x/10min, doubling under the process split) burned a
+    # forced credential reload and emitted a warning line for nothing.
+    if _negative_readiness_active(_fyers_negative_readiness):
+        if _negative_readiness_should_log(_fyers_negative_readiness):
+            logger.info(
+                "[Fyers] Session known expired-and-unrefreshable — suppressing "
+                "refresh attempts until the owner supplies a fresh daily token"
+            )
+        return False
     await refresh_persistent_credentials_async(force=True)
     fyers_creds = _broker_credentials.get("fyers", {})
     refresh_token = str(fyers_creds.get("refresh_token") or "").strip()
     pin = str(fyers_creds.get("pin") or settings.FYERS_PIN or "").strip()
     if not _has_saved_fyers_refresh_material():
+        # No refresh material (SEBI daily-OAuth). This is a hard dead end until
+        # the owner reconnects — open the backoff so we don't keep reloading
+        # credentials and re-checking on every readiness sweep.
+        _mark_negative_readiness(_fyers_negative_readiness)
+        if _negative_readiness_should_log(_fyers_negative_readiness):
+            logger.info(
+                "[Fyers] No refresh material for saved session — refresh "
+                "attempts suppressed until the owner supplies a fresh token"
+            )
         return False
     try:
         from brokers.fyers import FyersAdapter
@@ -836,6 +916,9 @@ async def _refresh_fyers_session_from_saved_credentials() -> bool:
         return True
     except Exception as exc:
         logger.warning(f"Fyers refresh-token restore failed: {exc}")
+        # A failed exchange (bad/expired refresh material, broker down) is also
+        # a dead end for the window — back off instead of retrying every check.
+        _mark_negative_readiness(_fyers_negative_readiness)
         return False
 
 

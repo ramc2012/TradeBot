@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import json
 import random
+import threading
 from datetime import datetime, time, timedelta, timezone
 from typing import Any, Callable, Dict, List, Optional
 
@@ -91,9 +92,16 @@ class DataRouter:
         self._global_callbacks: List[Callable[[Tick], None]] = []
         self._tick_buffer: Dict[str, Tick] = {}  # latest tick per symbol
         # Redis P0: last-write-wins staging map for the coalesced Redis flusher
-        # (see TICK_FLUSH_INTERVAL_SECONDS). Written synchronously from the tick
-        # thread (dict item assignment is atomic under the GIL); drained by
-        # _redis_flush_loop on the event loop.
+        # (see TICK_FLUSH_INTERVAL_SECONDS). Broker SDK callbacks stage ticks
+        # from a NON-event-loop thread while _redis_flush_loop (on the loop
+        # thread) swaps the map out to drain it. Individual dict writes are
+        # atomic under the GIL, but the flusher's swap-then-iterate handoff is
+        # NOT atomic against a concurrent insert — that race could drop a tick
+        # or raise "dict changed size during iteration". _redis_ticks_lock makes
+        # every stage/swap/clear on the map mutually exclusive so no write is
+        # ever lost or interleaved with the swap. The lock is held only for the
+        # O(1) map handoff, never across the Redis pipeline round-trip.
+        self._redis_ticks_lock = threading.Lock()
         self._pending_redis_ticks: Dict[str, Tick] = {}
         self._redis_flush_task: Optional[asyncio.Task] = None
         self._depth_refs: Dict[str, int] = {}  # ref-counted DepthUpdate subscriptions
@@ -482,7 +490,10 @@ class DataRouter:
         self._tick_buffer.clear()
         # Also drop any staged-but-unflushed ticks: a retired symbol's pending
         # entry must not resurrect its tick:{symbol} key after the delete below.
-        self._pending_redis_ticks.clear()
+        # Clear under the staging lock so we don't race a producer insert or the
+        # flusher's swap.
+        with self._redis_ticks_lock:
+            self._pending_redis_ticks.clear()
         if retired_symbols:
             try:
                 redis = await get_redis()
@@ -602,10 +613,12 @@ class DataRouter:
             except Exception as e:
                 logger.error(f"[DataRouter] Global callback error for {tick.symbol}: {e}")
         # Redis P0: NO per-tick task/publish — stage for the coalesced flusher.
-        # Fyers websocket callbacks can arrive on a non-async thread; the dict
-        # write below is thread-safe (atomic under the GIL) and the flusher task
-        # is only ever (re)started on the event-loop thread.
-        self._pending_redis_ticks[tick.symbol] = tick
+        # Fyers websocket callbacks can arrive on a non-async thread; hold the
+        # staging lock so this insert can never interleave with the flusher's
+        # swap (last-write-wins per symbol within the 150ms window). The flusher
+        # task is only ever (re)started on the event-loop thread.
+        with self._redis_ticks_lock:
+            self._pending_redis_ticks[tick.symbol] = tick
         if self._redis_flush_task is None or self._redis_flush_task.done():
             try:
                 running_loop = asyncio.get_running_loop()
@@ -645,12 +658,16 @@ class DataRouter:
               (workers, supervisors, the positions WS) can read the latest mark
               without the process-local _tick_buffer.
         """
-        if not self._pending_redis_ticks:
-            return
-        # Swap out the batch atomically (rebind, don't mutate) — ticks landing
-        # mid-flush go to the fresh map and ride the next window.
-        batch = self._pending_redis_ticks
-        self._pending_redis_ticks = {}
+        # Swap out the batch under the staging lock so a producer insert on the
+        # broker-callback thread cannot land between the read and the rebind
+        # (which would silently drop that tick) or mutate the map we are about
+        # to iterate. Ticks arriving AFTER the swap go to the fresh map and ride
+        # the next window; the lock is released before the Redis round-trip.
+        with self._redis_ticks_lock:
+            if not self._pending_redis_ticks:
+                return
+            batch = self._pending_redis_ticks
+            self._pending_redis_ticks = {}
         try:
             redis = await get_redis()
             pipe = redis.pipeline(transaction=False)

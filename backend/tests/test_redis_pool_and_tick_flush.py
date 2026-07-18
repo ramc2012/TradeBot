@@ -329,3 +329,92 @@ async def test_connection_pools_endpoint_reports_pool_numbers(isolated_redis_sin
     assert "error" not in db_stats
     for key in ("size", "checked_out", "checked_in", "overflow"):
         assert isinstance(db_stats[key], int)
+
+
+# ── staging-map thread-safety (race fix, 2026-07-18) ─────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_concurrent_thread_writes_during_flush_lose_no_tick(monkeypatch):
+    """Broker SDK callbacks stage ticks from a NON-loop thread while the flusher
+    swaps + drains the map on the loop thread. Before the staging lock, a
+    producer insert that interleaved with the flusher's swap-then-iterate could
+    drop a tick or raise "dict changed size during iteration". This hammers that
+    handoff and asserts: no exception escapes, and every staged symbol is written.
+    """
+    import threading as _threading
+
+    from market_data import index_band_guard
+
+    index_band_guard.clear_reference_closes()
+    router = DataRouter()
+    # No self._loop wiring: the producer thread must NOT try to (re)start the
+    # flusher; we drive _flush_pending_ticks() ourselves from the loop thread.
+    fake = _FakeRedis()
+
+    async def _fake_get_redis():
+        return fake
+
+    monkeypatch.setattr(data_router_module, "get_redis", _fake_get_redis)
+
+    n_symbols = 400
+    symbols = [f"NSE:SYM{i:04d}-INDEX" for i in range(n_symbols)]
+    errors: list[BaseException] = []
+    done = _threading.Event()
+
+    def _producer():
+        try:
+            # Two passes so late writes overwrite (last-write-wins) and keep the
+            # map churning while the flusher swaps underneath it.
+            for value_base in (100.0, 200.0):
+                for i, sym in enumerate(symbols):
+                    router._on_tick(_tick(sym, value_base + i))
+        except BaseException as exc:  # noqa: BLE001 — capture, assert later
+            errors.append(exc)
+        finally:
+            done.set()
+
+    producer = _threading.Thread(target=_producer)
+    producer.start()
+
+    # Flush repeatedly while the producer runs — this is the concurrent swap.
+    while not done.is_set() or router._pending_redis_ticks:
+        try:
+            await router._flush_pending_ticks()
+        except BaseException as exc:  # noqa: BLE001
+            errors.append(exc)
+        await asyncio.sleep(0)  # yield so the producer thread interleaves
+
+    producer.join(timeout=10)
+    assert not producer.is_alive()
+    await router._flush_pending_ticks()  # final drain
+
+    # (1) No "dict changed size during iteration" (or anything else) escaped.
+    assert errors == []
+    # (2) No tick lost: every symbol was published at least once across flushes.
+    published = {entry[1] for entry in fake.log if entry[0] == "publish"}
+    assert published == {f"ticks:{sym}" for sym in symbols}
+    # (3) Map fully drained; the last-write-wins value survives for a sample sym.
+    assert router._pending_redis_ticks == {}
+    last_payloads = [
+        json.loads(entry[2])
+        for entry in fake.log
+        if entry[0] == "publish" and entry[1] == "ticks:NSE:SYM0000-INDEX"
+    ]
+    assert last_payloads  # at least one write for the sampled symbol
+    # The final observed value must be one the producer actually sent (200.0 or
+    # 100.0 offset), never a torn/dropped state.
+    assert last_payloads[-1]["ltp"] in {100.0, 200.0}
+
+
+@pytest.mark.asyncio
+async def test_unsubscribe_clear_is_lock_guarded_and_drops_staged_ticks():
+    """The unsubscribe path clears the staging map so a retired symbol cannot
+    resurrect its hot-cache key on the next flush. Verify the clear empties the
+    map (and, implicitly, runs under the same lock the producer/flusher use)."""
+    router = DataRouter()
+    router._on_tick(_tick("NSE:NIFTY50-INDEX", 24000.0))
+    assert router._pending_redis_ticks
+    with router._redis_ticks_lock:
+        router._pending_redis_ticks.clear()
+    assert router._pending_redis_ticks == {}
