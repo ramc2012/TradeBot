@@ -108,6 +108,10 @@ services:
   # strategy stall restarts THIS container only; quotes/marks/API unaffected.
   # Default `docker compose up` ignores this service entirely (profiles).
   backend-strategies:
+    # Same IMAGE as the core backend (one image, two boot planes). Referencing
+    # the built tag directly lets `up backend-strategies` reuse it without a
+    # rebuild — the code arrives via the same ./backend bind mount anyway.
+    image: tradebot-backend:latest
     build:
       context: ./backend
       dockerfile: Dockerfile
