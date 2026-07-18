@@ -666,6 +666,7 @@ async def _build_instrument_payload(
     *,
     intervals: list[int],
     history_sessions: int,
+    include_timeframes: bool = True,
 ) -> dict[str, Any]:
     request = snapshot.get("request") or {}
     metadata = request.get("metadata") or {}
@@ -717,17 +718,24 @@ async def _build_instrument_payload(
         or symbol == "CRUDEOIL"
         or no_real_microstructure
     )
-    try:
-        timeframes, history_meta = await _build_timeframe_history(
-            symbol,
-            tick_size=tick_size,
-            flow_bias=flow_bias,
-            intervals=intervals,
-            history_sessions=history_sessions,
-        )
-    except Exception as exc:
+    if include_timeframes:
+        try:
+            timeframes, history_meta = await _build_timeframe_history(
+                symbol,
+                tick_size=tick_size,
+                flow_bias=flow_bias,
+                intervals=intervals,
+                history_sessions=history_sessions,
+            )
+        except Exception as exc:
+            timeframes = {}
+            history_meta = {"error": str(exc)}
+    else:
+        # The multi-timeframe history is ~99% of the payload and unused by the
+        # workbench (footprint is built independently). Skip building it when the
+        # caller opts out — ~2MB → ~20KB per snapshot.
         timeframes = {}
-        history_meta = {"error": str(exc)}
+        history_meta = {"skipped": "include_timeframes=false"}
     return {
         "symbol": symbol,
         "display": str(config.get("display") or symbol),
@@ -796,7 +804,13 @@ async def _build_instrument_payload(
     }
 
 
-async def _load_symbol(symbol: str, *, intervals: list[int], history_sessions: int) -> dict[str, Any]:
+async def _load_symbol(
+    symbol: str,
+    *,
+    intervals: list[int],
+    history_sessions: int,
+    include_timeframes: bool = True,
+) -> dict[str, Any]:
     crude_tick_seed: dict[str, Any] | None = None
     if symbol == "CRUDEOIL":
         try:
@@ -819,6 +833,7 @@ async def _load_symbol(symbol: str, *, intervals: list[int], history_sessions: i
         snapshot,
         intervals=intervals,
         history_sessions=history_sessions,
+        include_timeframes=include_timeframes,
     )
     if crude_tick_seed is not None:
         payload["crude_tick_seed"] = crude_tick_seed
@@ -871,6 +886,11 @@ async def orderflow_snapshot(
         description="Comma separated chart intervals in minutes. Supported: 3,5,15,30.",
     ),
     history_sessions: int = Query(default=5, ge=1, le=8),
+    include_timeframes: bool = Query(
+        default=True,
+        description="Include the multi-timeframe footprint history. Set false to "
+        "omit it (~99% of the payload) when only the live snapshot is needed.",
+    ),
 ) -> dict[str, Any]:
     requested_symbols = _parse_symbols(symbols)
     requested_intervals = _parse_intervals(intervals)
@@ -880,6 +900,7 @@ async def orderflow_snapshot(
                 symbol,
                 intervals=requested_intervals,
                 history_sessions=history_sessions,
+                include_timeframes=include_timeframes,
             )
             for symbol in requested_symbols
         )

@@ -20,12 +20,25 @@ from zoneinfo import ZoneInfo
 from fastapi import APIRouter, HTTPException, Query
 from sqlalchemy import text
 
+from loguru import logger
+
 from analysis.macd_engine import compute_macd
 from analytics.technicals import compute_rsi
 from db.database import AsyncSessionLocal
+from market_data import index_band_guard
 
 
 router = APIRouter(prefix="/api/charts", tags=["charts"])
+
+# Secondary continuity net for the chart serve path. After the absolute /
+# prior-session band pass (index_band_guard), a surviving bar whose worst leg
+# deviates more than this fraction from the robust session center (median of
+# surviving closes) is dropped. This catches the same-2x contamination family
+# (e.g. a 48545 close on ~24000 NIFTY) even when the ±20% reference could not be
+# seeded because of a DB blip — 48545 sits *inside* NIFTY's wide absolute band
+# so the band alone would pass it. 0.30 is far outside any real intraday (or
+# even circuit-halt) move for a broad index, so no valid bar is ever dropped.
+_CHART_CONTINUITY_TOL = 0.30
 
 IST = ZoneInfo("Asia/Kolkata")
 
@@ -298,6 +311,79 @@ def _aggregate_to_timeframe(
     return [buckets[start] for start in sorted(order)]
 
 
+def _guard_rows(
+    app_symbol: str | None,
+    rows: list[dict[str, Any]],
+    *,
+    underlying: str,
+) -> list[dict[str, Any]]:
+    """Drop cross-symbol-contaminated bars before they reach the chart axis.
+
+    Non-guarded symbols (stocks/commodities/anything ``app_symbol`` is None for)
+    pass through untouched — matching ``index_band_guard.is_guarded`` semantics.
+
+    For a guarded index this runs two nets, log-then-drop only (never a repair /
+    fabricate):
+
+      1. The shipped absolute + ±REL_TOL band (``check_ohlc``), which tests every
+         O/H/L/C leg. Requires the ±20% reference to have been seeded upstream to
+         catch in-band contamination like a ``48545`` close.
+      2. A continuity net keyed on the median of surviving closes, as a secondary
+         guard for the 2x family in case the reference could not be seeded.
+
+    Read-path only — no DB writes. Immediately collapses a poisoned 24k-57k axis
+    back to a clean ~24k axis for every client.
+    """
+    if not app_symbol:
+        return rows
+
+    kept: list[dict[str, Any]] = []
+    for row in rows:
+        o, h, l, c = row.get("open"), row.get("high"), row.get("low"), row.get("close")
+        if index_band_guard.check_ohlc(app_symbol, o, h, l, c):
+            kept.append(row)
+        else:
+            logger.warning(
+                "[charts] dropped out-of-band {} bar t={} o={} h={} l={} c={}",
+                underlying,
+                row.get("time"),
+                o,
+                h,
+                l,
+                c,
+            )
+
+    # Continuity net — robust center from the band-survivors' closes.
+    closes = sorted(
+        float(r["close"])
+        for r in kept
+        if r.get("close") not in (None, "") and float(r.get("close") or 0.0) > 0
+    )
+    if len(closes) >= 3:
+        center = closes[len(closes) // 2]
+        if center > 0:
+            survivors: list[dict[str, Any]] = []
+            for row in kept:
+                legs = [
+                    float(v)
+                    for v in (row.get("open"), row.get("high"), row.get("low"), row.get("close"))
+                    if v not in (None, "") and float(v or 0.0) > 0
+                ]
+                worst = max((abs(v - center) / center for v in legs), default=0.0)
+                if worst > _CHART_CONTINUITY_TOL:
+                    logger.warning(
+                        "[charts] dropped discontinuous {} bar t={} legs={} center={:.1f}",
+                        underlying,
+                        row.get("time"),
+                        legs,
+                        center,
+                    )
+                    continue
+                survivors.append(row)
+            return survivors
+    return kept
+
+
 async def _load_underlying_spot(
     underlying: str,
     lookback_sessions: int,
@@ -312,6 +398,13 @@ async def _load_underlying_spot(
     # Pull enough 1-min history to cover the lookback in trading hours. ~7
     # hours/day = 420 bars/day; pad to cover weekends.
     days_back = max(lookback_sessions * 2 + 7, 14)
+    # Seed the ±20% prior-session reference (TTL-gated, cheap) so the band guard
+    # below can catch in-band cross-symbol contamination (e.g. a 48545 close on
+    # ~24000 NIFTY, which sits inside the wide absolute band). None for stocks /
+    # commodities — those pass through the guard untouched.
+    app_symbol = index_band_guard.app_symbol_for_underlying(underlying)
+    if app_symbol:
+        await index_band_guard.maybe_refresh_reference_closes()
     async with AsyncSessionLocal() as session:
         # First try the native timeframe if it's already stored.
         result = await session.execute(
@@ -327,7 +420,11 @@ async def _load_underlying_spot(
             ),
             {"underlying": underlying, "interval": timeframe, "days": days_back},
         )
-        rows = [dict(row._mapping) for row in result.fetchall()]
+        rows = _guard_rows(
+            app_symbol,
+            [dict(row._mapping) for row in result.fetchall()],
+            underlying=underlying,
+        )
         if len(rows) >= 30:
             # Even pre-aggregated rows can include after-hours synthetic
             # ticks — filter to session before returning.
@@ -347,7 +444,11 @@ async def _load_underlying_spot(
             ),
             {"underlying": underlying, "days": days_back},
         )
-        one_min_rows = [dict(row._mapping) for row in result.fetchall()]
+        one_min_rows = _guard_rows(
+            app_symbol,
+            [dict(row._mapping) for row in result.fetchall()],
+            underlying=underlying,
+        )
     return _aggregate_to_timeframe(one_min_rows, minutes, market=market)
 
 

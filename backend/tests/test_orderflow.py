@@ -254,3 +254,62 @@ def test_orderflow_snapshot_handles_empty():
     assert snap["cvd_latest"] is None
     assert snap["vwap_latest"] is None
     assert snap["hvn_count"] == 0
+
+
+# ─── include_timeframes payload-slim (defect 4a) ────────────────────────────
+
+import asyncio  # noqa: E402
+
+from api.routers import orderflow as of_router  # noqa: E402
+
+
+def _min_snapshot() -> dict:
+    """Minimal snapshot dict shaped like build_live_analysis output."""
+    return {
+        "request": {
+            "metadata": {"snapshot_time": "2026-07-18T12:20:00+05:30"},
+            "session": {"last_price": 24000.0},
+            "quote": {"last_price": 24000.0, "timestamp": "2026-07-18T12:20:00+05:30"},
+            "depth": {},
+            "trades": [],
+            "bars": [],
+        },
+        "analysis": {"order_flow": {}, "market_profile": {"open_price": 24000.0, "close_price": 24010.0}},
+        "session_date": "2026-07-18",
+    }
+
+
+def test_include_timeframes_false_skips_history_build(monkeypatch):
+    called = {"n": 0}
+
+    async def _fake_history(*args, **kwargs):
+        called["n"] += 1
+        return ({"30": {"footprint": list(range(1000))}}, {"built": True})
+
+    monkeypatch.setattr(of_router, "_build_timeframe_history", _fake_history)
+
+    payload = asyncio.run(
+        of_router._build_instrument_payload(
+            "NIFTY", _min_snapshot(), intervals=[30], history_sessions=1, include_timeframes=False
+        )
+    )
+    assert called["n"] == 0                      # history builder never invoked
+    assert payload["timeframes"] == {}           # empty, not the megabyte blob
+    assert payload["history"].get("skipped")     # reason recorded
+    # footprint (the rendered series) is still built independently of timeframes
+    assert "footprint" in payload
+
+
+def test_include_timeframes_true_builds_history(monkeypatch):
+    async def _fake_history(*args, **kwargs):
+        return ({"30": {"ok": True}}, {"built": True})
+
+    monkeypatch.setattr(of_router, "_build_timeframe_history", _fake_history)
+
+    payload = asyncio.run(
+        of_router._build_instrument_payload(
+            "NIFTY", _min_snapshot(), intervals=[30], history_sessions=1, include_timeframes=True
+        )
+    )
+    assert payload["timeframes"] == {"30": {"ok": True}}
+    assert payload["history"] == {"built": True}
