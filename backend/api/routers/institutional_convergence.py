@@ -14,6 +14,13 @@ async def status() -> dict:
     return await institutional_convergence_service.status()
 
 
+@router.get("/status/{symbol}")
+async def status_detail(symbol: str) -> dict:
+    """Full per-instrument detail (bars, footprint levels, TPO profile, CVD
+    series) the compact /status omits — one symbol at a time for the desk."""
+    return await institutional_convergence_service.status_detail(symbol)
+
+
 @router.get("/universe")
 async def universe() -> dict:
     return await institutional_convergence_service.build_universe()
@@ -57,6 +64,11 @@ from institutional_convergence.commodity import (  # noqa: E402
 @router.get("/commodity/status")
 async def commodity_status() -> dict:
     return await commodity_convergence_service.status()
+
+
+@router.get("/commodity/status/{symbol}")
+async def commodity_status_detail(symbol: str) -> dict:
+    return await commodity_convergence_service.status_detail(symbol)
 
 
 @router.get("/commodity/universe")

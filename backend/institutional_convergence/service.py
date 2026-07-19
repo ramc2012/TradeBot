@@ -16,7 +16,7 @@ from market_data import data_router as market_data_router
 from paper_engine.base_strategy_agent import _now_ist
 from sqlalchemy import text
 
-from .engine import evaluate_rules, tick_clock_drift_ms
+from .engine import compact_state, detail_result, evaluate_rules, tick_clock_drift_ms
 from .paper import convergence_paper_book
 
 
@@ -318,7 +318,11 @@ class InstitutionalConvergenceService:
         return payload
 
     async def status(self) -> dict[str, Any]:
-        state = self._load_state()
+        # Compact summary: per-instrument results are slimmed (heavy bars /
+        # footprint levels / TPO profile / CVD series dropped) so this hot-poll
+        # endpoint stays small. The desk fetches full detail for one selected
+        # instrument via /status/{symbol}. The persisted state stays full.
+        state = compact_state(self._load_state())
         universe = await self.build_universe()
         return {
             "key": "institutional_convergence",
@@ -330,6 +334,16 @@ class InstitutionalConvergenceService:
             "latest": state,
             "paper": convergence_paper_book.summary(),
             "paper_statistics": convergence_paper_book.statistics(),
+        }
+
+    async def status_detail(self, symbol: str) -> dict[str, Any]:
+        """Full detail (bars, footprint levels, profile, CVD series) for ONE
+        instrument — the heavy per-symbol payload the compact /status omits."""
+        state = self._load_state()
+        return {
+            "symbol": symbol,
+            "generated_at": state.get("generated_at") if isinstance(state, dict) else None,
+            "result": detail_result(state, symbol),
         }
 
 

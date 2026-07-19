@@ -41,7 +41,7 @@ from market_data.upstox_commodity import resolve_active_upstox_mcx_future
 from paper_engine.base_strategy_agent import _now_ist
 from sqlalchemy import text
 
-from .engine import evaluate_rules, tick_clock_drift_ms
+from .engine import compact_state, detail_result, evaluate_rules, tick_clock_drift_ms
 from .paper import ConvergencePaperBook
 
 
@@ -391,7 +391,9 @@ class CommodityConvergenceService:
         return payload
 
     async def status(self) -> dict[str, Any]:
-        state = self._load_state()
+        # Compact summary (see NSE service.status) — full detail per instrument
+        # is served by /commodity/status/{symbol}; state.json stays full.
+        state = compact_state(self._load_state())
         universe = await self.build_universe()
         return {
             "key": "institutional_convergence_commodity",
@@ -404,6 +406,16 @@ class CommodityConvergenceService:
             "latest": state,
             "paper": commodity_convergence_paper_book.summary(),
             "paper_statistics": commodity_convergence_paper_book.statistics(),
+        }
+
+    async def status_detail(self, symbol: str) -> dict[str, Any]:
+        """Full detail for ONE MCX instrument — heavy payload the compact
+        /commodity/status omits."""
+        state = self._load_state()
+        return {
+            "symbol": symbol,
+            "generated_at": state.get("generated_at") if isinstance(state, dict) else None,
+            "result": detail_result(state, symbol),
         }
 
 

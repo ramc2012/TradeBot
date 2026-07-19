@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 
@@ -657,3 +658,129 @@ def test_commodity_configured_roots_canonicalize_and_dedupe(monkeypatch) -> None
     assert roots[0] == "GOLD"
     assert "CRUDEOIL" in roots
     assert len([r for r in roots if r == "GOLD"]) == 1
+
+
+# ── Payload compaction (P0-cost: oversized /status payloads) ─────────────────
+
+from institutional_convergence.engine import (  # noqa: E402
+    compact_result,
+    compact_state,
+    detail_result,
+)
+
+
+def _heavy_result(symbol: str = "NIFTY") -> dict:
+    """A result carrying the four heavy keys the compact summary must drop."""
+    return {
+        "symbol": symbol,
+        "kind": "index",
+        "status": "watching",
+        "action": "FLAT",
+        "setup_state": "WATCHING",
+        "score": 42.0,
+        "confirmation_count": 1,
+        "confirmation_required": 2,
+        "blocked_reasons": ["safety"],
+        "long_gates": {"a": True},
+        "short_gates": {"b": False},
+        "long_confirmations": {"c": True},
+        "short_confirmations": {"d": False},
+        "options": {"expiry": "2026-07-31"},
+        "risk": {"entry": 100.0, "atr_3m": 5.0},
+        "vix": {"value": 12.0},
+        "tick_age_ms": 500,
+        "tick_freshness_limit_ms": 8000,
+        "profile": {"poc": 100.0, "vah": 105.0, "tpo_counts": list(range(500))},
+        "cvd": {
+            "source": "market_ticks",
+            "series": [{"time": f"t{i}", "cvd": i, "close": i} for i in range(300)],
+            "divergence": {"kind": "bullish", "strength": 0.4},
+        },
+        "footprint": {
+            "source": "market_ticks",
+            "long_ratio": 3.0,
+            "short_ratio": 0.5,
+            "tick_count": 1200,
+            "bars": [{"time": "t299", "delta": 5, "cumulative_delta": 5, "volume": 10, "levels": [{"price": 100, "buy": 6, "sell": 2}]}],
+        },
+    }
+
+
+def test_compact_result_drops_heavy_keys_and_keeps_summary_keys() -> None:
+    compact = compact_result(_heavy_result())
+    # Heavy keys are gone.
+    assert "profile" not in compact
+    assert "bars" not in compact
+    assert "series" not in compact["cvd"]
+    assert "bars" not in compact["footprint"]
+    # Small keys the overview matrix + gate tabs read survive untouched.
+    for key in (
+        "symbol", "setup_state", "action", "score", "confirmation_count",
+        "confirmation_required", "blocked_reasons", "long_gates", "short_gates",
+        "long_confirmations", "short_confirmations", "options", "risk", "vix",
+        "tick_age_ms", "tick_freshness_limit_ms",
+    ):
+        assert key in compact
+    # Compact freshness stubs replace the heavy structures.
+    assert compact["footprint"] == {
+        "source": "market_ticks",
+        "long_ratio": 3.0,
+        "short_ratio": 0.5,
+        "tick_count": 1200,
+        "last_bar_time": "t299",
+    }
+    assert compact["cvd"]["source"] == "market_ticks"
+    assert compact["cvd"]["divergence"] == {"kind": "bullish", "strength": 0.4}
+    assert compact["cvd"]["last_bar_time"] == "t299"
+
+
+def test_compact_result_is_much_smaller_than_full() -> None:
+    full = _heavy_result()
+    assert len(json.dumps(compact_result(full))) < len(json.dumps(full)) // 2
+
+
+def test_compact_state_maps_all_results_and_preserves_other_keys() -> None:
+    state = {"generated_at": "2026-07-18T10:00:00Z", "gate_breakdown": {"x": 1}, "results": [_heavy_result("NIFTY"), _heavy_result("BANKNIFTY")]}
+    slim = compact_state(state)
+    assert slim["generated_at"] == state["generated_at"]
+    assert slim["gate_breakdown"] == {"x": 1}
+    assert all("profile" not in r for r in slim["results"])
+    # Original is untouched (full detail persisted for attribution/paper).
+    assert "profile" in state["results"][0]
+
+
+def test_compact_state_without_results_passes_through() -> None:
+    state = {"status": "market_closed", "next_run_at": "x"}
+    assert compact_state(state) == state
+
+
+def test_detail_result_returns_full_by_symbol_case_insensitive() -> None:
+    state = {"results": [_heavy_result("NIFTY"), _heavy_result("BANKNIFTY")]}
+    found = detail_result(state, "banknifty")
+    assert found is not None
+    assert found["symbol"] == "BANKNIFTY"
+    assert "profile" in found and "series" in found["cvd"]
+    assert detail_result(state, "MISSING") is None
+
+
+def test_status_returns_compact_and_detail_returns_full(monkeypatch) -> None:
+    import json as _json
+
+    def _make(service):
+        state = {"generated_at": "2026-07-18T10:00:00Z", "results": [_heavy_result("NIFTY")]}
+        monkeypatch.setattr(service, "_load_state", lambda: state)
+        monkeypatch.setattr(type(service), "build_universe", lambda self: asyncio.sleep(0, result={"indices": ["NIFTY"], "stocks": []}))
+        monkeypatch.setattr(service_module.convergence_paper_book, "summary", lambda: {})
+        monkeypatch.setattr(service_module.convergence_paper_book, "statistics", lambda: {})
+
+    svc = InstitutionalConvergenceService()
+    _make(svc)
+    status = asyncio.run(svc.status())
+    compact_rows = status["latest"]["results"]
+    assert "profile" not in compact_rows[0]
+    # Compact summary is dramatically smaller than the full state.
+    assert len(_json.dumps(status["latest"])) < len(_json.dumps({"results": [_heavy_result("NIFTY")]}))
+    detail = asyncio.run(svc.status_detail("NIFTY"))
+    assert detail["result"]["symbol"] == "NIFTY"
+    assert "profile" in detail["result"]
+    assert asyncio.run(svc.status_detail("MISSING"))["result"] is None

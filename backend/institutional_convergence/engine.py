@@ -4,7 +4,7 @@ from dataclasses import asdict
 from datetime import datetime, timedelta, timezone
 from math import floor
 from statistics import median
-from typing import Any
+from typing import Any, Optional
 
 from analytics.orderflow import bar_cvd, cvd_divergence, hvn_lvn, volume_node_density
 from auction_intelligence.market_profile import MarketProfileEngine
@@ -457,3 +457,76 @@ def lots_for_risk(capital: float, risk_fraction: float, stop_points: float, lot_
     if capital <= 0 or risk_fraction <= 0 or stop_points <= 0 or lot_size <= 0:
         return 0
     return max(0, floor((capital * risk_fraction) / (stop_points * lot_size)))
+
+
+# ── Status-payload compaction ────────────────────────────────────────────────
+# The full evaluator result carries the complete 3-min bar series, per-bar
+# footprint levels, the whole TPO profile and the CVD series — up to ~100 KB per
+# instrument. The multi-instrument /status summary returned ALL of them for
+# EVERY instrument (~600+ KB per poll). The desk overview matrix + gate tabs
+# only need the small keys; the heavy detail is fetched for one selected
+# instrument via the detail endpoint. These helpers slim the summary while the
+# persisted state.json (attribution/paper) keeps full detail.
+
+# Heavy keys dropped wholesale from the compact summary.
+_HEAVY_RESULT_KEYS = ("profile", "bars")
+
+
+def compact_result(result: dict) -> dict:
+    """Return a compact copy of one evaluator result.
+
+    Keeps every small key the overview matrix, tiles and gate tabs read
+    (symbol, kind, status, action, setup_state, gates, confirmations, options,
+    risk, vix, tick freshness, blocked_reasons, etc.) and replaces the two
+    heavy structured keys (``cvd``, ``footprint``) with compact freshness stubs.
+    Drops ``profile`` and ``bars`` entirely.
+    """
+    if not isinstance(result, dict):
+        return result
+    compact = {key: value for key, value in result.items() if key not in _HEAVY_RESULT_KEYS}
+
+    footprint = result.get("footprint") or {}
+    fp_bars = footprint.get("bars") or []
+    compact["footprint"] = {
+        "source": footprint.get("source"),
+        "long_ratio": footprint.get("long_ratio"),
+        "short_ratio": footprint.get("short_ratio"),
+        "tick_count": footprint.get("tick_count"),
+        "last_bar_time": (fp_bars[-1].get("time") if fp_bars else None),
+    }
+
+    cvd = result.get("cvd") or {}
+    cvd_series = cvd.get("series") or []
+    compact["cvd"] = {
+        "source": cvd.get("source"),
+        "divergence": cvd.get("divergence"),
+        "last_bar_time": (cvd_series[-1].get("time") if cvd_series else None),
+    }
+    return compact
+
+
+def compact_state(state: dict) -> dict:
+    """Return a copy of a persisted run-cycle state with every result compacted.
+
+    Non-``results`` keys (universe, paper, gate_breakdown, …) pass through
+    untouched. A state with no results is returned unchanged.
+    """
+    if not isinstance(state, dict) or not state.get("results"):
+        return state
+    slim = dict(state)
+    slim["results"] = [compact_result(row) for row in state.get("results") or []]
+    return slim
+
+
+def detail_result(state: dict, symbol: str) -> Optional[dict]:
+    """Return the single FULL evaluator result for ``symbol`` from a state.
+
+    Case-insensitive symbol match; ``None`` when absent.
+    """
+    if not isinstance(state, dict):
+        return None
+    target = str(symbol or "").strip().upper()
+    for row in state.get("results") or []:
+        if str(row.get("symbol") or "").strip().upper() == target:
+            return row
+    return None
