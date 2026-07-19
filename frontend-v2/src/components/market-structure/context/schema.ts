@@ -8,6 +8,30 @@
  * construction rather than by convention: there is no second place to store a
  * symbol, so no panel can lag behind.
  *
+ * ─── WIRING GAP, stated in code (2026-07-19) ────────────────────────────────
+ *
+ * `horizon`, `timeframe` and `asOf` are CONTEXT ONLY. They are carried in the
+ * URL, echoed by every view, and used by NOTHING: `useUniverseMatrix` receives
+ * only `ctx.market`, and the drawer's detail queries receive only symbol +
+ * market. No wired backend endpoint accepts an as-of / horizon / timeframe
+ * argument, so every query returns the LATEST snapshot regardless.
+ *
+ * The shipped build derived `replay = (asOf !== "now")` from that inert field.
+ * Typing a July-15 date therefore painted REPLAY badges over the July-17
+ * snapshot — the UI asserting a data state that is false, which is the worst
+ * class of defect this workspace exists to remove.
+ *
+ * THE INVARIANT, now enforced here: nothing may label data as replay /
+ * historical unless the data ACTUALLY came from that as-of. Since no
+ * snapshot-capable endpoint exists, `asOf` no longer implies replay at all; it
+ * is rendered as an explicitly NOT-APPLIED annotation (see `UNAPPLIED_NOTE`).
+ *
+ * TO WIRE IT LATER: give the composing endpoints an `as_of` / `timeframe`
+ * parameter, thread it through `useUniverseMatrix` and `useInstrumentDetail`,
+ * flip the entry in `APPLIED_TO_DATA`, and only then may a user-entered as-of
+ * feed `dataMode: "historical_replay"` — with the served payload's own as-of
+ * echoed back and checked, not the requested one.
+ *
  * Pure module — no React, no hooks — so it can be unit-tested and imported by
  * server components.
  */
@@ -45,6 +69,28 @@ export const VIEW_LABEL: Record<WorkspaceView, string> = {
   research: "Research",
 };
 
+/**
+ * Which context dimensions actually reach a query. The inert ones are LABELLED
+ * as such in the UI rather than quietly pretending; flipping one to `true` is
+ * the last step of wiring it, not the first.
+ */
+export const APPLIED_TO_DATA: Record<string, boolean> = {
+  market: true,
+  symbol: true,
+  contract: true,
+  horizon: false,
+  timeframe: false,
+  asOf: false,
+};
+
+/** The dimensions the workspace must visibly disclaim. Derived, not hand-kept. */
+export const UNAPPLIED_DIMENSIONS: string[] = Object.keys(APPLIED_TO_DATA).filter(
+  (k) => !APPLIED_TO_DATA[k],
+);
+
+export const UNAPPLIED_NOTE =
+  "horizon, timeframe and as-of are CONTEXT ONLY — no wired endpoint accepts them, so every panel shows the latest available data regardless of what they say";
+
 export type WorkspaceContext = {
   market: MarketKey;
   /** Underlying / root — the pin. Everything else is scoped by it. */
@@ -54,10 +100,18 @@ export type WorkspaceContext = {
   horizon: Horizon;
   /** Aggregation for detail panels. */
   timeframe: Timeframe;
-  /** Time frontier: "now" or an ISO instant. Non-"now" implies replay. */
+  /**
+   * Time frontier: "now" or an ISO instant. NOT APPLIED TO ANY QUERY — see the
+   * wiring-gap note at the top of this file. It annotates the shared link; it
+   * does not move the data, and it must never imply replay.
+   */
   asOf: string;
-  /** When true NOTHING in the workspace may render a live verdict. */
-  replay: boolean;
+  /**
+   * Trader-pinned suppression of live claims. This is a MUTE, not a claim: it
+   * stops the header asserting "live", and it never re-labels the data as a
+   * replay of some other session (which is what the old `replay` flag did).
+   */
+  suppressLive: boolean;
   view: WorkspaceView;
   sortKey: string;
   sortDir: SortDir;
@@ -72,7 +126,7 @@ export const DEFAULT_CONTEXT: WorkspaceContext = {
   horizon: "intraday",
   timeframe: "3m",
   asOf: "now",
-  replay: false,
+  suppressLive: false,
   view: "command",
   sortKey: "readiness",
   sortDir: "desc",
@@ -98,10 +152,10 @@ export function parseContext(params: URLSearchParams | null): WorkspaceContext {
   const symbolRaw = (p.get("symbol") ?? "").trim().toUpperCase();
   const asOfRaw = (p.get("asof") ?? "now").trim();
   const asOf = asOfRaw === "" ? "now" : asOfRaw;
-  // A time frontier in the past is a replay by definition — the flag cannot be
-  // turned off while `asof` names a historical instant.
-  const replayParam = p.get("replay") === "1";
-  const replay = replayParam || asOf !== "now";
+  // DELIBERATELY NOT DERIVED FROM `asOf`. A past time frontier would be a
+  // replay only if the data came from it, and no endpoint here can serve that.
+  // `replay=1` is still honoured so old shared links keep their MUTE meaning.
+  const suppressLive = p.get("nolive") === "1" || p.get("replay") === "1";
   return {
     market,
     symbol: symbolRaw || DEFAULT_SYMBOL[market],
@@ -109,7 +163,7 @@ export function parseContext(params: URLSearchParams | null): WorkspaceContext {
     horizon: pick(p.get("horizon"), HORIZONS, DEFAULT_CONTEXT.horizon),
     timeframe: pick(p.get("tf"), TIMEFRAMES, DEFAULT_CONTEXT.timeframe),
     asOf,
-    replay,
+    suppressLive,
     view: pick(p.get("view"), VIEWS, DEFAULT_CONTEXT.view),
     sortKey: (p.get("sort") ?? "").split(":")[0] || DEFAULT_CONTEXT.sortKey,
     sortDir: pick((p.get("sort") ?? "").split(":")[1] ?? null, ["asc", "desc"] as const, DEFAULT_CONTEXT.sortDir),
@@ -129,7 +183,7 @@ export function serializeContext(ctx: WorkspaceContext): URLSearchParams {
   if (ctx.horizon !== DEFAULT_CONTEXT.horizon) p.set("horizon", ctx.horizon);
   if (ctx.timeframe !== DEFAULT_CONTEXT.timeframe) p.set("tf", ctx.timeframe);
   if (ctx.asOf && ctx.asOf !== "now") p.set("asof", ctx.asOf);
-  if (ctx.replay && ctx.asOf === "now") p.set("replay", "1");
+  if (ctx.suppressLive) p.set("nolive", "1");
   if (ctx.view !== DEFAULT_CONTEXT.view) p.set("view", ctx.view);
   if (ctx.sortKey !== DEFAULT_CONTEXT.sortKey || ctx.sortDir !== DEFAULT_CONTEXT.sortDir) {
     p.set("sort", `${ctx.sortKey}:${ctx.sortDir}`);
@@ -161,10 +215,14 @@ export function describeContext(ctx: WorkspaceContext): string {
   return [
     `${ctx.market} · ${ctx.symbol}`,
     ctx.contract ?? null,
-    ctx.timeframe,
-    ctx.horizon,
-    ctx.asOf === "now" ? "as of now" : `as of ${ctx.asOf}`,
-    ctx.replay ? "replay" : null,
+    // Every inert dimension is printed WITH its disclaimer, so a screenshot of
+    // this line can never be read as "the data was filtered this way".
+    `${ctx.timeframe} (not applied)`,
+    `${ctx.horizon} (not applied)`,
+    ctx.asOf === "now"
+      ? "as of latest available"
+      : `as of ${ctx.asOf} (context only — data is latest available)`,
+    ctx.suppressLive ? "live claims suppressed" : null,
   ]
     .filter(Boolean)
     .join(" · ");

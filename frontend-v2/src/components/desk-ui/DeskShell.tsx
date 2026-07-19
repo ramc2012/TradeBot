@@ -18,7 +18,7 @@ import { useCallback } from "react";
 import { Activity } from "lucide-react";
 
 import { StatusBadge } from "./StatusBadge";
-import { SchedulerBadge } from "./SemanticBadges";
+import { ExecutionModeBadge, SchedulerBadge } from "./SemanticBadges";
 import { LastUpdated } from "@/components/common/LastUpdated";
 import type { SchedulerState } from "@/lib/market-semantics";
 
@@ -86,16 +86,18 @@ export function DeskShell({
           <div className="min-w-0">
             <div className="flex items-center gap-2">
               <h1 className="text-xl font-semibold text-text-primary">{title}</h1>
+              {/* Paper is BLUE, live is amber. Green is reserved for
+                  healthy-live / actionable-confirmed, and "we are not sending
+                  real orders" is neither — it is a mode, not a health light. */}
               {paperMode != null ? (
-                <StatusBadge
-                  label={paperMode ? "paper" : "live"}
-                  variant={paperMode ? "success" : "warn"}
-                />
+                <ExecutionModeBadge mode={paperMode ? "paper" : "live"} />
               ) : null}
+              {/* ARMED IS NOT RUNNING, so the armed pill is never green: both
+                  branches go through the ONE scheduler-variant contract. */}
               {schedulerState ? (
                 <SchedulerBadge state={schedulerState} />
               ) : isLive ? (
-                <StatusBadge label="armed" variant="success" icon={<span className="h-1.5 w-1.5 rounded-full bg-accent-green" />} />
+                <SchedulerBadge state="armed" />
               ) : null}
             </div>
             {description ? (

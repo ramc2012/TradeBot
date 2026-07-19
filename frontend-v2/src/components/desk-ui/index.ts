@@ -43,6 +43,7 @@ export { DeskShell, useUrlTab, type DeskTab } from "./DeskShell";
 export {
   DataModeBadge,
   SourceGradeBadge,
+  StorageModeBadge,
   FreshnessBadge,
   FreshnessChip,
   SufficiencyBadge,

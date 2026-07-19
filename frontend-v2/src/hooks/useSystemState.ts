@@ -29,6 +29,7 @@ import { REFRESH_MS } from "@/components/desk-ui";
 import { api } from "@/lib/api";
 import { isBrokerReady, type BrokerStatusEntry } from "@/lib/broker-status";
 import { marketSessions } from "@/lib/market-hours";
+import { schedulerStateVariant } from "@/lib/market-semantics";
 
 type ServiceStatus = "healthy" | "degraded" | "critical" | "idle" | string;
 
@@ -210,8 +211,11 @@ export function useSystemState(): SystemState {
         ]
       : []),
     {
+      // ARMED IS NOT RUNNING and therefore NOT GREEN: the variant comes from
+      // the ONE scheduler contract (lib/status-variants), so the truth strip,
+      // the desk headers and the lane inventory cannot disagree about it.
       label: autoRunArmed ? "auto-run armed" : "auto-run paused",
-      variant: autoRunArmed ? "success" : "warn",
+      variant: autoRunArmed ? schedulerStateVariant("armed") : "warn",
       title: "Strategy loop — armed means it WILL run next session, not that it is running now.",
     },
     ...(killActive

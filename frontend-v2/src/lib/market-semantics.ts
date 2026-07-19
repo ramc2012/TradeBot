@@ -30,12 +30,16 @@ import { toDate } from "@/components/desk-ui/formatters";
 import {
   NO_AGGRESSOR_TAPE_NOTE,
   classifySourceGrade,
+  classifyStorageMode,
   normalizeSource,
   sourceGradeLabel,
+  storageModeLabel,
   type BadgeVariant,
   type MarketFeature,
   type SourceGrade,
+  type StorageMode,
 } from "./flow-provenance";
+import type { SchedulerState } from "./status-variants";
 
 /**
  * Source grading lives in `./flow-provenance` (pure, dependency-free, unit
@@ -48,9 +52,14 @@ import {
  * existing `@/lib/market-semantics` import keeps working unchanged.
  */
 export {
+  classifyAcquisitionSource,
   classifySourceGrade,
   classifyFlowGrade,
   classifyOfSource,
+  classifyStorageMode,
+  describeStorageMode,
+  storageModeLabel,
+  storageModeVariant,
   describeFlowDerivation,
   isFabricatedGrade,
   isInferredSideGrade,
@@ -62,24 +71,49 @@ export {
   NO_AGGRESSOR_TAPE_NOTE,
 } from "./flow-provenance";
 export type {
+  AcquisitionSource,
   BadgeVariant,
   MarketFeature,
   OfSourceClass,
   OfSourceKind,
   SourceGrade,
+  StorageMode,
 } from "./flow-provenance";
+
+/**
+ * The colour semantics of state words (scheduler + setup stage) live in
+ * `./status-variants` — pure and unit-tested — because "armed is not green" is
+ * a contract that must be derived ONCE and not re-decided per surface.
+ */
+export {
+  isActionableVariant,
+  schedulerStateLabel,
+  schedulerStateVariant,
+  setupStageVariant,
+} from "./status-variants";
+export type { SchedulerState } from "./status-variants";
+
+/**
+ * The live verdict and the derivation of its DATA half live in
+ * `./live-verdict-input` (pure, unit-tested). Re-exported so every existing
+ * `@/lib/market-semantics` import keeps working unchanged.
+ */
+export {
+  NO_OBSERVATION,
+  liveVerdict,
+  liveVerdictInputFor,
+  pinnedObservationOf,
+} from "./live-verdict-input";
+export type {
+  LiveVerdict,
+  LiveVerdictInput,
+  ObservedRowLike,
+  PinnedObservation,
+} from "./live-verdict-input";
 
 // ─── Vocabulary ─────────────────────────────────────────────────────────────
 
 export type ExecutionMode = "paper" | "live" | "parked" | "none";
-export type SchedulerState =
-  | "running"
-  | "armed"
-  | "paused"
-  | "disabled"
-  | "parked"
-  | "error"
-  | "unknown";
 export type DataMode = "live" | "historical_replay" | "bar_inference" | "unknown";
 export type Freshness = "fresh" | "stale" | "absent";
 export type Sufficiency = "ok" | "degraded" | "insufficient";
@@ -94,6 +128,13 @@ export type Provenance = {
   /** Raw backend source string, kept verbatim so nothing is laundered. */
   source: string | null;
   grade: SourceGrade;
+  /**
+   * Axis (ii) — how this read reached us (live path / stored snapshot /
+   * backfill). Deliberately SEPARATE from `grade`: a snapshot read says nothing
+   * about how the numbers in it were derived, and must never be rendered as if
+   * it did.
+   */
+  storageMode: StorageMode;
   /** ISO timestamp of the observation (naive = UTC, repo convention). */
   asOf: string | null;
   ageSeconds: number | null;
@@ -306,33 +347,11 @@ export function deriveSchedulerState(a: AutomationLike): SchedulerState {
   return "unknown";
 }
 
-const SCHEDULER_LABEL: Record<SchedulerState, string> = {
-  running: "running",
-  armed: "armed",
-  paused: "paused",
-  disabled: "disabled",
-  parked: "parked",
-  error: "loop error",
-  unknown: "loop unknown",
-};
-
-const SCHEDULER_VARIANT: Record<SchedulerState, BadgeVariant> = {
-  running: "success",
-  armed: "success",
-  paused: "warn",
-  disabled: "neutral",
-  parked: "neutral",
-  error: "error",
-  unknown: "neutral",
-};
-
-export function schedulerStateLabel(s: SchedulerState): string {
-  return SCHEDULER_LABEL[s];
-}
-
-export function schedulerStateVariant(s: SchedulerState): BadgeVariant {
-  return SCHEDULER_VARIANT[s];
-}
+/**
+ * Labels and variants for `SchedulerState` live in `./status-variants` and are
+ * re-exported above. ARMED IS NOT LIVE — and, since 2026-07-19, armed is not
+ * GREEN either: green is reserved for healthy-live / actionable-confirmed.
+ */
 
 // ─── Sufficiency ────────────────────────────────────────────────────────────
 
@@ -377,6 +396,11 @@ export function deriveSufficiency(input: SufficiencyInput): SufficiencyVerdict {
   if (input.degradedReason) reasons.push(String(input.degradedReason));
   for (const r of input.blockedReasons ?? []) if (r) reasons.push(String(r));
   if (grade === "bar_inferred") reasons.push("inferred from bars, not a tape");
+  // A stored snapshot IS a caveat (it is not the live path) but it is NOT an
+  // accusation of bar inference — the reason names what is actually unknown.
+  if (grade === "unknown_derivation") {
+    reasons.push("stored snapshot — the payload does not report how it was derived");
+  }
   // NOTE: `modelled_from_quotes` deliberately does NOT add a sufficiency
   // reason. Sufficiency answers "can this be acted on", and every flow lane
   // acts on quote-derived sides BY DESIGN — that is the lane's contract, not a
@@ -454,6 +478,7 @@ export function provenanceOf(input: ProvenanceInput): Provenance {
   const source = input.source ?? ds?.order_flow_source ?? ds?.quote_source ?? ds?.history_source ?? null;
   const feature: MarketFeature = input.feature ?? "quote";
   const grade = classifySourceGrade(source, feature);
+  const storageMode = classifyStorageMode(source);
   const { freshness, ageSeconds, asOf } = deriveFreshness(input.asOf, {
     nowMs: input.nowMs,
     staleAfterSeconds: input.staleAfterSeconds,
@@ -476,6 +501,7 @@ export function provenanceOf(input: ProvenanceInput): Provenance {
   return {
     source: source == null || source === "" ? null : String(source),
     grade,
+    storageMode,
     asOf,
     ageSeconds,
     freshness,
@@ -496,6 +522,11 @@ export function describeProvenance(p: Provenance): string {
   const parts: string[] = [];
   parts.push(p.source ?? "source not reported");
   parts.push(sourceGradeLabel(p.grade).toLowerCase());
+  // Storage mode is its OWN axis and is stated separately, never folded into
+  // the derivation grade.
+  if (p.storageMode === "snapshot" || p.storageMode === "backfilled") {
+    parts.push(storageModeLabel(p.storageMode));
+  }
   if (p.timeframe) parts.push(p.timeframe);
   if (p.completeness.label) parts.push(p.completeness.label);
   else if (p.completeness.have != null) {
@@ -515,62 +546,15 @@ export function describeProvenance(p: Provenance): string {
 
 // ─── The live verdict ───────────────────────────────────────────────────────
 
-export type LiveVerdictInput = {
-  sessionOpen: boolean;
-  feedOnline: boolean;
-  transportConnected?: boolean;
-  dataMode?: DataMode;
-  freshness?: Freshness;
-  /** Is there an actual symbol-level observation in hand (not just a socket)? */
-  hasSymbolObservation?: boolean;
-};
-
-export type LiveVerdict = {
-  live: boolean;
-  label: string;
-  variant: BadgeVariant;
-  reason: string;
-};
-
 /**
- * ONE function decides whether any surface may say "live". Precedence is the
- * invariant established by LiveMarkBadge and is deliberately pessimistic:
- * market closed → feed offline → tape offline → no observation → replay →
- * stale → live. Nothing else in the app may short-circuit it.
+ * `liveVerdict`, `LiveVerdictInput`, `pinnedObservationOf` and
+ * `liveVerdictInputFor` now live in `./live-verdict-input` (pure module,
+ * unit-tested) and are re-exported at the top of this file. They moved because
+ * the header of the market-structure workspace was hard-coding the DATA half of
+ * the input (`freshness: "absent"`, `hasSymbolObservation: false`), which made
+ * the verdict permanently dead; the derivation is now shared with the matrix
+ * row so the two surfaces cannot disagree.
  */
-export function liveVerdict(input: LiveVerdictInput): LiveVerdict {
-  const {
-    sessionOpen,
-    feedOnline,
-    transportConnected = true,
-    dataMode = "unknown",
-    freshness = "absent",
-    hasSymbolObservation = true,
-  } = input;
-
-  if (!sessionOpen) {
-    return { live: false, label: "market closed", variant: "neutral", reason: "session closed" };
-  }
-  if (!feedOnline) {
-    return { live: false, label: "feed offline", variant: "warn", reason: "feed offline" };
-  }
-  if (!transportConnected) {
-    return { live: false, label: "tape offline", variant: "warn", reason: "transport down" };
-  }
-  if (!hasSymbolObservation || freshness === "absent") {
-    return { live: false, label: "no observation", variant: "neutral", reason: "no symbol-level data" };
-  }
-  if (dataMode === "historical_replay") {
-    return { live: false, label: "replay", variant: "warn", reason: "historical replay" };
-  }
-  if (dataMode === "bar_inference") {
-    return { live: false, label: "bar-inferred", variant: "warn", reason: "inferred from bars" };
-  }
-  if (freshness === "stale") {
-    return { live: false, label: "stale", variant: "warn", reason: "observation is stale" };
-  }
-  return { live: true, label: "● live data", variant: "success", reason: "fresh observed data" };
-}
 
 // ─── R/R honesty ────────────────────────────────────────────────────────────
 

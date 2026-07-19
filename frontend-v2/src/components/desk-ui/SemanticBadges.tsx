@@ -22,6 +22,7 @@ import {
   type Provenance,
   type SchedulerState,
   type SourceGrade,
+  type StorageMode,
   type Sufficiency,
   type ValueState,
   VALUE_STATE_CLASS,
@@ -35,8 +36,11 @@ import {
   freshnessVariant,
   schedulerStateLabel,
   schedulerStateVariant,
+  describeStorageMode,
   sourceGradeLabel,
   sourceGradeVariant,
+  storageModeLabel,
+  storageModeVariant,
   sufficiencyLabel,
   sufficiencyVariant,
 } from "@/lib/market-semantics";
@@ -78,6 +82,35 @@ export function SourceGradeBadge({
         label={sourceGradeLabel(grade)}
         variant={sourceGradeVariant(grade)}
         className={clsx(grade === "bar_inferred" && "animate-pulse", className)}
+      />
+    </span>
+  );
+}
+
+/**
+ * HOW IT WAS READ — a separate axis from HOW IT WAS DERIVED.
+ *
+ * A stored snapshot may contain perfectly good observed quotes; grading it
+ * "bar inferred" (as this app briefly did) claims a worse provenance than the
+ * payload supports, which is the same class of false claim as claiming a better
+ * one. So the storage mode gets its OWN chip and never touches the grade.
+ */
+export function StorageModeBadge({
+  mode,
+  source,
+  className,
+}: {
+  mode: StorageMode;
+  source?: string | null;
+  className?: string;
+}) {
+  if (mode === "unknown") return null;
+  return (
+    <span title={describeStorageMode(mode, source)}>
+      <StatusBadge
+        label={storageModeLabel(mode)}
+        variant={storageModeVariant(mode)}
+        className={className}
       />
     </span>
   );
@@ -236,7 +269,7 @@ export function ProvenanceChip({
             "h-1.5 w-1.5 shrink-0 rounded-full",
             p.grade === "observed"
               ? "bg-accent-green"
-              : p.grade === "unavailable"
+              : p.grade === "unavailable" || p.grade === "unknown_derivation"
                 ? "bg-text-muted"
                 : "bg-accent-amber",
           )}
@@ -249,6 +282,7 @@ export function ProvenanceChip({
   return (
     <span className={clsx("inline-flex items-center gap-1.5", className)} title={detail}>
       <SourceGradeBadge grade={p.grade} source={p.source} />
+      <StorageModeBadge mode={p.storageMode} source={p.source} />
       {p.dataMode !== "live" ? <DataModeBadge mode={p.dataMode} /> : null}
       {p.sufficiency !== "ok" ? (
         <SufficiencyBadge sufficiency={p.sufficiency} reasons={p.reasons} />

@@ -27,7 +27,7 @@ import {
   formatNumber,
 } from "@/components/desk-ui";
 import { laneDisplayStatus, laneDisplayVariant, useLaneRegistry } from "@/hooks/useLaneRegistry";
-import { rrRender } from "@/lib/market-semantics";
+import { rrRender, setupStageVariant } from "@/lib/market-semantics";
 
 import { deskHref, type WorkspaceContext } from "../context/schema";
 import type { MatrixRow } from "../command/useUniverseMatrix";
@@ -138,7 +138,13 @@ export function InstrumentDrawer({
         ) : (
           <div className="space-y-2">
             <div className="flex flex-wrap items-center gap-2">
-              <StatusBadge label={row.convergence.setupState ?? "no state"} variant="info" />
+              {/* Stage colour comes from the ONE contract: ARMED is blue
+                  (waiting), TRIGGERED is green (actionable-confirmed). The
+                  matrix cell reads the same function. */}
+              <StatusBadge
+                label={row.convergence.setupState ?? "no state"}
+                variant={row.convergence.setupState ? setupStageVariant(row.convergence.setupState) : "neutral"}
+              />
               <StatusBadge label={`action ${row.convergence.action ?? "—"}`} variant="neutral" />
               <StatusBadge
                 label={`confirmations ${row.convergence.confirmations ?? "—"}/${row.convergence.required ?? "—"}`}

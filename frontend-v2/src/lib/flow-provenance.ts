@@ -33,6 +33,34 @@
  * `MpDesk.ofBadgeOf` ask. Passing a `feature` answers the sharper question
  * "how was THIS NUMBER obtained?", which is what every flow surface must show.
  *
+ * ─── The FOUR AXES (2026-07-19, second correction) ──────────────────────────
+ *
+ * The first correction over-shot in one place: `snapshot` was added to the
+ * bar-inferred set, so the saved ATM watchlist rendered "snapshot · bar
+ * inferred · inferred from bars, not a tape". Nothing in that payload says so —
+ * a stored snapshot may contain directly OBSERVED quotes. Claiming a WORSE
+ * grade than the evidence supports is the same defect as claiming a better one,
+ * just pointing the other way.
+ *
+ * So a datum carries FOUR independent facts, and no axis may set another:
+ *
+ *   (i)   ACQUISITION SOURCE  what produced it   quote stream | bar | book |
+ *                                                model | unknown
+ *   (ii)  STORAGE-READ MODE   how we read it     live | snapshot | backfilled |
+ *                                                unknown
+ *   (iii) FEATURE DERIVATION  how the NUMBER     observed | modelled_from_quotes
+ *                             was derived        | modelled | bar_inferred |
+ *                                                unknown_derivation | unavailable
+ *   (iv)  LIVE-vs-REPLAY      what session it    (lives in `market-semantics`
+ *                             describes           as `DataMode`)
+ *
+ * `snapshot` is a statement about (ii) ONLY. It therefore grades
+ * `unknown_derivation` on (iii) — "the payload did not say" — and renders as
+ * its own storage chip, never as a bar-inference accusation. The genuinely
+ * bar-fabricated sources (`bar_inference`, `historical_bar_inference`,
+ * `spot_index_proxy`, `bar_proxy`, …) are untouched and still grade
+ * `bar_inferred`.
+ *
  * Pure module: no React, no imports, no I/O — so it is unit-testable on its
  * own (see `frontend-v2/tests/flow-provenance.test.ts`).
  */
@@ -52,7 +80,21 @@ export type SourceGrade =
   | "modelled_from_quotes"
   | "modelled"
   | "bar_inferred"
+  /**
+   * The payload told us HOW IT WAS READ (a stored snapshot, a persisted blob)
+   * but not how the underlying numbers were acquired. Strictly weaker than
+   * `observed` and strictly stronger than `bar_inferred`: we do not know, and
+   * saying "bar inferred" would invent a fact. Distinct from `unavailable`,
+   * which means the payload named no source at all.
+   */
+  | "unknown_derivation"
   | "unavailable";
+
+/** Axis (i) — what produced the datum, independent of how it was stored. */
+export type AcquisitionSource = "quote_stream" | "bar" | "book" | "model" | "unknown";
+
+/** Axis (ii) — how this read reached us. NOT a derivation grade. */
+export type StorageMode = "live" | "snapshot" | "backfilled" | "unknown";
 
 /** Badge variants supported by `StatusBadge` — the contract emits only these. */
 export type BadgeVariant = "neutral" | "success" | "warn" | "error" | "info";
@@ -111,8 +153,34 @@ const BAR_INFERRED_SOURCES = new Set([
   "insufficient_ticks",
   "spot_index_proxy",
   "historical_bar_inference",
-  "snapshot",
   "scan_guarded",
+]);
+
+/**
+ * STORAGE-READ sources (axis ii). These say WHERE the read came from and
+ * nothing whatsoever about how the numbers were produced — `snapshot` used to
+ * live in the bar-inferred set above, which made the terminal accuse a stored
+ * quote of being fabricated from bars.
+ */
+const SNAPSHOT_STORAGE_SOURCES = new Set([
+  "snapshot",
+  "snapshot_cache",
+  "cached_snapshot",
+  "persisted_snapshot",
+  "last_snapshot",
+  "stored_snapshot",
+]);
+
+const BACKFILL_STORAGE_SOURCES = new Set(["backfill", "backfilled", "history", "historical"]);
+
+/** Sources that ARE the live read path (a stream we are attached to now). */
+const LIVE_STORAGE_SOURCES = new Set([
+  "market_ticks",
+  "tick_reconstruction",
+  "ticks",
+  "live_tick",
+  "tick_reconstruction_book",
+  "depth_reconstruction",
 ]);
 
 /** Computed by a model (Black-Scholes greeks, policy heads, fitted regimes). */
@@ -133,11 +201,88 @@ export function normalizeSource(source?: string | null): string {
   return String(source ?? "").trim().toLowerCase();
 }
 
+/**
+ * Axis (ii) — the STORAGE-READ mode. Never claims `live` for a source it does
+ * not recognise: an unknown string reads `unknown`, not "live".
+ */
+export function classifyStorageMode(source?: string | null): StorageMode {
+  const s = normalizeSource(source);
+  if (!s || UNAVAILABLE_SOURCES.has(s)) return "unknown";
+  if (SNAPSHOT_STORAGE_SOURCES.has(s) || s.includes("snapshot")) return "snapshot";
+  if (
+    BACKFILL_STORAGE_SOURCES.has(s) ||
+    s.startsWith("timescaledb") ||
+    s.startsWith("timescale_") ||
+    s.includes("backfill")
+  ) {
+    return "backfilled";
+  }
+  if (LIVE_STORAGE_SOURCES.has(s)) return "live";
+  return "unknown";
+}
+
+/**
+ * Axis (i) — what actually produced the datum. A storage-mode string carries
+ * no acquisition information, so it answers `unknown` rather than guessing.
+ */
+export function classifyAcquisitionSource(source?: string | null): AcquisitionSource {
+  const s = normalizeSource(source);
+  if (!s || UNAVAILABLE_SOURCES.has(s)) return "unknown";
+  if (OBSERVED_SOURCES.has(s)) return "quote_stream";
+  if (RECONSTRUCTED_SOURCES.has(s)) return "book";
+  if (BAR_INFERRED_SOURCES.has(s)) return "bar";
+  if (MODELLED_SOURCES.has(s)) return "model";
+  return "unknown";
+}
+
+const STORAGE_MODE_LABEL: Record<StorageMode, string> = {
+  live: "live read",
+  snapshot: "snapshot read",
+  backfilled: "backfilled read",
+  unknown: "read mode unknown",
+};
+
+const STORAGE_MODE_VARIANT: Record<StorageMode, BadgeVariant> = {
+  // Not green: "we are reading the live path" is a transport fact, and this
+  // module refuses to let a transport fact wear the actionable colour.
+  live: "info",
+  // Amber states a TRUE fact about the read — it is not the live path — and
+  // deliberately says nothing about how the numbers were derived.
+  snapshot: "warn",
+  backfilled: "warn",
+  unknown: "neutral",
+};
+
+export function storageModeLabel(mode: StorageMode): string {
+  return STORAGE_MODE_LABEL[mode];
+}
+
+export function storageModeVariant(mode: StorageMode): BadgeVariant {
+  return STORAGE_MODE_VARIANT[mode];
+}
+
+export function describeStorageMode(mode: StorageMode, source?: string | null): string {
+  const s = normalizeSource(source);
+  switch (mode) {
+    case "live":
+      return `read from the live path${s ? ` (${s})` : ""}`;
+    case "snapshot":
+      return `read from a stored snapshot${s ? ` (${s})` : ""} — a storage mode, NOT a statement about how the numbers were derived`;
+    case "backfilled":
+      return `read from persisted history${s ? ` (${s})` : ""}`;
+    default:
+      return "the payload did not say how this was read";
+  }
+}
+
 /** Source-level grade only: "how was this stream obtained?". */
 function gradeOfSourceString(source?: string | null): SourceGrade {
   const s = normalizeSource(source);
   if (UNAVAILABLE_SOURCES.has(s)) return "unavailable";
   if (OBSERVED_SOURCES.has(s)) return "observed";
+  // A STORAGE mode is not a derivation. We know how it was read and nothing
+  // about how it was produced — so say exactly that.
+  if (SNAPSHOT_STORAGE_SOURCES.has(s)) return "unknown_derivation";
   if (RECONSTRUCTED_SOURCES.has(s)) return "reconstructed";
   if (BAR_INFERRED_SOURCES.has(s)) return "bar_inferred";
   if (MODELLED_SOURCES.has(s)) return "modelled";
@@ -171,6 +316,8 @@ export function classifySourceGrade(
   if (feature !== "flow_attribution") return grade;
   // Quote/bar-grade evidence, buy/sell-attributed by heuristic ⇒ modelled.
   if (grade === "observed" || grade === "reconstructed") return "modelled_from_quotes";
+  // `unknown_derivation` stays unknown: we cannot claim the sides were inferred
+  // from quotes when we do not know what the snapshot contains.
   return grade;
 }
 
@@ -190,6 +337,7 @@ const GRADE_LABEL: Record<SourceGrade, string> = {
   modelled_from_quotes: "INFERRED FROM QUOTES",
   modelled: "MODELLED",
   bar_inferred: "BAR INFERRED",
+  unknown_derivation: "DERIVATION UNKNOWN",
   unavailable: "SOURCE UNKNOWN",
 };
 
@@ -200,6 +348,8 @@ const GRADE_VARIANT: Record<SourceGrade, BadgeVariant> = {
   modelled_from_quotes: "info",
   modelled: "info",
   bar_inferred: "warn",
+  // Neutral, not amber: "we don't know" is not an accusation.
+  unknown_derivation: "neutral",
   unavailable: "neutral",
 };
 
@@ -292,6 +442,17 @@ export function classifyOfSource(source?: string | null): OfSourceClass {
       label: "INSUFFICIENT TICKS · BAR INFERRED",
       grade,
       note: `too few quotes in the window, so flow fell back to OHLCV bars; ${NO_AGGRESSOR_TAPE_NOTE}`,
+    };
+  }
+  if (classifyStorageMode(s) === "snapshot") {
+    // Axis (ii) only. The old code fell through to the "unverified ⇒ bar
+    // inferred" branch below and printed "BAR PROXY"-flavoured text for a
+    // stored read whose contents may be perfectly good observed quotes.
+    return {
+      kind: "unknown",
+      label: "SNAPSHOT READ · DERIVATION UNKNOWN",
+      grade,
+      note: `${describeStorageMode("snapshot", s)}; the payload does not report what produced the underlying numbers`,
     };
   }
   if (BAR_LABEL_SOURCES.has(s)) {

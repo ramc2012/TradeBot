@@ -28,6 +28,15 @@
  *   /api/institutional-convergence/status/{symbol} (195 KB)
  * Those are drawer-only, detail-on-demand.
  *
+ * WIRING GAP — AS-OF / HORIZON / TIMEFRAME ARE NOT ACCEPTED HERE.
+ * This hook takes `market` and NOTHING else, and every endpoint it composes
+ * returns the latest snapshot. There is no `as_of`, `horizon` or `timeframe`
+ * parameter on any of them, which is why `context/schema.ts` marks those three
+ * context dimensions as NOT APPLIED and why a user-entered as-of may never
+ * produce a replay/historical label. To wire it: add the parameter to the
+ * endpoints, thread it through the query keys below, echo the SERVED as-of back
+ * in `generatedAt`, and only then flip `APPLIED_TO_DATA.asOf`.
+ *
  * The composed row shape is deliberately the shape a future additive backend
  * aggregate (`GET /api/system/universe-matrix`) would return, so swapping the
  * client-side composition for one server call later is a change to THIS file
@@ -179,8 +188,11 @@ export type UniverseMatrix = {
   generatedAt: string | null;
   universeSource: string | null;
   universeDetail: string | null;
+  /** No successful payload yet — the view must render a LOADING state. */
   isLoading: boolean;
   isFetching: boolean;
+  /** At least one successful payload has landed for this market. */
+  hasLoaded: boolean;
   errors: string[];
 };
 
@@ -351,6 +363,20 @@ export function useUniverseMatrix(market: MarketKey): UniverseMatrix {
       (isNse
         ? (await getInstitutionalConvergenceStatus()).data
         : (await getCommodityInstitutionalConvergenceStatus()).data) as ConvergencePayload,
+    // NO `placeholderData: keepPreviousData` HERE, DELIBERATELY.
+    //
+    // This is the ONLY market-keyed query, and for MCX it is the UNIVERSE
+    // itself. Carrying the previous key's payload across a market switch would
+    // therefore compose the OTHER market's instruments into this market's
+    // matrix — NIFTY/BANKNIFTY rendered as the MCX universe (and MCX roots
+    // spliced into the NSE one) for the length of one round trip. That is a
+    // false claim about what an instrument IS, which is worse than the blank
+    // grid it would be smoothing over.
+    //
+    // Retaining the last good matrix across a REFETCH needs nothing extra:
+    // react-query keeps `data` while `isFetching`, so a same-market refresh
+    // never blanks. A market SWITCH now falls to the distinct loading state
+    // (`isLoading` below), which is exactly what that state is for.
     refetchInterval: REFRESH_MS.summary,
     refetchOnWindowFocus: false,
     retry: false,
@@ -616,7 +642,8 @@ export function useUniverseMatrix(market: MarketKey): UniverseMatrix {
       universeSource,
       universeDetail,
       isLoading:
-        (isNse && watchlist.isLoading) || convergence.isLoading,
+        ((isNse && watchlist.isLoading) || convergence.isLoading) && rows.length === 0,
+      hasLoaded: (isNse ? watchlist.data != null : true) && convergence.data != null,
       isFetching:
         watchlist.isFetching || convergence.isFetching || indexMonitor.isFetching || positions.isFetching || auction.isFetching,
       errors,
@@ -652,12 +679,17 @@ export function useUniverseMatrix(market: MarketKey): UniverseMatrix {
 export function decorateRows(
   rows: MatrixRowBase[],
   nowMs: number,
-  opts: { replay?: boolean; sessionOpen?: boolean } = {},
+  opts: { sessionOpen?: boolean } = {},
 ): MatrixRow[] {
-  // An explicit replay pin and a closed session are the same claim about the
-  // numbers: they describe a session that is not the one happening now. Saying
+  // A CLOSED session is the ONE honest replay claim available here: what you
+  // are looking at is the last session, not the one happening now. Saying
   // "unknown" instead would be a hedge the desks do not make.
-  const replayed = !!opts.replay || opts.sessionOpen === false;
+  //
+  // The trader's `suppressLive` pin is deliberately NOT an input. Muting a live
+  // claim is a suppression; re-labelling live-latest rows as a "historical
+  // replay" would be a false statement about where the numbers came from —
+  // which is exactly the defect the as-of control had.
+  const replayed = opts.sessionOpen === false;
   return rows.map((r) => {
     const provenance = provenanceOf({
       source: r.source,

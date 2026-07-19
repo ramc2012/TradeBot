@@ -7,60 +7,52 @@
  * believe it" across the whole universe, then hands off to the detail drawer
  * for the one instrument that earns attention.
  *
- * Two invariants make this cheap and honest:
- *   1. ONE freshness ticker for the entire view. Ages are recomputed by a single
- *      15-second memo pass, never by per-row timers or per-symbol subscriptions.
+ * Three invariants make this cheap and honest:
+ *   1. ONE freshness ticker and ONE `decorateRows` pass for the whole workspace.
+ *      Both live in `MarketStructureWorkspace`, which hands the decorated array
+ *      to this view AND to the header — so the header's live verdict and a
+ *      row's Readiness cell are literally the same object.
  *   2. Every cell is a real observation or an explicit "unavailable + reason".
  *      No column is faked to look complete, and the coverage strip states how
  *      many rows each column actually has a source for.
+ *   3. LOADING, EMPTY-BECAUSE-FILTERED and EMPTY-BECAUSE-NO-DATA are three
+ *      visually distinct states (2026-07-19 fix). The shipped build rendered a
+ *      zero-row grid reading "0 instruments · No instruments match this filter"
+ *      while the very first request was still in flight, which is a claim about
+ *      the universe that had not been checked yet.
  */
 import { Search } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
-import { StatusBadge } from "@/components/desk-ui";
+import { StatusBadge, StorageModeBadge } from "@/components/desk-ui";
 import { DataModeBadge, FreshnessBadge } from "@/components/desk-ui";
-import { useSystemState } from "@/hooks/useSystemState";
-import { deriveFreshness } from "@/lib/market-semantics";
+import { classifyStorageMode, deriveFreshness } from "@/lib/market-semantics";
 
 import type { WorkspaceContext } from "../context/schema";
 import { compareRows, MATRIX_COLUMNS } from "./columns";
 import { MatrixTable } from "./MatrixTable";
-import { decorateRows, type MatrixRow, type UniverseMatrix } from "./useUniverseMatrix";
-
-/** One ticker for the whole view — the reason 200 rows cost 0 subscriptions. */
-const TICK_MS = 15_000;
+import type { MatrixRow, UniverseMatrix } from "./useUniverseMatrix";
 
 export function CommandView({
   ctx,
+  rows: decorated,
   matrix,
+  sessionOpen,
+  nowMs,
   onSelect,
   onSort,
   onQuery,
 }: {
   ctx: WorkspaceContext;
+  /** Already decorated by the workspace's single pass. Never re-derived here. */
+  rows: MatrixRow[];
   matrix: UniverseMatrix;
+  sessionOpen: boolean;
+  nowMs: number;
   onSelect: (symbol: string, contract: string | null) => void;
   onSort: (key: string) => void;
   onQuery: (q: string) => void;
 }) {
-  const [nowMs, setNowMs] = useState(() => Date.now());
-  useEffect(() => {
-    const id = window.setInterval(() => setNowMs(Date.now()), TICK_MS);
-    return () => window.clearInterval(id);
-  }, []);
-
-  // Session state comes from the shared clock, exactly as the desks derive it.
-  // Without it the matrix fell back to `data mode unknown` for every row while
-  // the market was shut — a hedge where the desks state the fact: what you are
-  // looking at with the session closed is the LAST session, i.e. a replay.
-  const { nseOpen, mcxOpen } = useSystemState();
-  const sessionOpen = ctx.market === "MCX" ? mcxOpen : nseOpen;
-
-  const decorated = useMemo(
-    () => decorateRows(matrix.rows, nowMs, { replay: ctx.replay, sessionOpen }),
-    [matrix.rows, nowMs, ctx.replay, sessionOpen],
-  );
-
   const rows: MatrixRow[] = useMemo(() => {
     const q = ctx.query.trim().toUpperCase();
     const filtered = q ? decorated.filter((r) => r.symbol.includes(q)) : decorated;
@@ -156,6 +148,14 @@ export function CommandView({
 
   const generated = deriveFreshness(matrix.generatedAt, { nowMs });
 
+  // THE THREE STATES. `loading` wins; then "filtered to nothing" (the query is
+  // the cause, and it is recoverable by clearing it); then "the universe itself
+  // came back empty", which is a statement about the endpoints, not the filter.
+  const loading = matrix.isLoading;
+  const filteredOut = !loading && rows.length === 0 && decorated.length > 0;
+  const emptyUniverse = !loading && decorated.length === 0;
+  const universeStorage = classifyStorageMode(matrix.universeSource);
+
   return (
     <div className="space-y-3">
       <div className="flex flex-wrap items-center justify-between gap-3">
@@ -171,20 +171,37 @@ export function CommandView({
             />
           </div>
           <span className="font-mono text-[11px] text-text-muted">
-            {rows.length} / {matrix.rows.length} instruments
+            {loading ? "loading universe…" : `${rows.length} / ${decorated.length} instruments`}
           </span>
-          <StatusBadge label={`${readiness.fresh} fresh`} variant={readiness.fresh ? "success" : "neutral"} />
-          <StatusBadge label={`${readiness.stale} stale`} variant={readiness.stale ? "warn" : "neutral"} />
-          <StatusBadge label={`${readiness.absent} no timestamp`} variant="neutral" />
+          {loading ? (
+            <StatusBadge label="loading" variant="info" className="animate-pulse" />
+          ) : (
+            <>
+              <StatusBadge label={`${readiness.fresh} fresh`} variant={readiness.fresh ? "success" : "neutral"} />
+              <StatusBadge label={`${readiness.stale} stale`} variant={readiness.stale ? "warn" : "neutral"} />
+              <StatusBadge label={`${readiness.absent} no timestamp`} variant="neutral" />
+            </>
+          )}
         </div>
         <div className="flex flex-wrap items-center gap-2">
-          {ctx.replay ? <DataModeBadge mode="historical_replay" /> : null}
-          {matrix.universeSource ? (
-            <StatusBadge
-              label={`universe: ${matrix.universeSource}`}
-              variant={matrix.universeSource === "snapshot" ? "warn" : "info"}
-              className={matrix.universeSource === "snapshot" ? "animate-pulse" : undefined}
+          {/* Replay is claimed ONLY when the session is genuinely closed, i.e.
+              when these rows really do describe the previous session. A typed
+              as-of never reaches this. */}
+          {!sessionOpen ? (
+            <DataModeBadge
+              mode="historical_replay"
+              title="the session is closed — every row below describes the LAST session"
             />
+          ) : null}
+          {matrix.universeSource ? (
+            <>
+              <StatusBadge label={`universe: ${matrix.universeSource}`} variant="info" />
+              {/* Storage mode is its OWN axis: "snapshot" says how the universe
+                  was READ, and says nothing at all about how its numbers were
+                  derived. It used to be graded "bar inferred", which claimed a
+                  worse provenance than the payload supports. */}
+              <StorageModeBadge mode={universeStorage} source={matrix.universeSource} />
+            </>
           ) : null}
           <FreshnessBadge asOf={matrix.generatedAt} label="Scan" />
         </div>
@@ -205,6 +222,7 @@ export function CommandView({
         ref={gridRef}
         role="grid"
         aria-rowcount={rows.length + 1}
+        aria-busy={loading}
         aria-label="Instrument opportunity matrix"
         tabIndex={0}
         onKeyDown={onKeyDown}
@@ -212,6 +230,28 @@ export function CommandView({
       >
         <MatrixTable
           rows={rows}
+          loading={loading}
+          emptyState={
+            filteredOut
+              ? {
+                  headline: `No instrument matches "${ctx.query.trim()}"`,
+                  detail: `${decorated.length} instruments are loaded — the filter, not the data, is hiding them.`,
+                  onClear: () => onQuery(""),
+                }
+              : emptyUniverse
+                ? {
+                    headline: matrix.hasLoaded
+                      ? "The universe endpoints returned no instruments"
+                      : "No universe payload has landed",
+                    detail: matrix.errors.length
+                      ? `This is a data state, not a filter: ${matrix.errors.join(" · ")}.`
+                      : matrix.hasLoaded
+                        ? "This is a data state, not a filter — the requests completed and carried no rows."
+                        : "The requests have not returned a payload, and none reported an error either. This is not an empty universe; it is an unanswered one.",
+                    onClear: null,
+                  }
+                : null
+          }
           selectedSymbol={ctx.symbol}
           focusedIndex={focusedIndex}
           focusedColumn={focusedColumn}
@@ -235,7 +275,7 @@ export function CommandView({
         </span>
       </div>
 
-      <CoverageStrip matrix={matrix} />
+      <CoverageStrip matrix={matrix} loading={loading} />
     </div>
   );
 }
@@ -243,39 +283,45 @@ export function CommandView({
 /**
  * Column coverage — the antidote to a matrix that looks complete because the
  * empty cells are quiet. States, per column, how many rows have a real source
- * and why the rest do not.
+ * and why the rest do not. While loading it says so rather than printing 0/1.
  */
-function CoverageStrip({ matrix }: { matrix: UniverseMatrix }) {
+function CoverageStrip({ matrix, loading }: { matrix: UniverseMatrix; loading: boolean }) {
   return (
     <div className="rounded-2xl border border-bg-border bg-bg-secondary/16 px-3 py-2.5">
       <div className="mb-1.5 text-[10px] uppercase tracking-[0.14em] text-text-muted">
         Column coverage — what actually has a source
       </div>
-      <div className="flex flex-wrap gap-x-4 gap-y-1.5 text-[11px]">
-        {matrix.coverage.map((c) => {
-          const full = c.covered >= c.total;
-          const none = c.covered === 0;
-          return (
-            <span
-              key={c.key}
-              className="inline-flex items-center gap-1.5 font-mono"
-              title={c.unavailableReason ?? `${c.covered} of ${c.total} rows carry this column`}
-            >
+      {loading ? (
+        <div className="font-mono text-[11px] text-text-muted">
+          counting sources… coverage is unknown until the universe lands.
+        </div>
+      ) : (
+        <div className="flex flex-wrap gap-x-4 gap-y-1.5 text-[11px]">
+          {matrix.coverage.map((c) => {
+            const full = c.covered >= c.total;
+            const none = c.covered === 0;
+            return (
               <span
-                className={
-                  none ? "text-text-muted" : full ? "text-accent-green" : "text-accent-amber"
-                }
+                key={c.key}
+                className="inline-flex items-center gap-1.5 font-mono"
+                title={c.unavailableReason ?? `${c.covered} of ${c.total} rows carry this column`}
               >
-                {c.label}
+                <span
+                  className={
+                    none ? "text-text-muted" : full ? "text-accent-green" : "text-accent-amber"
+                  }
+                >
+                  {c.label}
+                </span>
+                <span className="text-text-muted">
+                  {c.covered}/{c.total}
+                </span>
+                {c.unavailableReason ? <span className="text-text-muted">ⓘ</span> : null}
               </span>
-              <span className="text-text-muted">
-                {c.covered}/{c.total}
-              </span>
-              {c.unavailableReason ? <span className="text-text-muted">ⓘ</span> : null}
-            </span>
-          );
-        })}
-      </div>
+            );
+          })}
+        </div>
+      )}
     </div>
   );
 }

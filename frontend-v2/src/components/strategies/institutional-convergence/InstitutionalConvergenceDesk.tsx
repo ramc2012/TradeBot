@@ -251,7 +251,7 @@ export default function InstitutionalConvergenceDesk() {
           <span className="text-[11.5px] text-text-muted">Reported reward_risk: {formatNumber(selected?.risk?.reward_risk, 2)} — not rendered as R.</span>
         </div>
       </Section> : null}
-      <Section title="Daily circuit breaker" icon={<ShieldCheck size={16}/>}><div className="flex flex-wrap gap-2"><StatusBadge label={circuit?.locked ? "LOCKED" : "ARMED"} variant={circuit?.locked ? "error" : "success"}/><StatusBadge label={`${circuit?.consecutive_losses ?? 0}/2 consecutive losses`} variant="neutral"/><StatusBadge label={`day ${formatMoney(circuit?.day_pnl)}`} variant="neutral"/><StatusBadge label={`limit ${formatMoney(circuit?.loss_limit)}`} variant="neutral"/></div></Section>
+      <Section title="Daily circuit breaker" icon={<ShieldCheck size={16}/>}><div className="flex flex-wrap gap-2"><StatusBadge label={circuit?.locked ? "LOCKED" : "ARMED"} variant={circuit?.locked ? "error" : "info"}/><StatusBadge label={`${circuit?.consecutive_losses ?? 0}/2 consecutive losses`} variant="neutral"/><StatusBadge label={`day ${formatMoney(circuit?.day_pnl)}`} variant="neutral"/><StatusBadge label={`limit ${formatMoney(circuit?.loss_limit)}`} variant="neutral"/></div></Section>
       <ExecutionSections market={market} paper={paper} asOf={latest?.generated_at}/>
     </div> : null}
     {data && activeTab === "gates" ? <SignalQualityTab laneKeys={[market === "MCX" ? "institutional_convergence_commodity" : "institutional_convergence"]} title={`${market} Institutional Convergence validation`}/> : null}

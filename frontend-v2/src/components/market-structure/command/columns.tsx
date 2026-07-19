@@ -7,6 +7,13 @@
  * `sortValue` returns null for "no source"; the comparator always sinks nulls
  * to the bottom regardless of direction, so sorting can never make a missing
  * cell look like a small number.
+ *
+ * COLUMN ORDER IS LOAD-BEARING (2026-07-19). The first `FROZEN_COLUMN_COUNT`
+ * columns are frozen by `MatrixTable` and never scroll away, so the two that
+ * answer "what is this" and "can I believe it" — Instrument and Readiness —
+ * come first and carry FIXED pixel widths. Fixed widths are what make
+ * `frozenLeftOffset` exact without measuring the DOM; do not convert them back
+ * to `fr` tracks without also solving the offsets.
  */
 import { formatNumber, formatAgeShortish } from "./format";
 import { IntentGlyph, ReadinessGlyph, RiskGlyph, SignalGlyph, StageGlyph, Unavailable } from "../glyphs";
@@ -24,13 +31,38 @@ export type MatrixColumn = {
   title?: string;
 };
 
+/**
+ * The frozen tracks, in pixels. Instrument then Readiness — "what is this" and
+ * "can I believe it", the two facts that must survive any horizontal scroll.
+ */
+export const FROZEN_WIDTHS = [132, 104] as const;
+export const FROZEN_COLUMN_COUNT = FROZEN_WIDTHS.length;
+/** The grid's `gap-2`, in pixels. Frozen offsets must account for it. */
+const COLUMN_GAP = 8;
+
+/**
+ * Left offset for frozen column `index`, in the scrollport's coordinates. Exact
+ * because the frozen tracks are fixed-width; the first column carries the row's
+ * left padding internally (`pl-3`), so its natural offset is 0 and the cell does
+ * not shift when it becomes stuck.
+ */
+export function frozenLeftOffset(index: number): number {
+  let left = 0;
+  for (let i = 0; i < index && i < FROZEN_COLUMN_COUNT; i += 1) {
+    left += FROZEN_WIDTHS[i] + COLUMN_GAP;
+  }
+  return left;
+}
+
 export const MATRIX_COLUMNS: MatrixColumn[] = [
   {
     key: "symbol",
     label: "Instrument",
-    width: "minmax(120px, 1.1fr)",
+    // FROZEN — fixed width (see frozenLeftOffset).
+    width: `${FROZEN_WIDTHS[0]}px`,
     sortValue: (r) => r.symbol,
-    title: "Underlying / root. Selecting a row re-pins the whole workspace.",
+    title:
+      "Underlying / root. Selecting a row re-pins the whole workspace. This column is frozen: it never scrolls away.",
     render: (r) => (
       // The symbol never truncates — the kind label yields first, because a
       // half-rendered ticker is unreadable while a clipped "commodity" is not.
@@ -40,6 +72,23 @@ export const MATRIX_COLUMNS: MatrixColumn[] = [
           {String(r.kind || "").toLowerCase()}
         </span>
       </span>
+    ),
+  },
+  {
+    key: "readiness",
+    label: "Readiness",
+    // FROZEN — fixed width (see frozenLeftOffset).
+    width: `${FROZEN_WIDTHS[1]}px`,
+    sortValue: (r) => (r.ageSeconds == null ? null : -r.ageSeconds),
+    title:
+      "Age of this instrument's own observation, plus whether it is usable. Rows whose only source is a CVD/footprint stream grade INFERRED FROM QUOTES, never OBSERVED. This column is frozen: it never scrolls away.",
+    render: (r) => (
+      <ReadinessGlyph
+        freshness={r.freshness}
+        sufficiency={r.sufficiency}
+        age={formatAgeShortish(r.ageSeconds)}
+        reasons={r.readinessReasons}
+      />
     ),
   },
   {
@@ -54,22 +103,6 @@ export const MATRIX_COLUMNS: MatrixColumn[] = [
       ) : (
         <span className="font-mono text-text-secondary">{formatNumber(r.spot, 2)}</span>
       ),
-  },
-  {
-    key: "readiness",
-    label: "Readiness",
-    width: "minmax(96px, 0.85fr)",
-    sortValue: (r) => (r.ageSeconds == null ? null : -r.ageSeconds),
-    title:
-      "Age of this instrument's own observation, plus whether it is usable. Rows whose only source is a CVD/footprint stream grade INFERRED FROM QUOTES, never OBSERVED.",
-    render: (r) => (
-      <ReadinessGlyph
-        freshness={r.freshness}
-        sufficiency={r.sufficiency}
-        age={formatAgeShortish(r.ageSeconds)}
-        reasons={r.readinessReasons}
-      />
-    ),
   },
   {
     key: "mp",

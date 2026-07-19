@@ -27,8 +27,13 @@ export type WorkspaceContextApi = {
   ctx: WorkspaceContext;
   /** One atomic context mutation → one URL replace. */
   setCtx: (patch: Partial<WorkspaceContext>) => void;
-  /** True when the time frontier forces replay (asof ≠ now); flag is locked. */
-  replayForced: boolean;
+  /**
+   * True when the trader has typed a past time frontier. It does NOT mean the
+   * data moved — no wired endpoint accepts an as-of (see `context/schema.ts`) —
+   * so this exists only so the UI can say, loudly, that the field is not
+   * applied. It must never be used to derive a replay/historical data mode.
+   */
+  asOfPinnedButUnapplied: boolean;
 };
 
 export function useWorkspaceContext(): WorkspaceContextApi {
@@ -54,7 +59,9 @@ export function useWorkspaceContext(): WorkspaceContextApi {
       if (patch.symbol && patch.symbol !== current.symbol && patch.contract === undefined) {
         next.contract = null;
       }
-      if (next.asOf !== "now") next.replay = true;
+      // NOTE: `asOf` deliberately does NOT set any replay/suppression flag.
+      // Deriving one here was the mechanism by which a July-15 URL painted
+      // REPLAY over the July-17 snapshot.
       next.symbol = String(next.symbol || "").toUpperCase();
 
       const qs = serializeContext(next).toString();
@@ -63,5 +70,5 @@ export function useWorkspaceContext(): WorkspaceContextApi {
     [router, pathname, search],
   );
 
-  return { ctx, setCtx, replayForced: ctx.asOf !== "now" };
+  return { ctx, setCtx, asOfPinnedButUnapplied: ctx.asOf !== "now" };
 }

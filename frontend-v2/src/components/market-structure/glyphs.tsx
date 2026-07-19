@@ -16,7 +16,21 @@
  */
 import { clsx } from "clsx";
 
-import type { Freshness, Sufficiency } from "@/lib/market-semantics";
+import { setupStageVariant, type BadgeVariant, type Freshness, type Sufficiency } from "@/lib/market-semantics";
+
+/**
+ * The ONE place a semantic variant becomes a text colour in this workspace.
+ * Green is reserved for healthy-live / actionable-confirmed; everything that
+ * merely means "armed and waiting" is blue. The variant itself is decided by
+ * the shared contract (`lib/status-variants`), never re-decided per glyph.
+ */
+const VARIANT_TEXT: Record<BadgeVariant, string> = {
+  success: "text-accent-green",
+  info: "text-accent-blue",
+  warn: "text-accent-amber",
+  error: "text-accent-red",
+  neutral: "text-text-muted",
+};
 
 /** The one way this workspace renders "there is no source for this cell". */
 export function Unavailable({ reason, className }: { reason?: string | null; className?: string }) {
@@ -72,15 +86,14 @@ export function ReadinessGlyph({
   );
 }
 
-/** Convergence lifecycle stage. ARMED is not a trade; MISSED is not a signal. */
-const STAGE_CLASS: Record<string, string> = {
-  ARMED: "text-accent-green",
-  TRIGGERED: "text-accent-green",
-  WATCHING: "text-accent-blue",
-  MISSED_NO_CHASE: "text-accent-amber",
-  INVALIDATED: "text-text-muted",
-  FLAT: "text-text-muted",
-};
+/**
+ * Convergence lifecycle stage. ARMED is not a trade; MISSED is not a signal.
+ *
+ * ARMED used to render GREEN here, which put it in the same visual class as a
+ * TRIGGERED setup and as healthy-live data. It is now blue, via the shared
+ * `setupStageVariant` contract — so the matrix cell, the drawer badge and any
+ * future surface all move together.
+ */
 
 export function StageGlyph({
   stage,
@@ -98,7 +111,7 @@ export function StageGlyph({
     confirmations != null && required != null ? `${confirmations}/${required}` : null;
   return (
     <span
-      className={clsx("inline-flex items-center gap-1.5 font-mono", STAGE_CLASS[stage] ?? "text-text-secondary")}
+      className={clsx("inline-flex items-center gap-1.5 font-mono", VARIANT_TEXT[setupStageVariant(stage)])}
       title={blocked.length ? `blocked by: ${blocked.join(", ")}` : "no blockers reported"}
     >
       <span className="truncate">{stage.toLowerCase().replace(/_/g, " ")}</span>
