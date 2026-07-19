@@ -96,6 +96,26 @@ def get_registry() -> tuple[LaneSpec, ...]:
             notes="Detection-only monitor for a frozen REST premium feed (default OFF).",
         ),
         LaneSpec(
+            key="stock_spot_sweep",
+            label="F&O Stock Spot Post-Close Sweep",
+            kind="data",
+            execution_mode="none",
+            status_source="supervisor",
+            cadence_seconds=3600.0,
+            broker_profile="default",
+            exchange_session=nse,
+            enabled_flag_name="STOCK_SPOT_SWEEP_ENABLED",
+            runner_keys=("stock_spot_sweep",),
+            status_endpoint="/api/system/automation-status",
+            notes=(
+                "Post-close (once/session) sweep of the F&O stock universe for "
+                "intraday spot. Stock 30m had no durable live writer — "
+                "upstox_research_sync covers 25 of ~211 names per pass — so full "
+                "coverage previously required a manual backfill. CLASS_BULK + "
+                "post-close only, so it never competes with live decision traffic."
+            ),
+        ),
+        LaneSpec(
             key="token_readiness",
             label="Pre-open Broker Token Readiness",
             kind="monitor",
@@ -553,7 +573,9 @@ def supervisor_runner_keys() -> set[str]:
 # NO double-count: every key is unique AND no lane key collides with any other
 # lane's runner_key (see registry_counts + test_lane_registry). This constant is
 # the drift guard — adding/removing a LaneSpec must update it (a test asserts it).
-EXPECTED_LANE_TOTAL = 32
+# 2026-07-19: 32 -> 33 with stock_spot_sweep, the post-close F&O stock spot
+# writer (stock 30m previously had no durable live writer at all).
+EXPECTED_LANE_TOTAL = 33
 
 
 def registry_counts() -> dict[str, int]:

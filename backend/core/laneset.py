@@ -93,6 +93,7 @@ CORE_SUBSYSTEMS = frozenset(
         "runner:option_flow_watchdog",
         "runner:token_readiness",
         "runner:market_intelligence",
+        "runner:stock_spot_sweep",
     }
 )
 

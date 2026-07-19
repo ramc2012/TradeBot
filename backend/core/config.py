@@ -320,6 +320,25 @@ class Settings(BaseSettings):
     OPTION_FLOW_WATCHDOG_ENABLED: bool = False
     OPTION_FLOW_WATCHDOG_INTERVAL_SECONDS: int = 60
     OPTION_FLOW_WATCHDOG_STALE_SECONDS: int = 300
+    # Post-close F&O stock spot sweep. The only LIVE writer of stock 30m spot is
+    # data/upstox_research_sync.py with spot_limit=25, so it reaches 25 of ~211
+    # names per pass (07-16: 124 names, 07-17: 20). Every full-coverage day so
+    # far came from a MANUAL backfill, so the gap re-opened each evening. This
+    # runner sweeps the whole F&O stock universe ONCE after the close, under the
+    # BULK broker class, so it never competes with live decision traffic.
+    STOCK_SPOT_SWEEP_ENABLED: bool = True
+    # Intervals to sweep. 30minute is the positional/decision grid; 3minute is
+    # the fast-lane grid and is even thinner today (22 names 07-15, ZERO 07-16,
+    # 67 07-17 — all live_tick/aggregate, no durable writer).
+    STOCK_SPOT_SWEEP_INTERVALS: str = "30minute,3minute"
+    # Trailing sessions re-fetched each run. >1 self-heals a missed evening
+    # (holiday, restart, dead token) without a manual backfill. Bounded.
+    STOCK_SPOT_SWEEP_DAYS: int = 3
+    # Hard ceiling on symbols per run (0 = the whole catalog). Safety valve.
+    STOCK_SPOT_SWEEP_MAX_SYMBOLS: int = 0
+    # Pacing between per-symbol broker calls (~3 req/s — well inside Fyers
+    # 10/s + 200/min, and BULK is capped at 25% of the shared budget anyway).
+    STOCK_SPOT_SWEEP_SLEEP_SECONDS: float = 0.35
     # Pre-open broker token readiness sweep (07:00-09:20 IST, NSE session days):
     # validates Fyers (auto-refresh via saved refresh token + PIN when the daily
     # access token is dead) + checks Upstox expiry, and logs/alerts BEFORE open

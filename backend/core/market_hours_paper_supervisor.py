@@ -24,6 +24,20 @@ def _in_nse_market_hours(now: datetime) -> bool:
     return trading_calendar.is_exchange_open("NSE", now)
 
 
+def _never_in_session(now: datetime) -> bool:
+    """Always-closed window: the runner can ONLY reach the post-close path.
+
+    The supervisor dispatches a runner when ``_runtime_market_open(...) and
+    is_due(...)``; the post-close catch-up branch is the ``elif``, and
+    ``_post_close_catchup_eligible`` further requires ``market_open`` False. So
+    a post-close-only data job must report its market as never open — giving it
+    ``_in_nse_market_hours`` instead makes it ALSO fire in-session on its
+    ``interval_seconds`` cadence (and immediately at the open, since
+    ``last_started_at`` is None), which is exactly what such a job must not do.
+    """
+    return False
+
+
 def _in_institutional_convergence_window(now: datetime) -> bool:
     return trading_calendar.has_exchange_session("NSE", now.date()) and time(8, 45) <= now.time() <= time(15, 30)
 
@@ -539,6 +553,12 @@ class MarketHoursPaperSupervisor:
             # market_data/option_flow_watchdog.py.
             from market_data.option_flow_watchdog import run_option_flow_watchdog
             return await run_option_flow_watchdog()
+
+        async def _stock_spot_sweep_runner() -> dict[str, Any]:
+            # Post-close data maintenance: fills the F&O stock intraday spot grid
+            # that had no durable live writer. Bounded + idempotent + CLASS_BULK.
+            from market_data.stock_spot_sweeper import sweep_stock_spot
+            return await sweep_stock_spot()
 
         async def _auction_runner() -> dict[str, Any]:
             return await run_auction_market_cycle()
@@ -1164,6 +1184,38 @@ class MarketHoursPaperSupervisor:
                 post_close_catchup=False,
                 # Data-plane freshness monitor — watches option_premium_candles
                 # persistence, which the CORE plane's feed pipeline owns.
+                plane="core",
+            ),
+            RunnerConfig(
+                key="stock_spot_sweep",
+                label="F&O Stock Spot Post-Close Sweep",
+                # Never reached in-session: market_hours_fn is _never_in_session,
+                # so the ONLY dispatch path is the once-per-session post-close
+                # catch-up. interval_seconds is therefore inert (kept non-zero
+                # only because RunnerConfig requires a cadence). The sweep is
+                # idempotent (ON CONFLICT DO NOTHING) so a retry is a no-op.
+                interval_seconds=3600,
+                callback=_stock_spot_sweep_runner,
+                enabled=settings.STOCK_SPOT_SWEEP_ENABLED,
+                # broker_profile left DEFAULT: this is data maintenance, not a
+                # decision lane, so neither cadence-group kill switch should
+                # dark it — its budget safety comes from CLASS_BULK instead.
+                # _in_nse_market_hours here would make the supervisor ALSO fire
+                # this 211-symbol sweep hourly DURING the session — and
+                # immediately at 09:15, since last_started_at is None. That is
+                # precisely the contention this lane exists to avoid, so the
+                # window is always-closed and the post-close branch is the only
+                # way in.
+                market_hours_fn=_never_in_session,
+                next_open_fn=_next_nse_market_open,
+                # The whole point: run AFTER the close, once per session, so the
+                # ~211-name sweep never competes with live decision traffic.
+                post_close_catchup=True,
+                post_close_force_daily=True,
+                # ~211 names x 2 intervals at ~3 req/s ≈ 150s; allow headroom for
+                # broker slowness. The sweep also self-limits via deadline_seconds.
+                timeout_seconds=1200.0,
+                # Spot ingestion belongs to the core data plane.
                 plane="core",
             ),
             RunnerConfig(

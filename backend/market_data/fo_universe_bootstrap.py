@@ -15,6 +15,10 @@ from api.routers.auth import (
     refresh_persistent_credentials_async,
 )
 from db.database import AsyncSessionLocal
+from market_data.catalog_integrity import (
+    assert_unique_spot_keys,
+    filter_key_collisions,
+)
 
 
 MIN_UNDERLYING_ROWS = 50
@@ -84,6 +88,12 @@ async def _upsert_metadata_rows(rows: list[dict[str, str]]) -> None:
     if not rows:
         return
     async with AsyncSessionLocal() as session:
+        # Never let a re-bootstrap assign an instrument key that another symbol
+        # already owns — that is the M&M/MARUTI ISIN collision, which silently
+        # corrupts underlying_spot_candles for BOTH names (see catalog_integrity).
+        rows = await filter_key_collisions(session, rows)
+        if not rows:
+            return
         await session.execute(
             text(
                 """
@@ -175,12 +185,18 @@ async def ensure_fo_underlying_catalog(
         await _upsert_metadata_rows(resolved)
 
         counts_after = await _catalog_counts()
+        # Loud, explicit invariant check: no two underlyings may share a
+        # spot_instrument_key. Non-raising so one bad row can never take the
+        # backend dark, but it ERRORs per collision so it cannot pass silently.
+        async with AsyncSessionLocal() as session:
+            collisions = await assert_unique_spot_keys(session)
         result = {
             "status": "ready" if _catalog_is_ready(counts_after, min_rows=min_rows) else "partial",
             "counts_before": counts_before,
             "counts_after": counts_after,
             "universe_rows": len(universe_rows),
             "metadata_rows": len(resolved),
+            "key_collisions": collisions,
         }
         _last_bootstrap_checked_at = monotonic()
         _last_bootstrap_result = result

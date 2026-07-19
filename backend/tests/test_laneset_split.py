@@ -81,7 +81,12 @@ def test_planned_runner_inventory_matches_supervisor(monkeypatch):
     core_tagged = {
         key for key, runtime in supervisor._runners.items() if runtime.config.plane == "core"
     }
-    assert core_tagged == {"option_flow_watchdog", "token_readiness", "market_intelligence"}
+    assert core_tagged == {
+        "option_flow_watchdog",
+        "token_readiness",
+        "market_intelligence",
+        "stock_spot_sweep",
+    }
 
 
 # ── 3. Supervisor runner partition + per-plane catch-up path ─────────────────
@@ -90,11 +95,17 @@ def test_planned_runner_inventory_matches_supervisor(monkeypatch):
 def test_supervisor_runner_partition_by_laneset(monkeypatch):
     monkeypatch.setattr(settings, "LANESET", "all", raising=False)
     all_keys = set(MarketHoursPaperSupervisor(enabled=False)._runners)
-    assert len(all_keys) == 17
+    # 18 = 17 + stock_spot_sweep (post-close F&O stock spot writer, 2026-07-19).
+    assert len(all_keys) == 18
 
     monkeypatch.setattr(settings, "LANESET", "core", raising=False)
     core_keys = set(MarketHoursPaperSupervisor(enabled=False)._runners)
-    assert core_keys == {"option_flow_watchdog", "token_readiness", "market_intelligence"}
+    assert core_keys == {
+        "option_flow_watchdog",
+        "token_readiness",
+        "market_intelligence",
+        "stock_spot_sweep",
+    }
 
     monkeypatch.setattr(settings, "LANESET", "strategies", raising=False)
     strategy_keys = set(MarketHoursPaperSupervisor(enabled=False)._runners)

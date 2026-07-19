@@ -292,6 +292,24 @@ class MACDBacktester:
         if results:
             results.sort(key=_score, reverse=True)
             chosen = results[0]
+            # Fail CLOSED on a fuzzy-only match. Upstox /instruments/search is a
+            # fuzzy endpoint: a query for "M&M" returns MRPL/MCX/MOTHERSON/... and
+            # a query that never matches exactly still returns 20-30 foreign rows.
+            # Taking results[0] blindly adopts a FOREIGN ISIN under this symbol,
+            # which then silently collides in underlying_spot_candles (PK is
+            # (instrument_key, interval, time)) and the two names overwrite each
+            # other bar-for-bar. That is exactly how M&M ended up carrying
+            # MARUTI's INE585B01010. A missing key is recoverable; a wrong key
+            # corrupts the tape, so refuse to guess.
+            if not _score(chosen)[0]:
+                logger.warning(
+                    f"[instrument resolve] REFUSING fuzzy-only match for {underlying}: "
+                    f"best candidate was {chosen.get('trading_symbol')!r} "
+                    f"({chosen.get('instrument_key')}) with no exact "
+                    f"trading_symbol/name/short_name match — leaving unresolved"
+                )
+                self._underlying_meta_cache[underlying] = {}
+                return None
             meta = {
                 "spot_instrument_key": chosen.get("instrument_key"),
                 "underlying_key": chosen.get("instrument_key"),

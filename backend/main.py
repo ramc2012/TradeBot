@@ -151,6 +151,20 @@ async def lifespan(app: FastAPI):
     # ── CORE plane: tick construction + the ONE broker WS ────────────────────
     # (LANESET=all keeps every guard True — byte-identical single-process boot.)
     if boots_core():
+        # Catalog integrity invariant: no two F&O underlyings may share a
+        # spot_instrument_key. They key the same row in underlying_spot_candles
+        # (PK = instrument_key/interval/time), so a collision makes the two names
+        # silently overwrite each other bar-for-bar (the M&M/MARUTI ISIN bug).
+        # Non-fatal by design — it ERRORs per collision so it cannot pass unseen,
+        # but a bad catalog row must never take the whole backend dark.
+        try:
+            from db.database import AsyncSessionLocal as _CatalogSession
+            from market_data.catalog_integrity import assert_unique_spot_keys
+            async with _CatalogSession() as _session:
+                await assert_unique_spot_keys(_session)
+        except Exception as e:
+            logger.warning(f"Catalog integrity check skipped: {e}")
+
         # Wire market profile builder to data router
         from market_data.market_profile import market_profile_builder
         for symbol in LIVE_INDEX_APP_SYMBOLS:
