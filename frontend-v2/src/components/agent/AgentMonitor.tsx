@@ -48,6 +48,7 @@ import {
 } from "@/components/desk-ui";
 import { api } from "@/lib/api";
 import { isBrokerReady, type BrokerStatusEntry } from "@/lib/broker-status";
+import { useSystemState } from "@/hooks/useSystemState";
 
 // ── Types (mirrors /api/trading/strategy-agent/status) ─────────────────────
 
@@ -443,6 +444,7 @@ export default function AgentMonitor() {
 
 function RuntimeBanner({ status }: { status?: AgentStatus }) {
   const mi = status?.data_health?.market_intelligence;
+  const { nseOpen } = useSystemState();
   const expiries = status?.candidate_expiries ?? [];
   const errored = Boolean(status?.last_error);
   return (
@@ -456,9 +458,13 @@ function RuntimeBanner({ status }: { status?: AgentStatus }) {
           label={status?.kill_switch_active ? "kill switch active" : "kill switch released"}
           variant={status?.kill_switch_active ? "error" : "success"}
         />
+        {/* Session comes from the shared IST clock (useSystemState), not from
+            the agent payload's own `market_open`. A disagreement between the
+            two is itself a fact worth seeing, so it is flagged amber. */}
         <StatusBadge
-          label={mi?.market_open ? "market open" : "market closed"}
-          variant={mi?.market_open ? "success" : "neutral"}
+          label={nseOpen ? "market open" : "market closed"}
+          variant={nseOpen ? "success" : "neutral"}
+          className={mi?.market_open != null && mi.market_open !== nseOpen ? "border-accent-amber/60" : undefined}
         />
         {mi?.execution_mode ? <StatusBadge label={mi.execution_mode} variant="info" /> : null}
         <span className="text-[11.5px] text-text-muted">Expiry {status?.target_expiry || "—"}</span>

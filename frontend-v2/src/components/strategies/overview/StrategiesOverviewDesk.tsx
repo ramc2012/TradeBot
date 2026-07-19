@@ -24,6 +24,7 @@ import { LayoutGrid, ListChecks, Map as MapIcon, Network, ShieldCheck } from "lu
 
 import {
   DeskShell,
+  TransportBadge,
   MetricTile,
   REFRESH_MS,
   StatusBadge,
@@ -508,10 +509,7 @@ export default function StrategiesOverviewDesk() {
       activeTab={activeTab}
       onTabChange={setActiveTab}
       rightSlot={
-        <StatusBadge
-          label={streamLive ? "● live book" : "polling"}
-          variant={streamLive ? "success" : "info"}
-        />
+        <TransportBadge connected={streamLive} />
       }
     >
       {activeTab !== "signal-quality" && activeTab !== "inventory" ? (

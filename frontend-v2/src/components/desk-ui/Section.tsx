@@ -1,15 +1,23 @@
 import { clsx } from "clsx";
 
+import { ProvenanceChip } from "./SemanticBadges";
+import type { Provenance } from "@/lib/market-semantics";
+
 /**
  * Standard section wrapper. The v1 frontend used a mix of
  * `rounded-2xl`, `rounded-[26px]`, `rounded-[28px]` with inconsistent
  * border / background. One Section here, used everywhere.
+ *
+ * Optional `provenance` renders the shared caption affordance under the
+ * section body: source · grade · aggregation · completeness · age · data mode.
+ * Existing callers are unaffected (the prop is opt-in).
  */
 export function Section({
   title,
   icon,
   description,
   rightSlot,
+  provenance,
   padded = true,
   className,
   children,
@@ -18,6 +26,8 @@ export function Section({
   icon?: React.ReactNode;
   description?: string;
   rightSlot?: React.ReactNode;
+  /** Panel-level data provenance — rendered as a compact caption. */
+  provenance?: Provenance | null;
   padded?: boolean;
   className?: string;
   children: React.ReactNode;
@@ -45,6 +55,7 @@ export function Section({
         </div>
       ) : null}
       {children}
+      {provenance ? <ProvenanceChip provenance={provenance} density="caption" /> : null}
     </section>
   );
 }

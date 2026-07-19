@@ -144,7 +144,8 @@ export default function SniperDesk() {
       }
       asOf={asOf}
       isFetching={signalsQuery.isFetching}
-      isLive={fresh.length > 0}
+      /* Row count is NOT liveness — a non-empty table says rows exist, not
+         that they are current. Freshness is stated by the asOf badge. */
       paperMode
       tabs={TABS}
       activeTab={activeTab}
@@ -152,8 +153,8 @@ export default function SniperDesk() {
       rightSlot={
         <div className="flex items-center gap-2">
           <StatusBadge
-            label={fresh.length ? `${fresh.length} live` : "idle"}
-            variant={fresh.length ? "success" : "neutral"}
+            label={fresh.length ? `${fresh.length} fresh signals` : "no fresh signals"}
+            variant={fresh.length ? "info" : "neutral"}
           />
           {modelName ? (
             <StatusBadge label={modelName.replace(/\.(joblib|pkl)$/i, "")} variant="info" />

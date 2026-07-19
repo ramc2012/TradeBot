@@ -48,7 +48,7 @@ export function MotionTab({ snap }: { snap?: Snapshot }) {
               spot <span className="text-text-primary">{formatNumber(spot, 1)}</span>
             </span>
           ) : null}
-          <StatusBadge label={hasLive ? "live snapshot" : "no snapshot"} variant={hasLive ? "success" : "neutral"} />
+          <StatusBadge label={hasLive ? "snapshot present" : "no snapshot"} variant={hasLive ? "info" : "neutral"} />
         </div>
       </section>
 

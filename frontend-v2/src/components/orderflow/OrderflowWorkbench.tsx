@@ -57,6 +57,7 @@ import {
   type OrderFlow,
 } from "@/components/strategies/shared";
 import { api as apiClient } from "@/lib/api";
+import { classifyDataMode, classifySourceGrade, dataModeLabel, sourceGradeLabel } from "@/lib/market-semantics";
 
 // ─── Types (built from the live /api/orderflow/snapshot shape) ──────────────
 
@@ -326,7 +327,7 @@ export default function OrderflowWorkbench() {
         <MetricTile
           label="Bars · prints"
           value={`${inst?.raw_bar_count ?? 0} · ${inst?.raw_trade_count ?? 0}`}
-          detail={dq.snapshot_mode || (dq.live_mode ? "live" : "replay")}
+          detail={dq.snapshot_mode || dataModeLabel(classifyDataMode(dq))}
         />
       </section>
 
@@ -409,8 +410,10 @@ export default function OrderflowWorkbench() {
 
 // ─── Data-quality / source row ──────────────────────────────────────────────
 
-// Order-flow sources that represent genuine live microstructure. Anything else
-// (bar_inference / historical_replay) is reconstructed, NOT tick-driven.
+// The order-flow tape names this workbench accepts as genuine live
+// microstructure. Deliberately STRICTER than the shared contract's `observed`
+// grade — a TimescaleDB history read grades as observed for provenance but is
+// not a live tape, and this surface gates execution readiness.
 const LIVE_OF_SOURCES = new Set(["market_ticks"]);
 // Max data age (seconds) for intraday microstructure to count as live.
 const MAX_LIVE_AGE_SEC = 90;
@@ -427,7 +430,12 @@ export function evaluateReadiness(dq: DataQuality, inst?: Instrument): {
     Number(dq.trade_print_count ?? 0) > 0 &&
     inst?.synthetic_quote !== true;
 
-  const isLiveSource = dq.live_mode === true && LIVE_OF_SOURCES.has(ofSource);
+  // Grade + data mode come from the SHARED contract so this workbench, the
+  // Auction desk, MP and Convergence answer "is this real flow?" identically.
+  const grade = classifySourceGrade(ofSource);
+  const dataMode = classifyDataMode(dq);
+  const isLiveSource =
+    dq.live_mode === true && grade === "observed" && LIVE_OF_SOURCES.has(ofSource);
   const isFresh = Number.isFinite(ageSec) && ageSec <= MAX_LIVE_AGE_SEC;
   const executionReady = dq.execution_ready !== false && !dq.degraded_reason;
 
@@ -436,9 +444,9 @@ export function evaluateReadiness(dq: DataQuality, inst?: Instrument): {
   const notLiveReason = ready
     ? null
     : !isLiveSource
-      ? dq.snapshot_mode === "historical_replay"
+      ? dataMode === "historical_replay"
         ? "REPLAY"
-        : `SOURCE: ${ofSource || "—"}`
+        : `SOURCE: ${ofSource || "—"} (${sourceGradeLabel(grade)})`
       : !isFresh
         ? `STALE ${formatAge(ageSec)}`
         : !hasMicro

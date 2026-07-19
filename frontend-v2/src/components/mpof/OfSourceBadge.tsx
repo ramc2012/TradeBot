@@ -13,32 +13,49 @@
  *
  * The pulse on the amber badge is deliberate — fabricated flow must be
  * impossible to mistake for the real thing.
+ *
+ * Grading is delegated to the shared semantic contract
+ * (`@/lib/market-semantics`) so this badge, the provenance chip and every
+ * desk's own honesty label can never disagree about the same source string.
  */
+import { classifySourceGrade, normalizeSource } from "@/lib/market-semantics";
 
 export type OfSourceKind = "real" | "inferred" | "unknown";
 
-const REAL_SOURCES = new Set(["market_ticks", "tick_reconstruction", "tick_reconstruction_book"]);
-const INFERRED_SOURCES = new Set([
+/**
+ * The order-flow tape names this badge is allowed to call "REAL TICKS".
+ * Deliberately narrower than the shared `classifySourceGrade` — a TimescaleDB
+ * history read grades as `observed` for provenance purposes but is NOT a live
+ * order-flow tape, so it must never light this badge green.
+ */
+const OF_TAPE_SOURCES = new Set(["market_ticks", "tick_reconstruction", "tick_reconstruction_book"]);
+
+/**
+ * DEPRECATED in favour of `classifySourceGrade` from `@/lib/market-semantics`.
+ * Kept as a thin adapter because nine surfaces render this exact badge: the
+ * *grade* now comes from the shared contract, the *labels* are unchanged.
+ */
+export function classifyOfSource(source?: string | null): { kind: OfSourceKind; label: string } {
+  const s = normalizeSource(source);
+  if (OF_TAPE_SOURCES.has(s)) {
+    return { kind: "real", label: s === "tick_reconstruction_book" ? "REAL TICKS · BOOK" : "REAL TICKS" };
+  }
+  const grade = classifySourceGrade(s);
+  if (grade === "unavailable") return { kind: "unknown", label: "SOURCE UNKNOWN" };
+  if (s === "insufficient_ticks") return { kind: "inferred", label: "INSUFFICIENT TICKS · INFERRED" };
+  if (INFERRED_LABEL_SOURCES.has(s)) return { kind: "inferred", label: "BAR PROXY · INFERRED" };
+  // Recognised by the contract but not a known OF tape name — show it verbatim
+  // and flag it as inferred-grade rather than silently promoting it.
+  return { kind: "inferred", label: `${s.replace(/_/g, " ").toUpperCase()} · UNVERIFIED` };
+}
+
+const INFERRED_LABEL_SOURCES = new Set([
   "bar_inference",
   "bar_proxy",
   "bar_fallback",
   "bar_proxy_timeout",
-  "insufficient_ticks",
   "spot_index_proxy",
 ]);
-
-export function classifyOfSource(source?: string | null): { kind: OfSourceKind; label: string } {
-  const s = String(source || "").trim().toLowerCase();
-  if (REAL_SOURCES.has(s)) {
-    return { kind: "real", label: s === "tick_reconstruction_book" ? "REAL TICKS · BOOK" : "REAL TICKS" };
-  }
-  if (INFERRED_SOURCES.has(s)) {
-    return { kind: "inferred", label: s === "insufficient_ticks" ? "INSUFFICIENT TICKS · INFERRED" : "BAR PROXY · INFERRED" };
-  }
-  if (!s || s === "unavailable" || s === "unknown") return { kind: "unknown", label: "SOURCE UNKNOWN" };
-  // Unrecognized source string — show it verbatim but flag as inferred-grade.
-  return { kind: "inferred", label: `${s.replace(/_/g, " ").toUpperCase()} · UNVERIFIED` };
-}
 
 const STYLE: Record<OfSourceKind, string> = {
   real: "border-accent-green/50 bg-accent-green/15 text-accent-green",

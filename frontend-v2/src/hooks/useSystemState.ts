@@ -88,6 +88,10 @@ function svc(health: HealthPayload | undefined, key: string): HealthService | un
 }
 
 function num(v: unknown): number | null {
+  // `Number(null)` is 0, so the naive form turns a MISSING tick age into a
+  // 0-second-old tick and lights the feed green with no data behind it. Missing
+  // must stay missing — the feed check below fails closed on null.
+  if (v == null || v === "") return null;
   const n = Number(v);
   return Number.isFinite(n) ? n : null;
 }

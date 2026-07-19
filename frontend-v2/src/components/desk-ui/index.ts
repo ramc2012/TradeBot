@@ -34,3 +34,21 @@ export { MetricTile } from "./MetricTile";
 export { StatusBadge } from "./StatusBadge";
 export { Section } from "./Section";
 export { DeskShell, useUrlTab, type DeskTab } from "./DeskShell";
+
+/**
+ * Semantic contract renderers — the shared vocabulary for
+ * data mode / source grade / freshness / sufficiency / provenance.
+ * Derivations live in `@/lib/market-semantics`; these only render them.
+ */
+export {
+  DataModeBadge,
+  SourceGradeBadge,
+  FreshnessBadge,
+  FreshnessChip,
+  SufficiencyBadge,
+  ExecutionModeBadge,
+  SchedulerBadge,
+  TransportBadge,
+  ProvenanceChip,
+  SemanticValue,
+} from "./SemanticBadges";

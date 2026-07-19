@@ -585,8 +585,18 @@ export function TradeBook({
                   <td className="font-mono">{holdDuration(t.opened_at, t.closed_at)}</td>
                   <td><ExitReasonChip reason={t.exit_reason} /></td>
                   <td className={`font-mono font-semibold ${(t.realized_pnl ?? 0) >= 0 ? "text-accent-green" : "text-accent-red"}`}>{formatSignedMoney(t.realized_pnl)}</td>
-                  <td className={`font-mono ${t._r == null ? "text-text-muted" : t._r >= 0 ? "text-accent-green" : "text-accent-red"}`} title={t._rApprox ? "approximated — initial stop unavailable, uses risk fraction × capital" : undefined}>
-                    {t._r == null ? "—" : `${t._rApprox ? "≈" : ""}${formatNumber(t._r, 2)}R`}
+                  {/* R-multiple honesty: an approximation is stated IN the cell,
+                      not hidden in a hover title. `—` means the initial stop was
+                      never recorded, so no R can be computed at all. */}
+                  <td className={`font-mono ${t._r == null ? "text-text-muted" : t._rApprox ? "text-accent-amber" : t._r >= 0 ? "text-accent-green" : "text-accent-red"}`} title={t._rApprox ? "approximated — initial stop unavailable, uses risk fraction × capital" : t._r == null ? "no initial stop recorded — R not computable" : undefined}>
+                    {t._r == null ? (
+                      <span className="border-b border-dotted border-text-muted/60">—</span>
+                    ) : (
+                      <>
+                        {t._rApprox ? "≈" : ""}{formatNumber(t._r, 2)}R
+                        {t._rApprox ? <span className="ml-1 rounded border border-accent-amber/50 px-1 text-[8.5px] uppercase tracking-[0.1em] text-accent-amber">approx</span> : null}
+                      </>
+                    )}
                   </td>
                 </tr>
               ))}

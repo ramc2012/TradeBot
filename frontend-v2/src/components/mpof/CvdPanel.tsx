@@ -16,7 +16,8 @@ import { useMemo } from "react";
 import { Bar, BarChart, CartesianGrid, Cell, Line, LineChart, ReferenceDot, ReferenceLine, ResponsiveContainer, Tooltip, XAxis, YAxis } from "recharts";
 
 import { LastUpdated } from "@/components/common/LastUpdated";
-import { StatusBadge, formatIST, formatISTTime, formatNumber } from "@/components/desk-ui";
+import { ProvenanceChip, StatusBadge, formatIST, formatISTTime, formatNumber } from "@/components/desk-ui";
+import { provenanceOf, type DataMode } from "@/lib/market-semantics";
 
 import { OfSourceBadge } from "./OfSourceBadge";
 
@@ -55,6 +56,8 @@ export function CvdPanel({
   source,
   divergence,
   asOf,
+  timeframe = "3m",
+  dataMode,
   height = 280,
   hideHeader = false,
   showDelta = true,
@@ -64,6 +67,10 @@ export function CvdPanel({
   divergence?: CvdDivergence;
   /** Overrides the last series point as the freshness timestamp. */
   asOf?: string | null;
+  /** Aggregation window, surfaced in the provenance caption. */
+  timeframe?: string | null;
+  /** Declared by the owning desk; without it the caption can only say "unknown". */
+  dataMode?: DataMode;
   height?: number;
   hideHeader?: boolean;
   /** Render the per-bar delta histogram subpanel underneath. */
@@ -100,6 +107,19 @@ export function CvdPanel({
           </div>
           <LastUpdated timestamp={lastTime} label="last bar" />
         </div>
+      ) : null}
+      {!hideHeader ? (
+        <ProvenanceChip
+          density="caption"
+          provenance={provenanceOf({
+            source,
+            asOf: lastTime,
+            timeframe,
+            dataMode,
+            have: rows.length,
+            completenessLabel: `${rows.length} points`,
+          })}
+        />
       ) : null}
 
       {rows.length ? (

@@ -25,6 +25,7 @@ import { Activity, Briefcase, Compass, Layers3, Radar, Scale, ShieldCheck, Targe
 
 import {
   DeskShell,
+  TransportBadge,
   MetricTile,
   REFRESH_MS,
   Section,
@@ -338,7 +339,7 @@ export default function CbeDesk() {
       rightSlot={
         <div className="flex items-center gap-2">
           {activeTab === "performance" ? (
-            <StatusBadge label={streamLive ? "● live" : "polling"} variant={streamLive ? "success" : "info"} />
+            <TransportBadge connected={streamLive} />
           ) : null}
           <StatusBadge
             label={`signal ${scan?.signal_session_date ?? scan?.scan_date ?? "—"}`}

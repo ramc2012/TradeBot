@@ -298,7 +298,7 @@ export default function AnalyticsPage() {
           icon={<Layers3 size={16} className="text-accent-green" />}
           title="Open Positions"
           detail="Positions from every app strategy are shown before charts or history. Non-strategy execution rows are excluded from this portfolio design."
-          right={<div className="text-xs text-text-muted">{openRows.length} open · {portfolioQuery.isFetching ? "refreshing" : "live snapshot"}</div>}
+          right={<div className="text-xs text-text-muted">{openRows.length} open · {portfolioQuery.isFetching ? "refreshing" : "loaded"}</div>}
         />
 
         <div className="mt-4 grid gap-3 md:grid-cols-2 xl:grid-cols-5">

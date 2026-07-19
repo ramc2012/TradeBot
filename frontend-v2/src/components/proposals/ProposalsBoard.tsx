@@ -11,14 +11,17 @@ import { Check, Inbox, RefreshCw, X } from "lucide-react";
 
 import { MetricTile, REFRESH_MS, Section, StatusBadge, formatIST, formatNumber, tone } from "@/components/desk-ui";
 import { api } from "@/lib/api";
+import { rrRender } from "@/lib/market-semantics";
 
 type Proposal = {
   id: string;
   symbol: string;
   strategy: string;
-  entry: number;
-  sl: number;
-  target: number;
+  // Nullable in practice: /api/agent/proposals can omit stop/target on a
+  // partial plan. Typing them non-optional produced `NaN` on screen.
+  entry: number | null;
+  sl: number | null;
+  target: number | null;
   qty: number;
   rationale: string;
   confidence: "HIGH" | "MED" | "LOW" | string;
@@ -28,10 +31,13 @@ type Proposal = {
 
 const confVariant = (c: string) => (c === "HIGH" ? "success" : c === "MED" ? "warn" : "neutral");
 
-function riskReward(p: Proposal): number | null {
-  const risk = Math.abs(p.entry - p.sl);
-  const reward = Math.abs(p.target - p.entry);
-  return risk > 0 ? reward / risk : null;
+/**
+ * R/R HONESTY: routed through the shared contract so an incomplete plan
+ * (missing entry / stop / target) renders "R/R unavailable" and names what is
+ * missing, instead of a number — or, as before, `NaN`.
+ */
+function riskReward(p: Proposal) {
+  return rrRender({ entry: p.entry, stop: p.sl, target1: p.target });
 }
 
 export default function ProposalsBoard() {
@@ -107,7 +113,7 @@ export default function ProposalsBoard() {
           <div className="grid gap-3 lg:grid-cols-2">
             {list.map((p) => {
               const rr = riskReward(p);
-              const long = p.target >= p.entry;
+              const long = (p.target ?? 0) >= (p.entry ?? 0);
               return (
                 <div key={p.id} className="rounded-xl border border-bg-border bg-bg-primary/14 p-3.5">
                   <div className="flex items-start justify-between gap-2">
@@ -147,7 +153,12 @@ export default function ProposalsBoard() {
                     <Cell label="Entry" value={formatNumber(p.entry, 1)} />
                     <Cell label="Stop" value={formatNumber(p.sl, 1)} valueClass="text-accent-red" />
                     <Cell label="Target" value={formatNumber(p.target, 1)} valueClass="text-accent-green" />
-                    <Cell label="R:R" value={rr != null ? `${rr.toFixed(2)}` : "—"} valueClass={tone(rr != null ? rr - 1 : 0)} />
+                    <Cell
+                      label="R:R"
+                      value={rr.ok ? rr.value.toFixed(2) : "unavailable"}
+                      valueClass={rr.ok ? tone(rr.value - 1) : "text-text-muted text-[11px]"}
+                      title={rr.ok ? undefined : rr.reason}
+                    />
                   </div>
                   <div className="mt-1 flex items-center justify-between text-[11px] text-text-muted">
                     <span>Qty {p.qty}</span>
@@ -163,9 +174,9 @@ export default function ProposalsBoard() {
   );
 }
 
-function Cell({ label, value, valueClass }: { label: string; value: string; valueClass?: string }) {
+function Cell({ label, value, valueClass, title }: { label: string; value: string; valueClass?: string; title?: string }) {
   return (
-    <div className="rounded-lg border border-bg-border bg-bg-primary/15 px-1.5 py-1.5">
+    <div className="rounded-lg border border-bg-border bg-bg-primary/15 px-1.5 py-1.5" title={title}>
       <div className="text-[9.5px] uppercase tracking-[0.12em] text-text-muted">{label}</div>
       <div className={`font-mono text-[13px] ${valueClass ?? "text-text-primary"}`}>{value}</div>
     </div>

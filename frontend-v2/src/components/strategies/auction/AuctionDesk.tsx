@@ -16,6 +16,7 @@ import { Activity, Brain, Compass, Gauge, ListChecks, Map as MapIcon, Radio, Shi
 
 import {
   DeskShell,
+  TransportBadge,
   MetricTile,
   REFRESH_MS,
   Section,
@@ -35,6 +36,7 @@ import { StrategyLiveStream } from "@/components/strategies/shared/StrategyLiveS
 import { useStrategyPositionsStream, selectStrategySlice } from "@/hooks/useStrategyPositionsStream";
 import { useLiveSnapshotQuery } from "@/hooks/useLiveSnapshotQuery";
 import { useSystemState } from "@/hooks/useSystemState";
+import { classifyDataMode, deriveFreshness, liveVerdict, type DataMode } from "@/lib/market-semantics";
 import { createStrategySnapshotSocket } from "@/lib/websocket";
 import type { PaperPosition, PositionsPayload } from "@/lib/strategy-stats";
 import { api as apiClient } from "@/lib/api";
@@ -142,15 +144,29 @@ export default function AuctionDesk() {
   //  · scheduler_state → the green "armed" dot = auto-run armed (NOT data live)
   //  · data_mode      → live / historical_replay / bar_inference (data_status)
   //  · freshness      → usable quote age within threshold + market session
-  const { autoRunArmed, nseOpen, mcxOpen } = useSystemState();
+  // The ladder below used to be inline here. It now delegates to the SHARED
+  // contract (lib/market-semantics) so this desk, Convergence, MP and the
+  // Orderflow workbench cannot drift apart. The desk's own precedence
+  // (replay → live → closed → stale) is preserved; the only change is that
+  // `live data` additionally requires the global feed to be online and the
+  // data mode to actually be `live` — a bar-inferred quote source can no
+  // longer read green just because `live_mode` was true.
+  const { autoRunArmed, nseOpen, mcxOpen, feedOnline } = useSystemState();
   const asOf = (snap?.request?.quote?.timestamp as string | undefined) ?? undefined;
-  const asOfMs = asOf ? Date.parse(asOf) : NaN;
-  const freshOK = Number.isFinite(asOfMs) && Date.now() - asOfMs < 90_000;
   const sessionOpen = nseOpen || mcxOpen;
+  const dataMode = classifyDataMode(ds);
+  const { freshness } = deriveFreshness(asOf, { staleAfterSeconds: 90 });
+  const verdict = liveVerdict({
+    sessionOpen,
+    feedOnline,
+    dataMode,
+    freshness,
+    hasSymbolObservation: freshness !== "absent",
+  });
   const dataBadge: { label: string; variant: "success" | "warn" | "neutral" | "info" } =
-    ds?.snapshot_mode === "historical_replay" || ds?.live_mode === false
+    dataMode === "historical_replay"
       ? { label: "replay", variant: "warn" }
-      : ds?.live_mode && freshOK && sessionOpen
+      : verdict.live
         ? { label: "live data", variant: "success" }
         : !sessionOpen
           ? { label: "closed", variant: "neutral" }
@@ -171,7 +187,7 @@ export default function AuctionDesk() {
       rightSlot={
         <div className="flex items-center gap-2">
           {activeTab === "performance" ? (
-            <StatusBadge label={streamLive ? "● live" : "polling"} variant={streamLive ? "success" : "info"} />
+            <TransportBadge connected={streamLive} />
           ) : null}
           <StatusBadge label={dataBadge.label} variant={dataBadge.variant} />
           {ds?.snapshot_mode ? <StatusBadge label={ds.snapshot_mode.replace(/_/g, " ")} variant="info" /> : null}
@@ -181,7 +197,7 @@ export default function AuctionDesk() {
       }
     >
       {activeTab === "auction" ? (
-        <AuctionTab snap={snap} spot={spot} regime={regime} mp={mp} of={of} />
+        <AuctionTab snap={snap} spot={spot} regime={regime} dataMode={dataMode} mp={mp} of={of} />
       ) : null}
 
       {activeTab === "motion" ? <MotionTab snap={snap} /> : null}
@@ -212,6 +228,7 @@ function AuctionTab({
   snap,
   spot,
   regime,
+  dataMode,
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   mp,
   of,
@@ -219,6 +236,8 @@ function AuctionTab({
   snap?: Snapshot;
   spot: number | null;
   regime?: Regime;
+  /** Derived once by the desk from the shared contract; never re-derived here. */
+  dataMode?: DataMode;
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   mp?: any;
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -270,7 +289,7 @@ function AuctionTab({
 
       <OrderFlowPanel of={of} source={ofSource} asOf={asOf} />
       <Section title="Tape aggression & absorption" icon={<Waves size={16} />} description="Three-minute aggressive buy/sell pulses from the same clean tape used by the auction decision; low-efficiency high-volume bars are marked as absorption.">
-        <OrderFlowPulse trades={(snap?.request?.trades ?? []) as FlowTrade[]} source={ofSource} asOf={asOf} />
+        <OrderFlowPulse trades={(snap?.request?.trades ?? []) as FlowTrade[]} source={ofSource} asOf={asOf} dataMode={dataMode} />
       </Section>
 
       <AgentDecisions decisions={analysis?.agent_decisions} />

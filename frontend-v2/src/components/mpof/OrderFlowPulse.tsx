@@ -15,7 +15,8 @@ import {
 } from "recharts";
 
 import { LastUpdated } from "@/components/common/LastUpdated";
-import { StatusBadge, formatIST, formatISTTime, formatNumber } from "@/components/desk-ui";
+import { ProvenanceChip, StatusBadge, formatIST, formatISTTime, formatNumber } from "@/components/desk-ui";
+import { provenanceOf, type DataMode } from "@/lib/market-semantics";
 
 import type { FootprintBar } from "./FootprintGrid";
 import { OfSourceBadge } from "./OfSourceBadge";
@@ -99,12 +100,18 @@ export function OrderFlowPulse({
   trades,
   source,
   asOf,
+  timeframe = "3m",
+  dataMode,
   height = 260,
 }: {
   bars?: FootprintBar[] | null;
   trades?: FlowTrade[] | null;
   source?: string | null;
   asOf?: string | null;
+  /** Aggregation window, surfaced in the provenance caption. */
+  timeframe?: string | null;
+  /** Declared by the owning desk; without it the caption can only say "unknown". */
+  dataMode?: DataMode;
   height?: number;
 }) {
   const rows = useMemo<PulseRow[]>(() => {
@@ -138,6 +145,17 @@ export function OrderFlowPulse({
         </div>
         <LastUpdated timestamp={lastTime} label="last pulse" />
       </div>
+      <ProvenanceChip
+        density="caption"
+        provenance={provenanceOf({
+          source,
+          asOf: lastTime,
+          timeframe,
+          dataMode,
+          have: rows.length,
+          completenessLabel: `${rows.length} bars${bars?.length ? "" : " (from raw prints)"}`,
+        })}
+      />
 
       {rows.length ? (
         <>

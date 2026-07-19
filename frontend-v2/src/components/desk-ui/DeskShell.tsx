@@ -18,7 +18,9 @@ import { useCallback } from "react";
 import { Activity } from "lucide-react";
 
 import { StatusBadge } from "./StatusBadge";
+import { SchedulerBadge } from "./SemanticBadges";
 import { LastUpdated } from "@/components/common/LastUpdated";
+import type { SchedulerState } from "@/lib/market-semantics";
 
 export type DeskTab = {
   key: string;
@@ -35,6 +37,7 @@ export function DeskShell({
   asOfStaleSeconds,
   asOfCriticalSeconds,
   isLive,
+  schedulerState,
   isFetching,
   paperMode,
   tabs,
@@ -54,7 +57,16 @@ export function DeskShell({
   asOfStaleSeconds?: number;
   /** Override the amber→red cutoff. */
   asOfCriticalSeconds?: number;
+  /**
+   * DEPRECATED and deliberately misnamed-no-more: this has ALWAYS driven the
+   * "armed" pill (scheduler state), never a data-liveness claim. Callers were
+   * passing freshness booleans and backfill-append flags into it. Prefer
+   * `schedulerState`; this remains only for callers that genuinely hold a
+   * loop-armed boolean.
+   */
   isLive?: boolean;
+  /** Loop state from the shared contract. ARMED IS NOT LIVE. */
+  schedulerState?: SchedulerState;
   isFetching?: boolean;
   paperMode?: boolean;
   tabs: DeskTab[];
@@ -80,7 +92,9 @@ export function DeskShell({
                   variant={paperMode ? "success" : "warn"}
                 />
               ) : null}
-              {isLive ? (
+              {schedulerState ? (
+                <SchedulerBadge state={schedulerState} />
+              ) : isLive ? (
                 <StatusBadge label="armed" variant="success" icon={<span className="h-1.5 w-1.5 rounded-full bg-accent-green" />} />
               ) : null}
             </div>

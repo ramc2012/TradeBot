@@ -47,6 +47,7 @@ import {
 } from "recharts";
 
 import {
+  DataModeBadge,
   DeskShell,
   MetricTile,
   REFRESH_MS,
@@ -63,6 +64,8 @@ import { CandleChart, CHART, MarketProfileChart, OrderFlowPanel, type ChartPrice
 import { SignalQualityTab } from "@/components/strategies/overview/SignalQualityTab";
 import { StrategyLiveStream } from "@/components/strategies/shared/StrategyLiveStream";
 import { api as apiClient } from "@/lib/api";
+import { useSystemState } from "@/hooks/useSystemState";
+import { classifySourceGrade, deriveFreshness, liveVerdict, sourceGradeLabel, sourceGradeVariant } from "@/lib/market-semantics";
 
 // ── types (built from the curled prod shapes; everything is nullable) ────────
 
@@ -252,11 +255,26 @@ const DAY_TYPE_TONE: Record<string, string> = {
 
 const dayTypeColor = (dt?: string) => (dt ? DAY_TYPE_TONE[dt] ?? "#94a3b8" : "#94a3b8");
 
-const OF_SOURCE: Record<string, { label: string; variant: "success" | "warn" | "error"; note: string }> = {
-  tick_reconstruction_book: { label: "live book", variant: "success", note: "Real futures/option book — genuine sizes + tape." },
-  tick_reconstruction: { label: "tick-recon", variant: "warn", note: "Reconstructed from index ticks; L2 sizes floored." },
-  bar_inference: { label: "synthetic", variant: "error", note: "Inferred from candle colour — no real microstructure." },
+/**
+ * Order-flow source presentation. The GRADE now comes from the shared semantic
+ * contract (`classifySourceGrade`) rather than a private map that only knew
+ * three strings and silently fell back to "synthetic" for everything else —
+ * the desk-local notes stay because they explain what each source means HERE.
+ */
+const OF_SOURCE_NOTE: Record<string, string> = {
+  tick_reconstruction_book: "Real futures/option book — genuine sizes + tape.",
+  tick_reconstruction: "Reconstructed from index ticks; L2 sizes floored.",
+  bar_inference: "Inferred from candle colour — no real microstructure.",
 };
+
+function ofBadgeOf(source: string): { label: string; variant: "success" | "warn" | "error" | "info" | "neutral"; note: string } {
+  const grade = classifySourceGrade(source);
+  return {
+    label: sourceGradeLabel(grade).toLowerCase(),
+    variant: sourceGradeVariant(grade),
+    note: OF_SOURCE_NOTE[source] ?? `Source reported as "${source || "not reported"}".`,
+  };
+}
 
 const TABS = [
   { key: "live-stream", label: "Live stream", icon: Activity },
@@ -311,7 +329,7 @@ export default function MpDesk() {
   const orderFlow = live?.order_flow;
   const regime = live?.regime;
   const ofSource = liveSnap?.request?.metadata?.order_flow_source ?? "bar_inference";
-  const ofBadge = OF_SOURCE[ofSource] ?? OF_SOURCE.bar_inference;
+  const ofBadge = ofBadgeOf(ofSource);
 
   const signal = signalQuery.data?.signals?.[0];
   const rag = signalQuery.data?.rag_context;
@@ -336,13 +354,34 @@ export default function MpDesk() {
 
   const asOf = liveSnap?.request?.metadata?.snapshot_time ?? signalQuery.data?.as_of ?? analytics?.data_status?.latest_date;
   const positional = live?.agent_decisions?.find((d) => d.agent_name === "positional") ?? live?.agent_decisions?.[0];
+  // What the MP numbers describe: a live auction, a replayed session, or a
+  // fabrication from bars. Session state comes from the shared clock, never
+  // from a backfill flag.
+  const { nseOpen, mcxOpen, feedOnline } = useSystemState();
+  const mpSessionOpen = underlying === "CRUDEOIL" ? mcxOpen : nseOpen;
+  const mpVerdict = liveVerdict({
+    sessionOpen: mpSessionOpen,
+    feedOnline,
+    dataMode: classifySourceGrade(ofSource) === "bar_inferred" ? "bar_inference" : "live",
+    freshness: deriveFreshness(asOf).freshness,
+    hasSymbolObservation: !!liveSnap,
+  });
+  const mpDataMode = mpVerdict.live
+    ? "live"
+    : classifySourceGrade(ofSource) === "bar_inferred"
+      ? "bar_inference"
+      : mpSessionOpen
+        ? "unknown"
+        : "historical_replay";
 
   return (
     <DeskShell
       title="MP Intelligence"
       description="Live market-profile structure — TPO distribution, value migration, regime history, drift & setup diagnostics."
       asOf={asOf}
-      isLive={analytics?.data_status?.live_appended}
+      /* `live_appended` is a BACKFILL-APPEND flag, not liveness — it used to
+         light the shell's "armed" dot. Data honesty now lives in the
+         DataModeBadge below; the shell no longer claims anything. */
       isFetching={liveQuery.isFetching || analyticsQuery.isFetching}
       tabs={TABS}
       activeTab={activeTab}
@@ -350,6 +389,7 @@ export default function MpDesk() {
       v1Href="http://localhost:3000/mp-intelligence"
       rightSlot={
         <div className="flex items-center gap-2">
+          <DataModeBadge mode={mpDataMode} title={`order-flow source: ${ofSource} · ${ofBadge.note}`} />
           <Picker label="Symbol" value={underlying} options={UNDERLYINGS} onChange={(v) => startTransition(() => setUnderlying(v))} />
           <Picker label="Lookback" value={String(lookback)} options={LOOKBACKS.map((l) => `${l}`)} suffix="d" onChange={(v) => startTransition(() => setLookback(Number(v)))} />
         </div>
@@ -432,7 +472,7 @@ function LiveTab({
   liveProfile?: LiveProfile;
   orderFlow?: OrderFlow;
   priceLines: ChartPriceLine[];
-  ofBadge: { label: string; variant: "success" | "warn" | "error"; note: string };
+  ofBadge: { label: string; variant: "success" | "warn" | "error" | "info" | "neutral"; note: string };
   regime?: NonNullable<LiveSnapshot["analysis"]>["regime"];
   signal?: OpenSignal;
   skipReason?: string | null;

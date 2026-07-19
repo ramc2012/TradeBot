@@ -15,6 +15,7 @@ import { Activity, AlertTriangle, Compass, Gauge, Radio, Sparkles, TrendingUp } 
 
 import {
   DeskShell,
+  TransportBadge,
   MetricTile,
   REFRESH_MS,
   Section,
@@ -154,7 +155,7 @@ export default function GannDesk() {
       rightSlot={
         <div className="flex items-center gap-2">
           {activeTab === "paper" ? (
-            <StatusBadge label={streamLive ? "● live" : "polling"} variant={streamLive ? "success" : "info"} />
+            <TransportBadge connected={streamLive} />
           ) : null}
           <Picker label="Symbol" value={underlying} options={universe} onChange={(v) => startTransition(() => setUnderlying(v))} />
           <Picker label="TF" value={timeframe} options={timeframes} onChange={(v) => startTransition(() => setTimeframe(v))} />

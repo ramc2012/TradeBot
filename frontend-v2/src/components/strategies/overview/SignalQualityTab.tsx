@@ -3,7 +3,7 @@
 import { useQuery } from "@tanstack/react-query";
 import { ShieldCheck } from "lucide-react";
 
-import { MetricTile, REFRESH_MS, Section, StatusBadge } from "@/components/desk-ui";
+import { FreshnessBadge, MetricTile, REFRESH_MS, Section, StatusBadge } from "@/components/desk-ui";
 import { api as apiClient } from "@/lib/api";
 
 type LaneQuality = {
@@ -99,7 +99,9 @@ export function SignalQualityTab({
         title={title}
         icon={<ShieldCheck size={16} className="text-accent-blue" />}
         description="Coverage, gate rejections, scan latency, cadence drift and replay parity. P/L is intentionally excluded."
-        rightSlot={<StatusBadge label={query.isError ? "unavailable" : query.isFetching ? "refreshing" : "live"} variant={query.isError ? "error" : "success"} />}
+        /* A query returning 200 is NOT liveness — it is "loaded". Data age is
+           stated separately by the freshness badge. */
+        rightSlot={<div className="flex items-center gap-2"><StatusBadge label={query.isError ? "unavailable" : query.isFetching ? "refreshing" : "loaded"} variant={query.isError ? "error" : query.isFetching ? "info" : "neutral"} /><FreshnessBadge asOf={data?.generated_at ?? null} label="scan" /></div>}
       >
         <div className="-mx-2 overflow-x-auto">
           <table className="w-full min-w-[1120px] border-collapse text-left">

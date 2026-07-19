@@ -13,12 +13,23 @@
  */
 import { useMemo } from "react";
 
-import { LastUpdated } from "@/components/common/LastUpdated";
-import { formatIST, formatISTTime, formatNumber } from "@/components/desk-ui";
+import { FreshnessBadge, ProvenanceChip, formatIST, formatISTTime, formatNumber } from "@/components/desk-ui";
+import { describeImbalance, imbalanceOf, provenanceOf, type DataMode } from "@/lib/market-semantics";
 
 import { OfSourceBadge } from "./OfSourceBadge";
 
-export type FootprintLevel = { price: number; buy: number; sell: number; buy_ratio?: number; sell_ratio?: number };
+export type FootprintLevel = {
+  price: number;
+  buy: number;
+  sell: number;
+  /**
+   * Backend-reported side ratios. UNBOUNDED by construction (values in the
+   * millions when the opposing side is empty) — never render these directly;
+   * they are inputs to `imbalanceOf`, nothing more.
+   */
+  buy_ratio?: number | null;
+  sell_ratio?: number | null;
+};
 export type FootprintBar = {
   time: string;
   delta?: number;
@@ -37,19 +48,38 @@ const compact = (v?: number | null): string => {
   return n.toFixed(0);
 };
 
-const ratioOf = (level: FootprintLevel, side: "buy" | "sell"): number => {
-  const own = Number(side === "buy" ? level.buy : level.sell) || 0;
-  const other = Number(side === "buy" ? level.sell : level.buy) || 0;
-  const explicit = side === "buy" ? level.buy_ratio : level.sell_ratio;
-  if (explicit != null && Number.isFinite(Number(explicit))) return Number(explicit);
-  return other > 0 ? own / other : own > 0 ? 99 : 0;
-};
+/**
+ * Bounded imbalance for one side of one level.
+ *
+ * The old `ratioOf` returned the backend's raw `buy_ratio` / `sell_ratio`,
+ * which are unbounded by construction (a level with zero opposing volume has
+ * produced values up to 4,006,145). Those were rendered verbatim as
+ * "4006145.0×", which is not a measurement — it is a divide-by-zero artefact.
+ * The honest statements are a 0–100% share plus the raw volumes, and
+ * "one-sided" when there is no opposing volume at all.
+ *
+ * `ratio` survives ONLY as the threshold input for the highlight predicate, so
+ * the existing ≥3× ring semantics (and therefore the hot counts, the stacked
+ * summary bar and the legend) are preserved exactly.
+ */
+const imbalanceAt = (level: FootprintLevel, side: "buy" | "sell") =>
+  imbalanceOf(
+    side === "buy" ? level.buy : level.sell,
+    side === "buy" ? level.sell : level.buy,
+    side === "buy" ? level.buy_ratio : level.sell_ratio,
+  );
+
+/** Ring predicate — mathematically equivalent to the previous `ratio >= n`. */
+const isHot = (imb: ReturnType<typeof imbalanceOf>, threshold: number): boolean =>
+  imb.oneSided || (imb.ratio != null && imb.ratio >= threshold);
 
 export function FootprintGrid({
   bars,
   maxBars = 4,
   ratioHighlight = 3,
   source,
+  timeframe = "3m",
+  dataMode,
   digits = 1,
   hideHeader = false,
   maxHeight = 420,
@@ -58,6 +88,10 @@ export function FootprintGrid({
   maxBars?: number;
   ratioHighlight?: number;
   source?: string | null;
+  /** Bar aggregation window, surfaced in the provenance caption. */
+  timeframe?: string | null;
+  /** Declared by the owning desk; without it the caption can only say "unknown". */
+  dataMode?: DataMode;
   digits?: number;
   hideHeader?: boolean;
   maxHeight?: number;
@@ -98,14 +132,30 @@ export function FootprintGrid({
         const key = Number(level.price).toFixed(6);
         const total = (Number(level.buy) || 0) + (Number(level.sell) || 0);
         if (total > pocVol) { pocVol = total; pocKey = key; }
-        if (ratioOf(level, "buy") >= ratioHighlight) buyHot += 1;
-        if (ratioOf(level, "sell") >= ratioHighlight) sellHot += 1;
+        if (isHot(imbalanceAt(level, "buy"), ratioHighlight)) buyHot += 1;
+        if (isHot(imbalanceAt(level, "sell"), ratioHighlight)) sellHot += 1;
       }
       return { pocKey, buyHot, sellHot, levelCount: (bar.levels ?? []).length };
     });
   }, [shown, ratioHighlight]);
 
   const lastTime = shown.at(-1)?.time ?? null;
+
+  // Panel provenance (0d): where these bars came from, how they are aggregated,
+  // how complete the window is and how old the newest bar is.
+  const provenance = useMemo(
+    () =>
+      provenanceOf({
+        source,
+        asOf: lastTime,
+        timeframe,
+        dataMode,
+        have: shown.length,
+        expect: maxBars,
+        completenessLabel: `${shown.length}/${maxBars} bars · ${prices.length} levels`,
+      }),
+    [source, lastTime, timeframe, dataMode, shown.length, maxBars, prices.length],
+  );
 
   if (!shown.length || !prices.length) {
     return (
@@ -124,13 +174,14 @@ export function FootprintGrid({
         <div className="mb-2 flex flex-wrap items-center justify-between gap-2">
           <div className="flex flex-wrap items-center gap-2">
             <OfSourceBadge source={source} />
-            <span className="text-[10px] uppercase tracking-[0.12em] text-text-muted">≥{ratioHighlight}× imbalance ringed</span>
+            <span className="text-[10px] uppercase tracking-[0.12em] text-text-muted" title={`A level is ringed when one side is ≥${ratioHighlight}× the other, or when the opposing side has no volume at all ("one-sided"). Cell tooltips state the bounded 0–100% share, never an unbounded ratio.`}>≥{ratioHighlight}× or one-sided ringed</span>
             <span className="text-[10px] uppercase tracking-[0.12em] text-text-muted"><span className="text-accent-red/80">sell @ bid</span> · <span className="text-accent-green/80">buy @ ask</span></span>
             <span className="rounded border border-accent-amber/60 px-1 text-[9px] uppercase tracking-[0.1em] text-accent-amber">bar POC outlined</span>
           </div>
-          <LastUpdated timestamp={lastTime} label="last bar" />
+          <FreshnessBadge asOf={lastTime} label="last bar" />
         </div>
       ) : null}
+      {!hideHeader ? <ProvenanceChip provenance={provenance} density="caption" /> : null}
 
       <div className="overflow-x-auto">
         <div className="min-w-fit">
@@ -158,13 +209,20 @@ export function FootprintGrid({
                 {shown.map((_, barIdx) => {
                   const level = byBar[barIdx]?.get(key);
                   if (!level) {
-                    return <div key={barIdx} className="w-[128px] shrink-0 bg-bg-secondary/10" />;
+                    // MISSING, not zero: this price never printed in this bar.
+                    return (
+                      <div
+                        key={barIdx}
+                        className="w-[128px] shrink-0 bg-bg-secondary/10"
+                        title="no prints at this price in this bar"
+                      />
+                    );
                   }
                   const isPoc = barMeta[barIdx]?.pocKey === key;
-                  const sellRatio = ratioOf(level, "sell");
-                  const buyRatio = ratioOf(level, "buy");
-                  const sellHot = sellRatio >= ratioHighlight;
-                  const buyHot = buyRatio >= ratioHighlight;
+                  const sellImb = imbalanceAt(level, "sell");
+                  const buyImb = imbalanceAt(level, "buy");
+                  const sellHot = isHot(sellImb, ratioHighlight);
+                  const buyHot = isHot(buyImb, ratioHighlight);
                   const sellAlpha = 0.08 + 0.5 * Math.min(1, (Number(level.sell) || 0) / maxVol);
                   const buyAlpha = 0.08 + 0.5 * Math.min(1, (Number(level.buy) || 0) / maxVol);
                   return (
@@ -176,14 +234,14 @@ export function FootprintGrid({
                       <div
                         className={`flex h-[19px] w-1/2 items-center justify-end pr-1 font-mono text-[10px] ${sellHot ? "font-bold text-accent-red ring-1 ring-inset ring-accent-red/80" : "text-text-secondary"}`}
                         style={{ backgroundColor: `rgba(255,71,87,${sellAlpha.toFixed(3)})` }}
-                        title={`sell @ bid ${formatNumber(Number(level.sell), 0)} · ${formatNumber(sellRatio, 1)}×`}
+                        title={`sell @ bid ${formatNumber(Number(level.sell), 0)} · ${describeImbalance(sellImb, "sell", "buy")}`}
                       >
                         {compact(level.sell)}
                       </div>
                       <div
                         className={`flex h-[19px] w-1/2 items-center pl-1 font-mono text-[10px] ${buyHot ? "font-bold text-accent-green ring-1 ring-inset ring-accent-green/80" : "text-text-secondary"}`}
                         style={{ backgroundColor: `rgba(0,212,163,${buyAlpha.toFixed(3)})` }}
-                        title={`buy @ ask ${formatNumber(Number(level.buy), 0)} · ${formatNumber(buyRatio, 1)}×`}
+                        title={`buy @ ask ${formatNumber(Number(level.buy), 0)} · ${describeImbalance(buyImb, "buy", "sell")}`}
                       >
                         {compact(level.buy)}
                       </div>

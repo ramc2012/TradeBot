@@ -33,6 +33,7 @@ import {
 
 import {
   DeskShell,
+  SourceGradeBadge,
   MetricTile,
   REFRESH_MS,
   Section,
@@ -43,6 +44,7 @@ import {
   tone,
   useUrlTab,
 } from "@/components/desk-ui";
+import { classifySourceGrade } from "@/lib/market-semantics";
 import { api as apiClient } from "@/lib/api";
 
 import { RrgChart, type RrgPoint } from "./RrgChart";
@@ -217,7 +219,7 @@ export default function SectorDesk() {
       description="Live NSE sector rotation, leadership and VAR/Granger causal structure from the F&O / ATM watchlist."
       asOf={ov?.as_of}
       isFetching={overviewQuery.isFetching}
-      isLive
+      /* Was hardcoded `isLive` — the shell claimed armed unconditionally. */
       tabs={TABS}
       activeTab={activeTab}
       onTabChange={setActiveTab}
@@ -225,7 +227,7 @@ export default function SectorDesk() {
       rightSlot={
         <div className="hidden items-center gap-2 md:flex">
           <StatusBadge label={`${ov?.universe?.mapped ?? 0}/${ov?.universe?.symbols ?? 0} mapped`} variant="info" />
-          <StatusBadge label={ov?.source_mode === "live_fno_atm_watchlist" ? "live F&O" : ov?.source_mode || "—"} variant="success" />
+          <SourceGradeBadge grade={classifySourceGrade(ov?.source_mode)} source={ov?.source_mode} />
         </div>
       }
     >
@@ -415,7 +417,7 @@ function LeadersTab({
         <MetricTile label="Ranked sectors" value={String(rankings.length)} />
         <MetricTile label="Overweight" value={String(overweight)} color="text-accent-green" />
         <MetricTile label="Underweight" value={String(underweight)} color="text-accent-red" />
-        <MetricTile label="Indicators" value={String(indicators.length)} detail={handoff?.source ? "live" : ""} />
+        <MetricTile label="Indicators" value={String(indicators.length)} detail={handoff?.source ? `source ${handoff.source}` : "source not reported"} />
         <MetricTile label="Alerts" value={String(alerts.length)} color={alerts.length ? "text-accent-amber" : undefined} />
         <MetricTile label="Feed" value={handoff?.active ? "active" : "idle"} detail={`obs ${handoff?.observed_dates ?? 0}/${handoff?.required_dates ?? 0}`} />
       </section>

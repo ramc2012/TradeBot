@@ -30,6 +30,7 @@ import {
 
 import {
   DeskShell,
+  TransportBadge,
   MetricTile,
   REFRESH_MS,
   Section,
@@ -213,7 +214,7 @@ export default function FractalDesk() {
       rightSlot={
         <div className="flex items-center gap-2">
           {activeTab === "performance" ? (
-            <StatusBadge label={streamLive ? "● live" : "polling"} variant={streamLive ? "success" : "info"} />
+            <TransportBadge connected={streamLive} />
           ) : null}
           {dataStatus?.status ? (
             <StatusBadge

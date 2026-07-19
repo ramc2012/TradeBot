@@ -26,6 +26,7 @@ import { Banknote, Brain, Gauge, Layers3, Radio, ShieldCheck, TrendingUp } from 
 
 import {
   DeskShell,
+  TransportBadge,
   MetricTile,
   REFRESH_MS,
   Section,
@@ -188,10 +189,7 @@ export default function DirectionalDesk() {
       rightSlot={
         <div className="flex items-center gap-2">
           {(activeTab === "paper" || activeTab === "performance") ? (
-            <StatusBadge
-              label={streamLive ? "● live" : "polling"}
-              variant={streamLive ? "success" : "info"}
-            />
+            <TransportBadge connected={streamLive} />
           ) : null}
           <label className="rounded-lg border border-bg-border bg-bg-primary/30 px-2.5 py-1 text-[11.5px] text-text-secondary">
             <span className="mr-1.5 text-[10.5px] uppercase tracking-[0.12em] text-text-muted">Symbol</span>
