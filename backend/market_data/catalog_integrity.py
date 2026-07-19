@@ -136,3 +136,56 @@ async def filter_key_collisions(
         owner_by_key[key] = symbol
         safe.append(row)
     return safe
+
+
+def filter_foreign_contracts(
+    symbol: str,
+    rows: Iterable[dict[str, Any]],
+    *,
+    symbol_field: str = "underlying",
+    trading_symbol_field: str = "trading_symbol",
+) -> list[dict[str, Any]]:
+    """Drop option contracts whose broker trading symbol names another underlying.
+
+    The option-store counterpart to :func:`filter_key_collisions`. The chain
+    writer stamps ``underlying = <the symbol we asked for>`` onto whatever the
+    broker returned, and the upsert's ``ON CONFLICT`` clause overwrites the
+    ``underlying`` column. So one crossed chain fetch relabels the other name's
+    contracts, and every premium candle written through those keys then wears
+    the wrong company's name. That is exactly how ~33k MARUTI option bars ended
+    up filed under ``M&M`` (strikes 11,600-16,400 against a ~3,164 underlying).
+
+    The broker's own ``trading_symbol`` ("MARUTI 13200 CE 30 JUN 26") is an
+    external anchor: it is issued by the exchange alongside the contract and is
+    independent of the symbol we requested. When its leading token names a
+    *different* underlying, the row is foreign — drop it loudly.
+
+    The match is exact on the leading token. Rows with no trading symbol are
+    kept — fail open on *missing* metadata, fail closed on *contradictory*
+    metadata. A corporate rename whose historical contracts still carry the old
+    ticker (LTIM -> LTM, TATAMOTORS -> TMPV) would be dropped by this rule, but
+    live chain fetches return the current ticker: as of 2026-07-20 every one of
+    the 68 such rows in ``fo_contract_catalog`` is an already-expired contract,
+    so nothing live is affected. And the failure direction is the safe one — the
+    name goes dataless, its lane skips it for lack of data, and an ERROR is
+    logged. An honest empty beats one company's premiums wearing another's name.
+    """
+    requested = str(symbol or "").strip().upper()
+    candidates = [dict(row) for row in rows]
+    if not requested or not candidates:
+        return candidates
+
+    safe: list[dict[str, Any]] = []
+    for row in candidates:
+        raw = str(row.get(trading_symbol_field) or "").strip().upper()
+        head = raw.split(" ", 1)[0] if raw else ""
+        if not head or head == requested:
+            safe.append(row)
+            continue
+        logger.error(
+            f"[catalog integrity] REFUSING to file contract '{raw}' under "
+            f"{requested} ({row.get(symbol_field)!r}): the broker's own trading "
+            f"symbol names {head}. Writing it would relabel {head}'s contracts "
+            "and file its premium candles under the wrong company. Dropping."
+        )
+    return safe

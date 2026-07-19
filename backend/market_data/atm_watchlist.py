@@ -34,6 +34,7 @@ from brokers.rate_limiter import (
 from brokers.upstox import UpstoxAdapter
 from db.database import AsyncSessionLocal
 from db.redis_client import get_redis
+from market_data.catalog_integrity import filter_foreign_contracts
 from market_data.fo_universe_bootstrap import ensure_fo_underlying_catalog
 from market_data.option_history import option_history_service
 
@@ -2067,6 +2068,12 @@ class ATMWatchlistService:
                     "lot_size": contract.get("lot_size"),
                 }
             )
+        # The upsert below stamps `underlying = symbol` and its ON CONFLICT
+        # clause overwrites that column, so a crossed chain fetch would relabel
+        # another name's contracts and file its premium candles under the wrong
+        # company (the 2026-07 M&M/MARUTI option-store contamination). Drop any
+        # contract whose broker trading symbol names a different underlying.
+        rows = filter_foreign_contracts(symbol, rows)
         if not rows:
             return
         try:
