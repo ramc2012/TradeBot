@@ -11,7 +11,7 @@
  */
 import { useMemo, useState, useTransition } from "react";
 import { useQuery } from "@tanstack/react-query";
-import { Activity, AlertTriangle, Compass, Gauge, Radio, Sparkles, TrendingUp } from "lucide-react";
+import { Activity, AlertTriangle, CheckCircle2, Compass, Radio, ShieldCheck, Sparkles, TrendingUp, XCircle } from "lucide-react";
 
 import {
   DeskShell,
@@ -56,7 +56,28 @@ type Signal = {
   trigger?: number | null;
   stop?: number | null;
   targets?: number[] | null;
+  regime?: string;
+  archetype?: string | null;
+  candidate_archetype?: string | null;
+  conviction?: number;
+  minimum_conviction?: number;
+  conviction_gap?: number;
+  setup_state?: string;
+  selected_level?: string | null;
+  blockers?: string[];
+  regime_votes?: Record<string, number>;
+  adx?: number | null;
+  active_timing?: string[];
+  risk_per_unit?: number | null;
+  rule_checks?: Array<{
+    key: string;
+    label: string;
+    passed: boolean;
+    required: boolean;
+    detail: string;
+  }>;
 };
+type Rulebook = Record<string, { label?: string; minimum_conviction?: number; size_factor?: number; rules?: string[] }>;
 type Snapshot = {
   as_of?: string;
   underlying?: string;
@@ -72,6 +93,13 @@ type Snapshot = {
   nearest_sq9_level?: Sq9Level;
   active_time_cycle?: TimeCycle & { distance_bars?: number };
   price_time_square?: { active?: boolean; ratio?: number };
+  data_quality?: {
+    bar_count?: number;
+    minimum_bars?: number;
+    completed_bars_only?: boolean;
+    sufficient?: boolean;
+    last_completed_bar_at?: string;
+  };
   signal?: Signal;
   alerts?: Array<{ key: string; severity: string; message: string }>;
 };
@@ -87,7 +115,13 @@ export default function GannDesk() {
 
   const summaryQuery = useQuery({
     queryKey: ["gann", "summary"],
-    queryFn: async () => (await apiClient.get("/api/gann-tp-delta/summary")).data as { label?: string; description?: string; underlyings?: string[]; timeframes?: string[] },
+    queryFn: async () => (await apiClient.get("/api/gann-tp-delta/summary")).data as {
+      label?: string;
+      description?: string;
+      underlyings?: string[];
+      timeframes?: string[];
+      strategy_rules?: Rulebook;
+    },
     refetchInterval: REFRESH_MS.summary,
     refetchOnWindowFocus: false,
   });
@@ -164,20 +198,21 @@ export default function GannDesk() {
     >
       {activeTab === "geometry" ? (
         <div className="space-y-4">
-          <section className="grid grid-cols-2 gap-3 md:grid-cols-4 xl:grid-cols-7">
+          <section className="grid grid-cols-2 gap-3 md:grid-cols-4 xl:grid-cols-8">
             <MetricTile label="Spot" value={formatNumber(snap?.spot_price, 1)} detail={snap?.timeframe} />
-            <MetricTile label="Signal" value={sig.state || "—"} detail={`score ${sig.score ?? 0}/${sig.threshold ?? 0}`} color={sig.bias === "bullish" ? "text-accent-green" : sig.bias === "bearish" ? "text-accent-red" : undefined} />
-            <MetricTile label="Bias" value={sig.bias || "neutral"} />
+            <MetricTile label="Setup" value={sig.setup_state || sig.state || "—"} detail={`${sig.candidate_archetype || sig.archetype || "no candidate"} · ${formatNumber(sig.conviction ?? sig.score, 2)}/${formatNumber(sig.minimum_conviction ?? sig.threshold, 2)}`} color={sig.setup_state === "ACTIONABLE" ? "text-accent-green" : sig.setup_state === "BLOCKED" ? "text-accent-red" : undefined} />
+            <MetricTile label="Bias" value={sig.bias || "neutral"} detail={`${sig.regime || "neutral"} · ADX ${formatNumber(sig.adx, 1)}`} />
             <MetricTile label="Harmonic h" value={formatNumber(snap?.h?.value, 2)} detail={`${snap?.h?.unit || ""} · n${snap?.h?.sample_count ?? 0}`} />
             <MetricTile label="Anchor" value={snap?.anchor?.kind || "—"} detail={`${formatNumber(snap?.anchor?.price, 1)} · ${snap?.anchor?.strength || ""}`} />
             <MetricTile label="Near angle" value={snap?.nearest_angle?.name || "—"} detail={`${formatPct(snap?.nearest_angle?.distance_pct, 3)}`} color={tone(snap?.nearest_angle?.direction === "bullish" ? 1 : -1)} />
             <MetricTile label="Active cycle" value={snap?.active_time_cycle ? `#${snap.active_time_cycle.cycle}` : "—"} detail={snap?.active_time_cycle?.distance_bars != null ? `Δ${snap.active_time_cycle.distance_bars}b` : ""} />
+            <MetricTile label="Data gate" value={snap?.data_quality?.sufficient ? "ready" : "insufficient"} detail={`${snap?.data_quality?.bar_count ?? 0}/${snap?.data_quality?.minimum_bars ?? 0} completed bars`} color={snap?.data_quality?.sufficient ? "text-accent-green" : "text-accent-red"} />
           </section>
 
           <Section title="Price-time geometry" icon={<Compass size={16} />} rightSlot={
             <div className="flex gap-1.5">
               {snap?.price_time_square?.active ? <StatusBadge label="price-time squared" variant="info" /> : null}
-              <StatusBadge label={sig.state || "loading"} variant={biasVariant(sig.bias)} />
+              <StatusBadge label={sig.setup_state || sig.state || "loading"} variant={sig.setup_state === "BLOCKED" ? "error" : biasVariant(sig.bias)} />
             </div>
           }>
             <GannChart
@@ -187,12 +222,17 @@ export default function GannDesk() {
               cycles={snap?.time_cycles || []}
               anchor={snap?.anchor || null}
               spot={snap?.spot_price ?? null}
+              tradePlan={sig.setup_state === "ACTIONABLE" ? {
+                trigger: sig.trigger,
+                stop: sig.stop,
+                targets: sig.targets,
+              } : null}
             />
           </Section>
         </div>
       ) : null}
 
-      {activeTab === "confluence" ? <ConfluencePanel snap={snap} /> : null}
+      {activeTab === "confluence" ? <ConfluencePanel snap={snap} rulebook={summary?.strategy_rules} /> : null}
 
 
       {activeTab === "paper" ? (
@@ -214,43 +254,113 @@ export default function GannDesk() {
   );
 }
 
-function ConfluencePanel({ snap }: { snap?: Snapshot }) {
+function ConfluencePanel({ snap, rulebook }: { snap?: Snapshot; rulebook?: Rulebook }) {
   const sig = snap?.signal || {};
-  const score = sig.score ?? 0;
-  const threshold = sig.threshold ?? 5;
+  const score = sig.conviction ?? sig.score ?? 0;
+  const threshold = sig.minimum_conviction ?? sig.threshold ?? 5;
   const pct = threshold > 0 ? Math.min(100, (score / threshold) * 100) : 0;
-  const triggered = score >= threshold;
+  const actionable = sig.setup_state === "ACTIONABLE";
+  const checks = sig.rule_checks || [];
+  const planR = sig.risk_per_unit && sig.targets?.length && sig.trigger != null
+    ? Math.abs(sig.targets[0] - sig.trigger) / sig.risk_per_unit
+    : null;
   return (
     <div className="space-y-4">
-      <Section title="Confluence signal" icon={<Sparkles size={16} />} rightSlot={<StatusBadge label={sig.bias || "neutral"} variant={biasVariant(sig.bias)} />}>
+      <Section title="Setup decision" icon={<Sparkles size={16} />} rightSlot={
+        <div className="flex gap-1.5">
+          <StatusBadge label={sig.setup_state || "SEARCHING"} variant={actionable ? "success" : sig.setup_state === "BLOCKED" ? "error" : "warn"} />
+          <StatusBadge label={sig.bias || "neutral"} variant={biasVariant(sig.bias)} />
+        </div>
+      }>
         <div className="grid gap-4 lg:grid-cols-3">
-          <div className="lg:col-span-1 space-y-3">
+          <div className="space-y-3 lg:col-span-1">
             <div>
               <div className="flex items-end justify-between">
-                <span className="text-2xl font-semibold text-text-primary">{score}<span className="text-sm text-text-muted">/{threshold}</span></span>
-                <StatusBadge label={triggered ? sig.state || "triggered" : sig.state || "below threshold"} variant={triggered ? "success" : "warn"} />
+                <span className="text-2xl font-semibold text-text-primary">{formatNumber(score, 2)}<span className="text-sm text-text-muted">/{formatNumber(threshold, 2)}</span></span>
+                <StatusBadge label={sig.candidate_archetype || sig.archetype || "no candidate"} variant={actionable ? "success" : "neutral"} />
               </div>
               <div className="mt-2 h-2 overflow-hidden rounded-full bg-bg-primary/40">
-                <div className="h-full rounded-full" style={{ width: `${pct}%`, background: triggered ? "rgb(var(--accent-green))" : "rgb(var(--accent-amber))" }} />
+                <div className="h-full rounded-full" style={{ width: `${pct}%`, background: actionable ? "rgb(var(--accent-green))" : "rgb(var(--accent-amber))" }} />
+              </div>
+              <div className="mt-1 flex justify-between text-[10px] text-text-muted">
+                <span>conviction</span>
+                <span>gap {formatSignedNumber(sig.conviction_gap, 2)}</span>
               </div>
             </div>
-            <div className="grid grid-cols-3 gap-2 text-center text-[12px]">
+            <div className="grid grid-cols-2 gap-2 text-center text-[12px]">
+              <Tile label="Regime" value={`${sig.regime || "neutral"} · ADX ${formatNumber(sig.adx, 1)}`} />
+              <Tile label="Votes E/S/1×1" value={`${sig.regime_votes?.ema ?? 0}/${sig.regime_votes?.structure ?? 0}/${sig.regime_votes?.master_1x1 ?? 0}`} />
               <Tile label="Trigger" value={formatNumber(sig.trigger, 1)} />
               <Tile label="Stop" value={formatNumber(sig.stop, 1)} />
               <Tile label="Targets" value={sig.targets?.length ? String(sig.targets.length) : "—"} />
+              <Tile label="First target" value={planR != null ? `${formatNumber(planR, 2)}R` : "trail"} />
             </div>
           </div>
           <div className="lg:col-span-2">
-            <div className="text-[10.5px] uppercase tracking-[0.16em] text-text-muted">Reasons</div>
-            <ul className="mt-2 space-y-1.5">
-              {(sig.reasons || []).map((r, i) => (
-                <li key={i} className="flex items-start gap-2 text-[12.5px] text-text-secondary">
-                  <span className="mt-1 h-1.5 w-1.5 shrink-0 rounded-full bg-accent-blue/70" />
-                  {r}
-                </li>
+            <div className="text-[10.5px] uppercase tracking-[0.16em] text-text-muted">Mandatory gate audit</div>
+            <div className="mt-2 divide-y divide-bg-border/40 rounded-lg border border-bg-border/60">
+              {checks.map((check) => (
+                <div key={check.key} className="flex items-start gap-2.5 px-3 py-2">
+                  {check.passed
+                    ? <CheckCircle2 size={14} className="mt-0.5 shrink-0 text-accent-green" />
+                    : <XCircle size={14} className={`mt-0.5 shrink-0 ${check.required ? "text-accent-red" : "text-text-muted"}`} />}
+                  <div className="min-w-0 flex-1">
+                    <div className="flex items-center justify-between gap-2">
+                      <span className="text-[12.5px] text-text-primary">{check.label}</span>
+                      <span className="text-[9.5px] uppercase tracking-wider text-text-muted">{check.required ? "required" : "context"}</span>
+                    </div>
+                    <div className="mt-0.5 text-[11px] text-text-muted">{check.detail}</div>
+                  </div>
+                </div>
               ))}
-              {!sig.reasons?.length ? <li className="text-sm text-text-muted">No confluence reasons.</li> : null}
+              {!checks.length ? <div className="px-3 py-5 text-sm text-text-muted">No setup candidate has reached a Gann trade-side level.</div> : null}
+            </div>
+            {sig.blockers?.length ? (
+              <div className="mt-2 flex flex-wrap gap-1.5">
+                {sig.blockers.map((blocker) => <StatusBadge key={blocker} label={`blocked · ${blocker}`} variant="error" />)}
+              </div>
+            ) : null}
+          </div>
+        </div>
+      </Section>
+
+      <Section title="Detailed strategy rules" icon={<ShieldCheck size={16} />}>
+        <div className="grid gap-3 lg:grid-cols-3">
+          {Object.entries(rulebook || {}).map(([key, group]) => (
+            <div key={key} className="rounded-lg border border-bg-border/60 bg-bg-primary/15 p-3">
+              <div className="flex items-center justify-between gap-2">
+                <div className="text-[12.5px] font-semibold text-text-primary">{group.label || key}</div>
+                {group.minimum_conviction != null ? <StatusBadge label={`floor ${group.minimum_conviction}`} variant="neutral" /> : null}
+              </div>
+              <ol className="mt-2 space-y-1.5">
+                {(group.rules || []).map((rule, index) => (
+                  <li key={rule} className="flex gap-2 text-[11.5px] leading-5 text-text-secondary">
+                    <span className="font-mono text-text-muted">{index + 1}.</span>
+                    <span>{rule}</span>
+                  </li>
+                ))}
+              </ol>
+            </div>
+          ))}
+        </div>
+      </Section>
+
+      <Section title="Evidence" icon={<Activity size={16} />}>
+        <div className="grid gap-3 lg:grid-cols-2">
+          <div>
+            <div className="text-[10.5px] uppercase tracking-[0.16em] text-text-muted">Confluence reasons</div>
+            <ul className="mt-2 space-y-1.5">
+              {(sig.reasons || []).map((reason) => <li key={reason} className="text-[12px] text-text-secondary">• {reason}</li>)}
+              {!sig.reasons?.length ? <li className="text-sm text-text-muted">No confluence evidence.</li> : null}
             </ul>
+          </div>
+          <div>
+            <div className="text-[10.5px] uppercase tracking-[0.16em] text-text-muted">Timing evidence</div>
+            <ul className="mt-2 space-y-1.5">
+              {(sig.active_timing || []).map((reason) => <li key={reason} className="text-[12px] text-text-secondary">• {reason}</li>)}
+              {!sig.active_timing?.length ? <li className="text-sm text-text-muted">No active Gann timing window.</li> : null}
+            </ul>
+            {sig.selected_level ? <div className="mt-3 text-[11.5px] text-text-muted">Selected invalidation structure: <span className="text-text-primary">{sig.selected_level}</span></div> : null}
           </div>
         </div>
       </Section>

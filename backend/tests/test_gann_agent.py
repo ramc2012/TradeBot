@@ -7,11 +7,14 @@ whipsaw fix — opposite-signal exits ONLY on a high-conviction reversal.
 """
 from __future__ import annotations
 
+from datetime import datetime, timedelta, timezone
+
 from gann_tp_delta.agent import GannTPDeltaPaperAgent
 from gann_tp_delta.config import clone_default_config
 
 CFG = clone_default_config()
 RISK = CFG["risk"]
+FRESH_QUOTE_AT = datetime.now(timezone.utc).isoformat()
 
 
 def _agent() -> GannTPDeltaPaperAgent:
@@ -198,7 +201,8 @@ def test_run_once_opens_option_position(tmp_path, monkeypatch):
         return {"rows": [{
             "underlying": "NIFTY", "spot_price": 23000.0,
             "ce": {"ltp": 200.0, "lot_size": 75, "strike": 23000, "expiry": "2026-12-25",
-                   "instrument_key": "K", "trading_symbol": "NIFTY25DEC23000CE"},
+                   "instrument_key": "K", "trading_symbol": "NIFTY25DEC23000CE",
+                   "as_of": FRESH_QUOTE_AT},
         }]}
 
     monkeypatch.setattr(agent_mod.atm_watchlist_service, "get_watchlist", fake_watchlist)
@@ -214,7 +218,17 @@ def test_commodity_conviction_floor_gates_weak_setups():
     """Commodities must clear the higher commodity_min_conviction bar; a setup
     that would open an index trade is gated for a commodity until it does."""
     ag = _agent()
-    row = {"underlying": "CRUDEOIL", "is_commodity": True}
+    row = {
+        "underlying": "CRUDEOIL",
+        "is_commodity": True,
+        "futures": {
+            "ltp": 5001.0,
+            "instrument_key": "MCX_FO|CRUDE",
+            "trading_symbol": "CRUDEOIL26AUGFUT",
+            "as_of": FRESH_QUOTE_AT,
+            "source": "broker_futures_quote",
+        },
+    }
 
     def snap(conv):
         return {"spot_price": 5000.0, "as_of": "t", "underlying": "CRUDEOIL",
@@ -237,7 +251,7 @@ def test_per_underlying_conviction_floor_gates_banknifty():
     bn_floor = CFG["strategy"]["per_underlying_min_conviction"]["BANKNIFTY"]
     row = {"underlying": "BANKNIFTY", "spot_price": 53000.0,
            "ce": {"ltp": 300.0, "lot_size": 35, "strike": 53000, "expiry": "2026-12-25",
-                  "instrument_key": "K", "trading_symbol": "BN"}}
+                  "instrument_key": "K", "trading_symbol": "BN", "as_of": FRESH_QUOTE_AT}}
 
     def snap(conv):
         return {"spot_price": 53000.0, "as_of": "t", "underlying": "BANKNIFTY",
@@ -250,3 +264,117 @@ def test_per_underlying_conviction_floor_gates_banknifty():
     assert gated["decision"] == "skip" and gated["reason"] == "conviction_floor"
     opened = ag._scan_decision(row, snap(bn_floor + 0.2), min_score=0)
     assert opened["decision"] == "open" and opened["instrument_type"] == "OPTION"
+
+
+def test_stale_option_quote_fails_closed():
+    ag = _agent()
+    stale_at = (datetime.now(timezone.utc) - timedelta(minutes=30)).isoformat()
+    row = {
+        "underlying": "NIFTY",
+        "ce": {
+            "ltp": 200.0,
+            "strike": 23000,
+            "expiry": "2026-12-25",
+            "instrument_key": "K",
+            "as_of": stale_at,
+        },
+    }
+    snapshot = {
+        "spot_price": 23000.0,
+        "signal": {
+            "state": "bullish_setup",
+            "side": "long",
+            "archetype": "continuation",
+            "conviction": 7.0,
+            "regime": "bull",
+            "stop_underlying": 22900.0,
+            "targets_underlying": [23300.0],
+            "risk_per_unit": 100.0,
+        },
+    }
+    decision = ag._scan_decision(row, snapshot, min_score=0)
+    assert decision["decision"] == "skip"
+    assert decision["reason"] == "stale_option_quote"
+
+
+def test_commodity_requires_exact_fresh_contract_quote():
+    ag = _agent()
+    row = {"underlying": "CRUDEOIL", "is_commodity": True}
+    snapshot = {
+        "spot_price": 5000.0,
+        "signal": {
+            "state": "bullish_setup",
+            "side": "long",
+            "archetype": "continuation",
+            "conviction": 7.0,
+            "regime": "bull",
+            "stop_underlying": 4950.0,
+            "targets_underlying": [5200.0],
+            "risk_per_unit": 50.0,
+        },
+    }
+    decision = ag._scan_decision(row, snapshot, min_score=0)
+    assert decision["decision"] == "skip"
+    assert decision["reason"] == "exact_futures_quote_unavailable"
+
+
+def test_exit_waits_for_fresh_exact_contract_mark(tmp_path):
+    import asyncio
+    from types import SimpleNamespace
+
+    stale_at = (datetime.now(timezone.utc) - timedelta(minutes=30)).isoformat()
+
+    class _Store:
+        async def latest_local_option_mark(self, **kwargs):
+            assert kwargs["instrument_key"] == "HELD"
+            assert kwargs["allow_history_fallback"] is False
+            return 180.0, stale_at, "stale_test_mark"
+
+    service = SimpleNamespace(store=SimpleNamespace(directional_store=_Store()))
+    cfg = clone_default_config()
+    cfg["paper"]["journal_root"] = tmp_path
+    ag = GannTPDeltaPaperAgent(service=service, config=cfg)
+    ag._run_snapshot_cache = {
+        "NIFTY": {
+            "spot_price": 22890.0,
+            "signal": {},
+            "as_of": FRESH_QUOTE_AT,
+        }
+    }
+    state = {
+        "open_positions": [
+            {
+                "status": "open",
+                "underlying": "NIFTY",
+                "instrument_type": "OPTION",
+                "option_type": "CE",
+                "instrument_key": "HELD",
+                "expiry": "2026-12-25",
+                "strike": 23000,
+                "entry_price": 200.0,
+                "current_price": 200.0,
+                "qty_units": 75,
+                "thesis_side": "long",
+                "entry_underlying": 23000.0,
+                "stop_underlying": 22900.0,
+                "risk_per_unit": 100.0,
+                "targets_underlying": [23300.0],
+            }
+        ],
+        "closed_positions": [],
+    }
+
+    closed = asyncio.run(
+        ag._refresh_open_positions(
+            state,
+            {},
+            timeframe="15minute",
+            lookback_sessions=45,
+            anchor_mode="auto_pivot",
+            h_mode="median_tpd",
+        )
+    )
+    assert closed == 0
+    assert not state["closed_positions"]
+    assert state["open_positions"][0]["exit_pending_reason"] == "gann_stop"
+    assert state["open_positions"][0]["mark_status"] == "exact_contract_quote_stale"

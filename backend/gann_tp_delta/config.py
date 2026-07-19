@@ -88,6 +88,7 @@ DEFAULT_CONFIG: dict[str, Any] = {
         "adx_trend_min": 18.0,          # ADX >= this ⇒ a real trend is present
         "regime_min_score": 2,          # |EMA+structure+1x1 vote| >= this ⇒ directional
         "structure_lookback": 8,
+        "min_signal_bars": 40,           # completed post-warmup bars required to evaluate
         # Archetype thresholds on the weighted conviction (~0..10 scale).
         # Tuned from a 150-day offline sweep (gann_tp_delta/tune_sweep.py): the
         # conviction floor is the dominant lever — higher = fewer, better trades
@@ -105,6 +106,12 @@ DEFAULT_CONFIG: dict[str, Any] = {
         # ~breakeven (-0.72R) so it stops bleeding the otherwise-strong index book.
         "per_underlying_min_conviction": {"BANKNIFTY": 6.0},
         "reversal_edge_over_continuation": 1.0,  # reversal must beat in-trend by this to override
+        # Mandatory setup gates. Conviction ranks otherwise-valid setups; it
+        # cannot compensate for a missing trigger or missing reversal geometry.
+        "continuation_require_resumption": True,
+        "reversal_require_cardinal_sq9": True,
+        "reversal_require_major_cycle": True,
+        "reversal_require_price_time_square": True,
         # Exactness tolerances (fraction of price) — tight, so a "touch" is real
         "angle_tolerance_pct": 0.0025,  # 0.25%
         "sq9_tolerance_pct": 0.0025,
@@ -125,6 +132,7 @@ DEFAULT_CONFIG: dict[str, Any] = {
         },
         "major_cycles": [90, 144, 180, 270, 360],
         "major_angles": ["1x2", "2x1"],
+        "commodity_underlyings": ["CRUDEOIL", "GOLD", "SILVERM", "NATURALGAS"],
         "stop_atr_buffer": 0.5,         # ATR multiple beyond the Gann level for the stop
         "min_stop_pct": 0.0015,         # floor the underlying stop distance at 0.15%
         # Only target Gann levels at least this many R away — a near level gives
@@ -164,6 +172,7 @@ DEFAULT_CONFIG: dict[str, Any] = {
         "lots": 1,
         "max_positions": 20,
         "max_days_to_expiry": 45,
+        "max_entry_quote_age_seconds": 120,
         # Memory guard: each scanned underlying loads a deep 1-min frame (~20-30k
         # bars) and builds features. Six concurrently OOM-kills the memory-limited
         # prod box (and a recreate re-syncs the bind mount). 3 matches the old

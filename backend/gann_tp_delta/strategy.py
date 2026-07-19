@@ -150,6 +150,24 @@ def _reversal_confirmation(frame: pd.DataFrame, side: str) -> bool:
     return c > o and pos >= 0.55
 
 
+def _continuation_confirmation(frame: pd.DataFrame, side: str) -> bool:
+    """Require the pullback bar to resume in the regime direction.
+
+    A continuation is not actionable just because price is near a support or
+    resistance line. The last closed bar must have a directional body and must
+    not close behind the prior close.
+    """
+    if len(frame.index) < 2:
+        return False
+    cur, prev = frame.iloc[-1], frame.iloc[-2]
+    o, c, prev_c = _f(cur.get("open")), _f(cur.get("close")), _f(prev.get("close"))
+    if not all(math.isfinite(x) for x in (o, c, prev_c)):
+        return False
+    if side == "long":
+        return c > o and c >= prev_c
+    return c < o and c <= prev_c
+
+
 # ─── Element scoring shared by both archetypes ───────────────────────────────
 
 
@@ -158,10 +176,21 @@ def _timing_score(
     square: PriceTimeSquare,
     weights: dict[str, Any],
     major_cycles: list[int],
-) -> tuple[float, list[str]]:
+) -> tuple[float, list[str], TimeCycleWindow | None]:
     score = 0.0
     reasons: list[str] = []
-    active = next((c for c in cycles if c.active), None)
+    active_cycles = [c for c in cycles if c.active]
+    # Overlapping windows are common. Select the most important, closest cycle
+    # rather than whichever happens to appear first in BAR_CYCLES.
+    active = max(
+        active_cycles,
+        key=lambda c: (
+            int(c.cycle) in major_cycles,
+            -abs(int(c.distance_bars)),
+            int(c.cycle),
+        ),
+        default=None,
+    )
     if active is not None:
         is_major = int(active.cycle) in major_cycles
         w = float(weights.get("cycle_major" if is_major else "cycle_minor", 0.75))
@@ -175,7 +204,32 @@ def _timing_score(
         sharp = max(0.0, 1.0 - abs(square.ratio - 1.0) / max(square.tolerance, 1e-9))
         score += w * (0.5 + 0.5 * sharp)
         reasons.append(f"price-time square (r={round(square.ratio, 3)})")
-    return score, reasons
+    return score, reasons, active
+
+
+def _rule(key: str, label: str, passed: bool, detail: str, *, required: bool = True) -> dict[str, Any]:
+    return {
+        "key": key,
+        "label": label,
+        "passed": bool(passed),
+        "required": bool(required),
+        "detail": detail,
+    }
+
+
+def _candidate_blockers(checks: list[dict[str, Any]]) -> list[str]:
+    return [str(item["label"]) for item in checks if item["required"] and not item["passed"]]
+
+
+def _instrument_floor(scfg: dict[str, Any], underlying: str | None, base: float) -> float:
+    symbol = str(underlying or "").upper()
+    floor = float(base)
+    per_symbol = scfg.get("per_underlying_min_conviction") or {}
+    floor = max(floor, float(per_symbol.get(symbol, 0.0) or 0.0))
+    commodities = {str(x).upper() for x in scfg.get("commodity_underlyings") or []}
+    if symbol in commodities:
+        floor = max(floor, float(scfg.get("commodity_min_conviction", 0.0) or 0.0))
+    return floor
 
 
 def _level_support_resistance(
@@ -264,6 +318,7 @@ def evaluate_gann_signal(
     square: PriceTimeSquare,
     h: float,
     config: dict[str, Any],
+    underlying: str | None = None,
 ) -> ConfluenceSignal:
     """Regime-gated, exactness-weighted Gann decision. `config` is the
     top-level module config (reads its `strategy` section)."""
@@ -281,8 +336,12 @@ def evaluate_gann_signal(
     reg = compute_regime(frame=frame, angles=angles, anchor=anchor, config=scfg)
     regime = reg["regime"]
 
-    cont_min = float(scfg.get("continuation_min_conviction", 4.0))
-    rev_min = float(scfg.get("reversal_min_conviction", 6.5))
+    cont_min = _instrument_floor(
+        scfg, underlying, float(scfg.get("continuation_min_conviction", 4.0))
+    )
+    rev_min = _instrument_floor(
+        scfg, underlying, float(scfg.get("reversal_min_conviction", 6.5))
+    )
     tol_angle = float(scfg.get("angle_tolerance_pct", 0.0025))
     tol_sq9 = float(scfg.get("sq9_tolerance_pct", 0.0025))
     tol_pull = float(scfg.get("pullback_tolerance_pct", 0.005))
@@ -291,7 +350,8 @@ def evaluate_gann_signal(
     buffer = float(scfg.get("stop_atr_buffer", 0.5))
     min_stop_pct = float(scfg.get("min_stop_pct", 0.0015))
 
-    timing_score, timing_reasons = _timing_score(cycles, square, weights, major_cycles)
+    timing_score, timing_reasons, selected_cycle = _timing_score(cycles, square, weights, major_cycles)
+    has_major_cycle = bool(selected_cycle and int(selected_cycle.cycle) in major_cycles)
 
     candidates: list[dict[str, Any]] = []
 
@@ -304,8 +364,7 @@ def evaluate_gann_signal(
         )
         if lvl_price is not None:
             # Pullback-resumption proxy: last bar pushing back in trend direction.
-            o = _f(current.get("open"))
-            resuming = (close >= o) if side == "long" else (close <= o)
+            resuming = _continuation_confirmation(frame, side)
             conv = lvl_score + timing_score
             conv += float(weights.get("regime_align", 1.5)) * (0.5 + 0.5 * reg["strength"])
             reasons = [f"{regime} regime"] + lvl_reasons + timing_reasons
@@ -323,11 +382,29 @@ def evaluate_gann_signal(
                 stop_u = min(stop_u, close - min_dist)
             else:
                 stop_u = max(stop_u, close + min_dist)
+            checks = [
+                _rule("regime", "Directional regime", True, f"{regime}; votes {reg['regime_score']:+d}"),
+                _rule("level", "Gann pullback level", True, str(lvl_label or "qualified level")),
+                _rule(
+                    "resumption",
+                    "Trend-resumption close",
+                    resuming,
+                    "directional body; close holds beyond prior close",
+                    required=bool(scfg.get("continuation_require_resumption", True)),
+                ),
+            ]
+            checks.append(_rule(
+                "conviction",
+                "Conviction floor",
+                conv >= cont_min,
+                f"{conv:.2f} / {cont_min:.2f}",
+            ))
             candidates.append({
                 "archetype": "continuation", "side": side, "conviction": conv,
                 "reasons": reasons, "stop_u": stop_u, "size_factor": 1.0,
-                "min_conviction": cont_min, "confirmation": True,
-                "level_label": lvl_label,
+                "min_conviction": cont_min, "confirmation": resuming,
+                "level_label": lvl_label, "rule_checks": checks,
+                "blockers": _candidate_blockers(checks),
             })
 
     # ── Reversal (counter-regime or range, strong exact confluence) ─────────
@@ -347,6 +424,13 @@ def evaluate_gann_signal(
         if lvl_price is None:
             continue
         confirm = _reversal_confirmation(frame, side)
+        want_support = side == "long"
+        has_cardinal_sq9 = any(
+            s.level_type == "cardinal"
+            and s.distance_pct <= tol_sq9
+            and ((want_support and s.price <= close) or ((not want_support) and s.price >= close))
+            for s in sq9_levels
+        )
         conv = lvl_score + timing_score
         reasons = [f"{regime} regime", "reversal@confluence"] + lvl_reasons + timing_reasons
         if confirm:
@@ -359,17 +443,47 @@ def evaluate_gann_signal(
             stop_u = min(stop_u, close - min_dist)
         else:
             stop_u = max(stop_u, close + min_dist)
+        checks = [
+            _rule("level", "Reversal level", True, str(lvl_label or "qualified level")),
+            _rule(
+                "cardinal_sq9",
+                "Cardinal SQ9 touch",
+                has_cardinal_sq9,
+                "90°, 180°, 270° or 360° on the trade side",
+                required=bool(scfg.get("reversal_require_cardinal_sq9", True)),
+            ),
+            _rule(
+                "major_cycle",
+                "Major time-cycle window",
+                has_major_cycle,
+                f"cycle {selected_cycle.cycle}" if selected_cycle else "no active major cycle",
+                required=bool(scfg.get("reversal_require_major_cycle", True)),
+            ),
+            _rule(
+                "price_time_square",
+                "Price-time square",
+                bool(square.active),
+                f"ratio {square.ratio:.3f}; tolerance {square.tolerance:.3f}",
+                required=bool(scfg.get("reversal_require_price_time_square", True)),
+            ),
+            _rule("confirmation", "Rejection confirmation bar", confirm, "directional close in rejection half"),
+        ]
+        checks.append(_rule(
+            "conviction",
+            "Conviction floor",
+            conv >= rev_min,
+            f"{conv:.2f} / {rev_min:.2f}",
+        ))
         candidates.append({
             "archetype": "reversal", "side": side, "conviction": conv,
             "reasons": reasons, "stop_u": stop_u, "size_factor": rev_factor,
             "min_conviction": rev_min, "confirmation": confirm,
-            "level_label": lvl_label,
+            "level_label": lvl_label, "rule_checks": checks,
+            "blockers": _candidate_blockers(checks),
         })
 
     # ── Pick the winner ─────────────────────────────────────────────────────
-    fired = [c for c in candidates if c["conviction"] >= c["min_conviction"]]
-    # reversals additionally require a confirmation bar
-    fired = [c for c in fired if c["archetype"] == "continuation" or c["confirmation"]]
+    fired = [c for c in candidates if not c["blockers"]]
 
     chosen: dict[str, Any] | None = None
     if fired:
@@ -386,16 +500,23 @@ def evaluate_gann_signal(
         "regime_score": float(reg["regime_score"]),
         "regime_strength": reg["strength"],
     }
+    timing_labels = list(timing_reasons)
 
     if chosen is None:
         # Nothing actionable — report the best near-miss for the UI.
         best = max(candidates, key=lambda c: c["conviction"], default=None)
         state = "ignore"
-        if best is not None and best["conviction"] >= 0.5 * best["min_conviction"]:
-            state = "watch"
+        setup_state = "SEARCHING"
+        if best is not None:
+            non_score_blockers = [
+                item for item in best["blockers"] if item != "Conviction floor"
+            ]
+            if best["conviction"] >= 0.5 * best["min_conviction"]:
+                state = "watch"
+                setup_state = "BLOCKED" if non_score_blockers else "ARMED"
         return ConfluenceSignal(
             score=int(round(best["conviction"])) if best else 0,
-            threshold=int(round(cont_min)),
+            threshold=int(round(best["min_conviction"])) if best else int(round(cont_min)),
             bias=regime,
             state=state,
             reasons=(best["reasons"][:6] if best else [f"{regime} regime, no confluence"]),
@@ -405,6 +526,18 @@ def evaluate_gann_signal(
             side=None,
             conviction=round(best["conviction"], 3) if best else 0.0,
             score_breakdown=breakdown,
+            setup_state=setup_state,
+            candidate_archetype=best["archetype"] if best else None,
+            minimum_conviction=round(best["min_conviction"], 3) if best else cont_min,
+            conviction_gap=round((best["conviction"] - best["min_conviction"]), 3) if best else -cont_min,
+            selected_level=best.get("level_label") if best else None,
+            rule_checks=best.get("rule_checks", []) if best else [
+                _rule("geometry", "Trade-side Gann level", False, "no qualifying support or resistance")
+            ],
+            blockers=best.get("blockers", []) if best else ["Trade-side Gann level"],
+            regime_votes=dict(reg["votes"]),
+            adx=reg["adx"],
+            active_timing=timing_labels,
         )
 
     side = chosen["side"]
@@ -440,4 +573,14 @@ def evaluate_gann_signal(
         targets_underlying=targets_u,
         risk_per_unit=risk_per_unit,
         score_breakdown=breakdown,
+        setup_state="ACTIONABLE",
+        candidate_archetype=chosen["archetype"],
+        minimum_conviction=round(chosen["min_conviction"], 3),
+        conviction_gap=round(chosen["conviction"] - chosen["min_conviction"], 3),
+        selected_level=chosen.get("level_label"),
+        rule_checks=chosen.get("rule_checks", []),
+        blockers=[],
+        regime_votes=dict(reg["votes"]),
+        adx=reg["adx"],
+        active_timing=timing_labels,
     )

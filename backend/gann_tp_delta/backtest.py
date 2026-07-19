@@ -25,7 +25,15 @@ class GannTPDeltaBacktester:
     def __init__(self, config: dict[str, Any]):
         self.config = config
 
-    def run(self, frame: pd.DataFrame, *, anchor_mode: str, h_mode: str, entry_conviction: float = 0.0) -> dict[str, Any]:
+    def run(
+        self,
+        frame: pd.DataFrame,
+        *,
+        anchor_mode: str,
+        h_mode: str,
+        entry_conviction: float = 0.0,
+        underlying: str | None = None,
+    ) -> dict[str, Any]:
         if frame.empty or len(frame.index) < 40:
             return self._empty("Not enough candles for backtest.")
         max_bars = int(self.config.get("backtest", {}).get("max_bars") or 600)
@@ -103,8 +111,17 @@ class GannTPDeltaBacktester:
                                      window_bars=int(gcfg["cycle_window_bars"]))
                 square = price_time_square(anchor=anchor, current_bar_index=end, current_price=close,
                                            h=h.value, tolerance=float(gcfg["squaring_tolerance"]))
-                sig = evaluate_gann_signal(frame=window, anchor=anchor, angles=angles, sq9_levels=sq9,
-                                           cycles=cycles, square=square, h=h.value, config=cfg)
+                sig = evaluate_gann_signal(
+                    frame=window,
+                    anchor=anchor,
+                    angles=angles,
+                    sq9_levels=sq9,
+                    cycles=cycles,
+                    square=square,
+                    h=h.value,
+                    config=cfg,
+                    underlying=underlying,
+                )
                 if (sig.side in ("long", "short") and sig.archetype
                         and sig.conviction >= entry_conviction
                         and sig.stop_underlying is not None and sig.risk_per_unit and sig.risk_per_unit > 0):

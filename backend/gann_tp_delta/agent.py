@@ -73,6 +73,20 @@ def _safe_int(value: Any, default: int = 0) -> int:
         return default
 
 
+def _fresh_quote_time(value: Any, *, max_age_seconds: float) -> bool:
+    """Fail closed unless an executable quote has a parseable, fresh timestamp."""
+    if not value:
+        return False
+    try:
+        quote_time = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+        if quote_time.tzinfo is None:
+            quote_time = quote_time.replace(tzinfo=UTC)
+        age = (datetime.now(UTC) - quote_time.astimezone(UTC)).total_seconds()
+    except (TypeError, ValueError):
+        return False
+    return 0.0 <= age <= float(max_age_seconds)
+
+
 class GannTPDeltaPaperAgent:
     """Stateful paper-only option agent.
 
@@ -205,15 +219,19 @@ class GannTPDeltaPaperAgent:
                     cfg=cfg,
                 )
                 if option:
-                    decision.update(
-                        {
-                            "decision": "open",
-                            "reason": "gann_setup",
-                            "instrument_type": "OPTION",
-                            "direction": "long_call" if option["option_type"] == "CE" else "long_put",
-                            "option": option,
-                        }
-                    )
+                    max_age = float(cfg.get("max_entry_quote_age_seconds") or 120.0)
+                    if _fresh_quote_time(option.get("as_of"), max_age_seconds=max_age):
+                        decision.update(
+                            {
+                                "decision": "open",
+                                "reason": "gann_setup",
+                                "instrument_type": "OPTION",
+                                "direction": "long_call" if option["option_type"] == "CE" else "long_put",
+                                "option": option,
+                            }
+                        )
+                    else:
+                        decision["reason"] = "stale_option_quote"
             return decision
 
         scan_results = await asyncio.gather(*[_scan(row) for row in rows])
@@ -310,20 +328,40 @@ class GannTPDeltaPaperAgent:
                     snapshot = {}
             spot = _safe_float((snapshot or {}).get("spot_price"))
             signal = (snapshot or {}).get("signal") or {}
+            max_mark_age = float(
+                self.config.get("paper_agent", {}).get("max_entry_quote_age_seconds") or 120.0
+            )
+            executable_mark_fresh = False
 
             # Mark the traded instrument.
             if instrument_type == "FUTURES":
-                if spot is not None:
-                    position["current_price"] = round(spot, 2)
-                    position["updated_at"] = (snapshot or {}).get("as_of") or _now()
+                row = rows.get(underlying) or {}
+                fut = row.get("futures") if isinstance(row.get("futures"), dict) else {}
+                fut_mark = _safe_float(fut.get("ltp"))
+                exact_contract = fut.get("instrument_key") or fut.get("trading_symbol")
+                if (
+                    fut_mark is not None
+                    and fut_mark > 0
+                    and exact_contract
+                    and _fresh_quote_time(fut.get("as_of"), max_age_seconds=max_mark_age)
+                ):
+                    position["current_price"] = round(fut_mark, 2)
+                    position["updated_at"] = fut.get("as_of")
+                    position["mark_source"] = fut.get("source") or "broker_futures_quote"
+                    executable_mark_fresh = True
             else:
-                row = rows.get(underlying)
-                mark = self._mark_from_row(row, str(position.get("option_type") or "")) if row else None
-                if mark is None:
-                    mark = await self._latest_mark(position)
-                if mark and mark.get("ltp") is not None:
+                # Always mark the exact held expiry/strike/instrument. The
+                # watchlist's current ATM leg may no longer be the held contract.
+                mark = await self._latest_mark(position)
+                if (
+                    mark
+                    and mark.get("ltp") is not None
+                    and _fresh_quote_time(mark.get("as_of"), max_age_seconds=max_mark_age)
+                ):
                     position["current_price"] = mark["ltp"]
-                    position["updated_at"] = mark.get("as_of") or _now()
+                    position["updated_at"] = mark.get("as_of")
+                    position["mark_source"] = mark.get("source")
+                    executable_mark_fresh = True
 
             # Track the underlying, advance break-even / trailing stop, then
             # decide the exit off Gann levels on the underlying.
@@ -331,11 +369,23 @@ class GannTPDeltaPaperAgent:
             close_reason = self._risk_exit_reason(position, spot, signal, risk_cfg=risk_cfg, rev_min=rev_min)
 
             if close_reason:
-                closed_position = self._close_position(position, close_reason)
-                state.setdefault("closed_positions", []).append(closed_position)
-                self._journal({"event": "close", "position": closed_position})
-                closed += 1
+                if executable_mark_fresh:
+                    position.pop("exit_pending_reason", None)
+                    closed_position = self._close_position(position, close_reason)
+                    state.setdefault("closed_positions", []).append(closed_position)
+                    self._journal({"event": "close", "position": closed_position})
+                    closed += 1
+                else:
+                    # Never fabricate a paper fill from an underlying candle or
+                    # stale/wrong option leg. Preserve the position until the
+                    # exact contract has a fresh executable mark.
+                    position["exit_pending_reason"] = close_reason
+                    position["mark_status"] = "exact_contract_quote_stale"
+                    remaining.append(position)
             else:
+                if executable_mark_fresh:
+                    position.pop("exit_pending_reason", None)
+                    position["mark_status"] = "fresh"
                 remaining.append(position)
         state["open_positions"] = remaining
         state["closed_positions"] = list(state.get("closed_positions") or [])[-500:]
@@ -364,6 +414,10 @@ class GannTPDeltaPaperAgent:
             "stop_underlying": signal.get("stop_underlying"),
             "targets_underlying": signal.get("targets_underlying") or [],
             "risk_per_unit": signal.get("risk_per_unit"),
+            "setup_state": signal.get("setup_state"),
+            "rule_checks": signal.get("rule_checks") or [],
+            "blockers": signal.get("blockers") or [],
+            "selected_level": signal.get("selected_level"),
             "thesis_side": side,
             "as_of": snapshot.get("as_of") or row.get("as_of") or _now(),
             "decision": "skip",
@@ -389,9 +443,17 @@ class GannTPDeltaPaperAgent:
 
         if spec is not None:
             # ── Commodity → FUTURES (options no longer ingested) ────────────
-            price = _safe_float(spot)
-            if price is None or price <= 0:
-                decision["reason"] = "missing_spot_price"
+            fut = row.get("futures") if isinstance(row.get("futures"), dict) else {}
+            price = _safe_float(fut.get("ltp"))
+            max_age = float(self.config.get("paper_agent", {}).get("max_entry_quote_age_seconds") or 120.0)
+            exact_contract = fut.get("instrument_key") or fut.get("trading_symbol")
+            if (
+                price is None
+                or price <= 0
+                or not exact_contract
+                or not _fresh_quote_time(fut.get("as_of"), max_age_seconds=max_age)
+            ):
+                decision["reason"] = "exact_futures_quote_unavailable"
                 return decision
             decision.update({
                 "decision": "open",
@@ -402,7 +464,10 @@ class GannTPDeltaPaperAgent:
                     "underlying": underlying,
                     "lot_size": int(getattr(spec, "futures_lot_size", 1) or 1),
                     "price": round(price, 2),
-                    "trading_symbol": f"{underlying} FUT",
+                    "instrument_key": fut.get("instrument_key"),
+                    "trading_symbol": fut.get("trading_symbol") or fut.get("instrument_key"),
+                    "as_of": fut.get("as_of"),
+                    "source": fut.get("source") or "broker_futures_quote",
                     "tick_size": float(getattr(spec, "mp_tick_size", 0.05) or 0.05),
                 },
             })
@@ -414,6 +479,10 @@ class GannTPDeltaPaperAgent:
         option = self._option_from_row(row, option_type)
         if option is None:
             decision["reason"] = "missing_option_quote"
+            return decision
+        max_age = float(self.config.get("paper_agent", {}).get("max_entry_quote_age_seconds") or 120.0)
+        if not _fresh_quote_time(option.get("as_of"), max_age_seconds=max_age):
+            decision["reason"] = "stale_option_quote"
             return decision
         decision.update({
             "decision": "open",
@@ -494,6 +563,9 @@ class GannTPDeltaPaperAgent:
             "signal_bias": decision.get("signal_bias"),
             "signal_score": decision.get("signal_score"),
             "signal_reasons": decision.get("signal_reasons") or [],
+            "setup_state": decision.get("setup_state"),
+            "rule_checks": decision.get("rule_checks") or [],
+            "selected_level": decision.get("selected_level"),
             "spot_price": decision.get("spot_price"),
             "unrealized_pnl": 0.0,
             "realized_pnl": 0.0,
@@ -509,7 +581,10 @@ class GannTPDeltaPaperAgent:
             lots = max(1, int(round((target_notional / max(lot_size * entry_price, 1.0)) * size_factor)))
             common.update({
                 "direction": str(decision.get("direction") or thesis_side),  # long | short
+                "instrument_key": fut.get("instrument_key"),
                 "trading_symbol": fut.get("trading_symbol"),
+                "price_source": fut.get("source"),
+                "entry_quote_at": fut.get("as_of"),
                 "tick_size": fut.get("tick_size"),
                 "lot_size": lot_size,
                 "qty_lots": lots,
@@ -701,6 +776,7 @@ class GannTPDeltaPaperAgent:
                 strike=float(position.get("strike") or 0.0),
                 option_type=str(position.get("option_type") or ""),
                 instrument_key=str(position.get("instrument_key") or ""),
+                allow_history_fallback=False,
             )
         except Exception:
             return None

@@ -53,6 +53,7 @@ class GannTPDeltaService:
                 "squaring_tolerance": self.config["geometry"]["squaring_tolerance"],
                 "cycle_window_bars": self.config["geometry"]["cycle_window_bars"],
             },
+            "strategy_rules": self._strategy_rules(),
         }
         self._summary_cache = (monotonic() + 60.0, payload)
         return payload
@@ -68,7 +69,9 @@ class GannTPDeltaService:
         manual_h: float | None = None,
     ) -> dict[str, Any]:
         spot = self.store.load_spot_frame(underlying)
-        frame = self.store.build_feature_frame(spot, timeframe, lookback_sessions=lookback_sessions)
+        frame = self.store.build_feature_frame(
+            spot, timeframe, lookback_sessions=lookback_sessions, underlying=underlying
+        )
         snapshot = self._snapshot(frame, underlying=underlying, timeframe=timeframe, anchor_mode=anchor_mode, h_mode=h_mode, manual_h=manual_h)
         return {
             "module": self.summary(),
@@ -80,7 +83,9 @@ class GannTPDeltaService:
                 "h_mode": h_mode,
             },
             "snapshot": snapshot,
-            "backtest": self.backtester.run(frame, anchor_mode=anchor_mode, h_mode=h_mode),
+            "backtest": self.backtester.run(
+                frame, anchor_mode=anchor_mode, h_mode=h_mode, underlying=underlying
+            ),
         }
 
     async def live_snapshot(
@@ -116,7 +121,9 @@ class GannTPDeltaService:
         manual_h: float | None,
     ) -> dict[str, Any]:
         """Pure-CPU portion of live_snapshot — runs in a worker thread (WS-1.1)."""
-        frame = self.store.build_feature_frame(spot, timeframe, lookback_sessions=lookback_sessions)
+        frame = self.store.build_feature_frame(
+            spot, timeframe, lookback_sessions=lookback_sessions, underlying=underlying
+        )
         return self._snapshot(
             frame, underlying=underlying, timeframe=timeframe,
             anchor_mode=anchor_mode, h_mode=h_mode, manual_h=manual_h,
@@ -124,8 +131,12 @@ class GannTPDeltaService:
 
     def backtest(self, underlying: str, timeframe: str, lookback_sessions: int, anchor_mode: str, h_mode: str) -> dict[str, Any]:
         spot = self.store.load_spot_frame(underlying)
-        frame = self.store.build_feature_frame(spot, timeframe, lookback_sessions=lookback_sessions)
-        return self.backtester.run(frame, anchor_mode=anchor_mode, h_mode=h_mode)
+        frame = self.store.build_feature_frame(
+            spot, timeframe, lookback_sessions=lookback_sessions, underlying=underlying
+        )
+        return self.backtester.run(
+            frame, anchor_mode=anchor_mode, h_mode=h_mode, underlying=underlying
+        )
 
     async def record_paper_snapshot(self, underlying: str, timeframe: str, lookback_sessions: int, anchor_mode: str, h_mode: str) -> dict[str, Any]:
         snapshot = await self.live_snapshot(underlying, timeframe, lookback_sessions, anchor_mode, h_mode)
@@ -234,6 +245,24 @@ class GannTPDeltaService:
                 "signal": None,
             }
         frame = frame.reset_index(drop=True)
+        min_signal_bars = int(self.config.get("strategy", {}).get("min_signal_bars", 40))
+        if len(frame.index) < min_signal_bars:
+            return {
+                "status": "degraded",
+                "reason": f"Only {len(frame.index)} completed bars; {min_signal_bars} are required.",
+                "underlying": underlying,
+                "timeframe": timeframe,
+                "bars": self._bars(frame),
+                "anchor": None,
+                "signal": None,
+                "data_quality": {
+                    "bar_count": len(frame.index),
+                    "minimum_bars": min_signal_bars,
+                    "completed_bars_only": timeframe != "1day",
+                    "session_filtered": True,
+                    "sufficient": False,
+                },
+            }
         latest = frame.iloc[-1]
         current_index = len(frame.index) - 1
         current_price = float(latest["close"])
@@ -247,17 +276,46 @@ class GannTPDeltaService:
         cycles = time_cycles(anchor=anchor, current_bar_index=current_index, cycles=geometry_cfg["bar_cycles"], window_bars=int(geometry_cfg["cycle_window_bars"]))
         square = price_time_square(anchor=anchor, current_bar_index=current_index, current_price=current_price, h=h.value, tolerance=float(geometry_cfg["squaring_tolerance"]))
         if self.config.get("strategy", {}).get("enabled", True):
-            signal = evaluate_gann_signal(frame=frame, anchor=anchor, angles=angles, sq9_levels=sq9, cycles=cycles, square=square, h=h.value, config=self.config)
+            signal = evaluate_gann_signal(
+                frame=frame,
+                anchor=anchor,
+                angles=angles,
+                sq9_levels=sq9,
+                cycles=cycles,
+                square=square,
+                h=h.value,
+                config=self.config,
+                underlying=underlying,
+            )
         else:
             signal = confluence_signal(frame=frame, anchor=anchor, angles=angles, sq9_levels=sq9, cycles=cycles, square=square, config=self.config["signals"], near_pct=float(geometry_cfg["near_pct"]))
         alerts = alert_events(signal, angles, sq9, cycles, square, float(geometry_cfg["near_pct"]))
-        active_cycle = next((item for item in cycles if item.active), None)
+        major_cycles = {
+            int(item) for item in self.config.get("strategy", {}).get("major_cycles", [])
+        }
+        active_cycle = max(
+            (item for item in cycles if item.active),
+            key=lambda item: (
+                int(item.cycle) in major_cycles,
+                -abs(int(item.distance_bars)),
+                int(item.cycle),
+            ),
+            default=None,
+        )
         return {
             "status": "ready",
             "as_of": pd.Timestamp(latest["time"]).isoformat(),
             "underlying": underlying,
             "timeframe": timeframe,
             "spot_price": current_price,
+            "data_quality": {
+                "bar_count": len(frame.index),
+                "minimum_bars": min_signal_bars,
+                "completed_bars_only": timeframe != "1day",
+                "session_filtered": True,
+                "sufficient": True,
+                "last_completed_bar_at": pd.Timestamp(latest["time"]).isoformat(),
+            },
             "bars": self._bars(frame),
             "anchor": asdict(anchor),
             "h": asdict(h),
@@ -271,6 +329,43 @@ class GannTPDeltaService:
             "active_time_cycle": asdict(active_cycle) if active_cycle else None,
             "signal": asdict(signal),
             "alerts": [asdict(item) for item in alerts],
+        }
+
+    def _strategy_rules(self) -> dict[str, Any]:
+        """Public, parameterised rulebook used by the institutional desk UI."""
+        scfg = self.config.get("strategy", {})
+        risk = self.config.get("risk", {})
+        return {
+            "continuation": {
+                "label": "Regime continuation",
+                "minimum_conviction": scfg.get("continuation_min_conviction"),
+                "rules": [
+                    "ADX-qualified EMA, structure and 1x1 votes establish a bull or bear regime.",
+                    "Price must pull back to trade-side Gann angle or SQ9 support/resistance.",
+                    "Last closed bar must resume in the regime direction and hold the prior close.",
+                    "Stop sits beyond the selected Gann level plus the ATR buffer.",
+                ],
+            },
+            "reversal": {
+                "label": "Counter-regime reversal",
+                "minimum_conviction": scfg.get("reversal_min_conviction"),
+                "size_factor": scfg.get("reversal_size_factor"),
+                "rules": [
+                    "Price must reach trade-side Gann support/resistance.",
+                    "A cardinal SQ9 touch, active major time cycle and price-time square are mandatory.",
+                    "Last closed bar must reject the level in the proposed trade direction.",
+                    "Reversal must clear its higher conviction floor and beat a competing continuation.",
+                ],
+            },
+            "risk": {
+                "label": "Trade management",
+                "rules": [
+                    f"Initial target must be at least {scfg.get('min_target_r', 1.5)}R away; otherwise manage with break-even and trail.",
+                    f"Move stop to break-even at {risk.get('breakeven_at_r', 1.0)}R and trail from {risk.get('trail_start_r', 1.5)}R.",
+                    f"Exit after {risk.get('time_stop_bars', 26)} bars if progress is below {risk.get('time_stop_min_r', 0.5)}R.",
+                    "Options also use the premium hard-stop and expiry-day exit; opposite signals must be reversal-grade.",
+                ],
+            },
         }
 
     @staticmethod

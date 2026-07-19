@@ -23,6 +23,11 @@ export type GannAngle = {
 export type Sq9Level = { degree: number; direction: string; price: number; level_type: string; distance_pct?: number };
 export type TimeCycle = { cycle: number; start_bar_index: number; center_bar_index: number; end_bar_index: number; active?: boolean };
 export type GannAnchor = { bar_index: number; price: number; kind?: string; strength?: string };
+export type GannTradePlan = {
+  trigger?: number | null;
+  stop?: number | null;
+  targets?: number[] | null;
+};
 
 const VB_W = 1000;
 const VB_H = 460;
@@ -35,6 +40,7 @@ export function GannChart({
   cycles = [],
   anchor,
   spot,
+  tradePlan,
 }: {
   bars: GannBar[];
   angles?: GannAngle[];
@@ -42,6 +48,7 @@ export function GannChart({
   cycles?: TimeCycle[];
   anchor?: GannAnchor | null;
   spot?: number | null;
+  tradePlan?: GannTradePlan | null;
 }) {
   const [hover, setHover] = useState<GannBar | null>(null);
 
@@ -54,8 +61,13 @@ export function GannChart({
     const xMin = idxMin;
     const xMax = idxMax + projBars;
 
-    let pLow = Math.min(...bars.map((b) => b.low));
-    let pHigh = Math.max(...bars.map((b) => b.high));
+    const planPrices = [
+      tradePlan?.trigger,
+      tradePlan?.stop,
+      ...(tradePlan?.targets || []),
+    ].filter((value): value is number => typeof value === "number" && Number.isFinite(value));
+    let pLow = Math.min(...bars.map((b) => b.low), ...planPrices);
+    let pHigh = Math.max(...bars.map((b) => b.high), ...planPrices);
     const padP = (pHigh - pLow) * 0.08 || 1;
     pLow -= padP;
     pHigh += padP;
@@ -66,7 +78,7 @@ export function GannChart({
     const candleW = Math.max(1.2, ((VB_W - PAD.l - PAD.r) / (xMax - xMin)) * 0.62);
 
     return { idxMin, idxMax, xMin, xMax, pLow, pHigh, xOf, yOf, inRange, candleW };
-  }, [bars]);
+  }, [bars, tradePlan]);
 
   if (!model || !bars.length) {
     return (
@@ -176,6 +188,17 @@ export function GannChart({
             </text>
           </g>
         ) : null}
+
+        {/* Actionable entry, invalidation and structural objectives. */}
+        {tradePlan?.trigger != null && inRange(tradePlan.trigger) ? (
+          <PlanLine y={yOf(tradePlan.trigger)} label={`ENTRY ${tradePlan.trigger.toFixed(1)}`} color={CHART.blue} />
+        ) : null}
+        {tradePlan?.stop != null && inRange(tradePlan.stop) ? (
+          <PlanLine y={yOf(tradePlan.stop)} label={`STOP ${tradePlan.stop.toFixed(1)}`} color={CHART.red} />
+        ) : null}
+        {(tradePlan?.targets || []).filter(inRange).map((target, index) => (
+          <PlanLine key={`target-${target}`} y={yOf(target)} label={`T${index + 1} ${target.toFixed(1)}`} color={CHART.green} />
+        ))}
       </svg>
 
       {hover ? (
@@ -193,8 +216,23 @@ export function GannChart({
         <Legend color={CHART.amber} label="SQ9 level" />
         <Legend color={CHART.violet} label="active cycle" />
         <Legend color={CHART.blue} label="anchor pivot" />
+        {tradePlan?.trigger != null ? <Legend color={CHART.blue} label="entry" /> : null}
+        {tradePlan?.stop != null ? <Legend color={CHART.red} label="invalidation" /> : null}
+        {tradePlan?.targets?.length ? <Legend color={CHART.green} label="targets" /> : null}
       </div>
     </div>
+  );
+}
+
+function PlanLine({ y, label, color }: { y: number; label: string; color: string }) {
+  return (
+    <g>
+      <line x1={PAD.l} x2={VB_W - PAD.r} y1={y} y2={y} stroke={color} strokeWidth={1.35} strokeDasharray="7 3" />
+      <rect x={VB_W - PAD.r - 66} y={y - 8} width={66} height={13} rx={2} fill="#0d1117" opacity={0.9} />
+      <text x={VB_W - PAD.r - 3} y={y + 2} fill={color} fontSize={8.5} textAnchor="end">
+        {label}
+      </text>
+    </g>
   );
 }
 

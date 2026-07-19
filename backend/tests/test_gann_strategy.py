@@ -146,6 +146,59 @@ def test_continuation_needs_support_not_just_resistance():
     assert sig.archetype != "continuation"
 
 
+def test_continuation_requires_a_resumption_close():
+    angles = [_angle("1x1", 99.97)]
+    sig = st.evaluate_gann_signal(
+        frame=_frame(bullish=True, up_bar=False),
+        anchor=_LOW_ANCHOR,
+        angles=angles,
+        sq9_levels=[],
+        cycles=[_cycle(True, 144)],
+        square=_square(False),
+        h=10.0,
+        config=CFG,
+    )
+    assert sig.archetype is None
+    assert sig.candidate_archetype == "continuation"
+    assert sig.setup_state == "BLOCKED"
+    assert "Trend-resumption close" in sig.blockers
+    resumption = next(item for item in sig.rule_checks if item["key"] == "resumption")
+    assert resumption["required"] is True and resumption["passed"] is False
+
+
+def test_underlying_floor_is_part_of_signal_contract():
+    angles = [_angle("1x1", 99.97)]
+    kwargs = dict(
+        frame=_frame(bullish=True, up_bar=True),
+        anchor=_LOW_ANCHOR,
+        angles=angles,
+        sq9_levels=[_sq9(45, 99.9, level_type="ordinal")],
+        cycles=[_cycle(False)],
+        square=_square(False),
+        h=10.0,
+        config=CFG,
+    )
+    nifty = st.evaluate_gann_signal(**kwargs, underlying="NIFTY")
+    bank = st.evaluate_gann_signal(**kwargs, underlying="BANKNIFTY")
+    assert nifty.setup_state == "ACTIONABLE"
+    assert bank.setup_state == "ARMED"
+    assert bank.archetype is None
+    assert bank.minimum_conviction == 6.0
+    assert bank.threshold == 6
+
+
+def test_timing_prefers_major_cycle_over_earlier_minor_overlap():
+    score, reasons, selected = st._timing_score(
+        [_cycle(True, 7), _cycle(True, 144)],
+        _square(False),
+        CFG["strategy"]["weights"],
+        CFG["strategy"]["major_cycles"],
+    )
+    assert selected is not None and selected.cycle == 144
+    assert score > CFG["strategy"]["weights"]["cycle_minor"]
+    assert any("144*" in reason for reason in reasons)
+
+
 # ─── Reversal archetype ──────────────────────────────────────────────────────
 
 
@@ -179,6 +232,24 @@ def test_reversal_short_fires_with_confirmation_and_reduced_size():
         assert sig.size_factor < 1.0
         assert sig.confirmation is True
         assert sig.stop_underlying is not None and sig.stop_underlying > 100.0
+
+
+def test_reversal_requires_each_structural_timing_gate():
+    angles, sq9 = _strong_reversal_geometry()
+    sig = st.evaluate_gann_signal(
+        frame=_frame(bullish=True, up_bar=False),
+        anchor=_LOW_ANCHOR,
+        angles=angles,
+        sq9_levels=sq9,
+        cycles=[_cycle(True, 360)],
+        square=_square(False),
+        h=10.0,
+        config=CFG,
+    )
+    assert sig.archetype is None
+    assert sig.candidate_archetype == "reversal"
+    assert sig.setup_state == "BLOCKED"
+    assert "Price-time square" in sig.blockers
 
 
 def test_reversal_requires_higher_bar_than_continuation():

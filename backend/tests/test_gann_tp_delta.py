@@ -11,6 +11,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from gann_tp_delta.anchors import confirmed_pivots, select_anchor
 from gann_tp_delta.config import clone_default_config
+from gann_tp_delta.data import GannTPDeltaDataStore
 from gann_tp_delta.geometry import gann_fan, price_time_square, square_of_nine, time_cycles
 from gann_tp_delta.scaling import harmonic_speed
 from gann_tp_delta.schemas import AnchorPoint
@@ -90,6 +91,46 @@ def test_time_cycle_and_price_time_square_detection() -> None:
     assert any(window.cycle == 10 and window.active for window in windows)
     assert square.active is True
     assert square.ratio == 1.0
+
+
+def test_intraday_signal_frame_excludes_forming_bucket(tmp_path: Path) -> None:
+    cfg = clone_default_config()
+    times = pd.date_range("2026-01-05 09:01", periods=77, freq="1min")
+    spot = pd.DataFrame(
+        {
+            "time": times,
+            "open": [100.0] * len(times),
+            "high": [101.0] * len(times),
+            "low": [99.0] * len(times),
+            "close": [100.5] * len(times),
+            "volume": [1000.0] * len(times),
+            "oi": [0.0] * len(times),
+        }
+    )
+    store = GannTPDeltaDataStore(tmp_path, cfg["feature_engine"])
+    frame = store.build_feature_frame(spot, "15minute", lookback_sessions=4)
+
+    assert not frame.empty
+    assert pd.Timestamp(frame.iloc[-1]["time"]) <= pd.Timestamp(times[-1])
+    assert pd.Timestamp(frame.iloc[-1]["time"]).minute % 15 == 0
+
+
+def test_index_session_filter_removes_post_close_utc_rows() -> None:
+    frame = pd.DataFrame(
+        {
+            "time": pd.to_datetime(
+                [
+                    "2026-01-05 03:45",  # 09:15 IST
+                    "2026-01-05 10:00",  # 15:30 IST
+                    "2026-01-05 11:45",  # 17:15 IST — invalid for NSE
+                ]
+            ),
+            "close": [100.0, 101.0, 999.0],
+        }
+    )
+    filtered = GannTPDeltaDataStore._session_frame(frame, "NIFTY")
+
+    assert filtered["close"].tolist() == [100.0, 101.0]
 
 
 def test_confluence_signal_reaches_bullish_setup() -> None:

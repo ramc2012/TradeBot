@@ -91,6 +91,19 @@ class ConfluenceSignal:
     targets_underlying: list[float] = field(default_factory=list)
     risk_per_unit: float | None = None     # |entry_underlying - stop_underlying|
     score_breakdown: dict[str, float] = field(default_factory=dict)
+    # ── Rule-contract engine (v3) ────────────────────────────────────────────
+    # `state` remains backward-compatible. `setup_state` is the desk/execution
+    # lifecycle and `candidate_archetype` keeps a blocked near-miss auditable.
+    setup_state: str = "SEARCHING"       # SEARCHING | WATCHING | ARMED | ACTIONABLE | BLOCKED
+    candidate_archetype: str | None = None
+    minimum_conviction: float = 0.0
+    conviction_gap: float = 0.0
+    selected_level: str | None = None
+    rule_checks: list[dict[str, Any]] = field(default_factory=list)
+    blockers: list[str] = field(default_factory=list)
+    regime_votes: dict[str, int] = field(default_factory=dict)
+    adx: float | None = None
+    active_timing: list[str] = field(default_factory=list)
 
 
 @dataclass(frozen=True)
