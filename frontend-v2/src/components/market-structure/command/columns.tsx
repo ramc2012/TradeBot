@@ -60,7 +60,8 @@ export const MATRIX_COLUMNS: MatrixColumn[] = [
     label: "Readiness",
     width: "minmax(96px, 0.85fr)",
     sortValue: (r) => (r.ageSeconds == null ? null : -r.ageSeconds),
-    title: "Age of this instrument's own observation, plus whether it is usable.",
+    title:
+      "Age of this instrument's own observation, plus whether it is usable. Rows whose only source is a CVD/footprint stream grade INFERRED FROM QUOTES, never OBSERVED.",
     render: (r) => (
       <ReadinessGlyph
         freshness={r.freshness}
@@ -119,7 +120,8 @@ export const MATRIX_COLUMNS: MatrixColumn[] = [
     label: "MP + OF",
     width: "minmax(150px, 1.2fr)",
     sortValue: (r) => r.mpof.confidence,
-    title: "Order-flow-confirmed setup and its strength, with the block reason when there is none.",
+    title:
+      "Order-flow-confirmed setup and its strength, with the block reason when there is none. Order flow here is inferred from the quote stream — the feed carries no aggressor-tagged trade prints.",
     render: (r) =>
       !r.mpof.available ? (
         <Unavailable reason={r.mpof.reason} />
@@ -138,7 +140,8 @@ export const MATRIX_COLUMNS: MatrixColumn[] = [
     label: "Convergence",
     width: "minmax(150px, 1.2fr)",
     sortValue: (r) => r.convergence.score,
-    title: "Institutional-convergence stage, confirmations met/required, and blocker count.",
+    title:
+      "Institutional-convergence stage, confirmations met/required, and blocker count. The CVD and footprint confirmations are inferred from quotes — no aggressor trade tape exists on this feed.",
     render: (r) =>
       !r.convergence.available ? (
         <Unavailable reason={r.convergence.reason} />

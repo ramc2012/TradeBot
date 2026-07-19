@@ -175,7 +175,7 @@ export default function AuctionDesk() {
   return (
     <DeskShell
       title="Auction Intelligence"
-      description="Market-profile auction theory · regime classification · agent sleeves · live microstructure"
+      description="Market-profile auction theory · regime classification · agent sleeves · quote-derived order flow (sides inferred)"
       asOf={snap?.request?.quote?.timestamp as string | undefined}
       isFetching={liveQuery.isFetching}
       isLive={autoRunArmed}
@@ -288,7 +288,7 @@ function AuctionTab({
       </div>
 
       <OrderFlowPanel of={of} source={ofSource} asOf={asOf} />
-      <Section title="Tape aggression & absorption" icon={<Waves size={16} />} description="Three-minute aggressive buy/sell pulses from the same clean tape used by the auction decision; low-efficiency high-volume bars are marked as absorption.">
+      <Section title="Tape aggression & absorption" icon={<Waves size={16} />} description="Three-minute buy/sell pulses from the same quote stream the auction decision uses; sides are inferred (no aggressor tape) and low-efficiency high-volume bars are marked as absorption.">
         <OrderFlowPulse trades={(snap?.request?.trades ?? []) as FlowTrade[]} source={ofSource} asOf={asOf} dataMode={dataMode} />
       </Section>
 

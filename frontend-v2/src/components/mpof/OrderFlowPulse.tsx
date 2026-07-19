@@ -1,5 +1,15 @@
 "use client";
 
+/**
+ * OrderFlowPulse — signed "aggressive" volume per 3-minute bucket.
+ *
+ * HONESTY (2026-07-19): `aggressor_side` on a FlowTrade is a BACKEND-INFERRED
+ * label, not a broker field. No wired Indian retail broker pushes public
+ * aggressor-tagged trade prints (`backend/analytics/orderflow.py`), and
+ * `market_ticks` carries no per-trade size or side at all. So initiative,
+ * absorption and net Δ here are all inferred from quotes — every label says so.
+ */
+
 import { useMemo } from "react";
 import {
   Bar,
@@ -24,6 +34,7 @@ import { OfSourceBadge } from "./OfSourceBadge";
 export type FlowTrade = {
   timestamp: string;
   quantity?: number | null;
+  /** INFERRED side — the broker never sends one. See the module docstring. */
   aggressor_side?: string | null;
 };
 
@@ -139,6 +150,9 @@ export function OrderFlowPulse({
       <div className="mb-3 flex flex-wrap items-center justify-between gap-2">
         <div className="flex flex-wrap items-center gap-2">
           <OfSourceBadge source={source} />
+          <span className="text-[10px] uppercase tracking-[0.12em] text-text-muted" title="Buy/sell sides, initiative and absorption are inferred from the quote stream — there is no aggressor-tagged trade tape on any wired broker.">
+            sides inferred from quotes
+          </span>
           <StatusBadge label={`net Δ ${netDelta >= 0 ? "+" : ""}${formatNumber(netDelta, 0)}`} variant={netDelta > 0 ? "success" : netDelta < 0 ? "error" : "neutral"} />
           <StatusBadge label={`${initiativeCount} initiative`} variant="info" />
           <StatusBadge label={`${absorptionCount} absorption`} variant={absorptionCount ? "warn" : "neutral"} />
@@ -149,11 +163,12 @@ export function OrderFlowPulse({
         density="caption"
         provenance={provenanceOf({
           source,
+          feature: "flow_attribution",
           asOf: lastTime,
           timeframe,
           dataMode,
           have: rows.length,
-          completenessLabel: `${rows.length} bars${bars?.length ? "" : " (from raw prints)"}`,
+          completenessLabel: `${rows.length} bars${bars?.length ? "" : " (bucketed from flow rows)"}`,
         })}
       />
 
@@ -171,7 +186,7 @@ export function OrderFlowPulse({
                   labelFormatter={(value) => `${formatIST(value)} IST`}
                   formatter={(value: number, name: string) => [
                     name === "Pressure" ? `${formatNumber(Number(value) * 100, 1)}%` : formatNumber(Math.abs(Number(value)), 0),
-                    name === "Sell" ? "Aggressive sell" : name === "Buy" ? "Aggressive buy" : name,
+                    name === "Sell" ? "Sell side (inferred)" : name === "Buy" ? "Buy side (inferred)" : name,
                   ]}
                 />
                 <ReferenceLine yAxisId="volume" y={0} stroke="rgba(255,255,255,0.25)" />
@@ -192,15 +207,15 @@ export function OrderFlowPulse({
             </ResponsiveContainer>
           </div>
           <div className="mt-2 flex flex-wrap gap-x-4 gap-y-1 text-[10px] text-text-muted">
-            <span><span className="text-accent-green">Above zero</span> aggressive buys</span>
-            <span><span className="text-accent-red">Below zero</span> aggressive sells</span>
+            <span><span className="text-accent-green">Above zero</span> buy-side volume (inferred)</span>
+            <span><span className="text-accent-red">Below zero</span> sell-side volume (inferred)</span>
             <span><span className="text-violet-300">Line</span> signed delta / volume</span>
             <span><span className="text-accent-amber">Amber dot</span> high-volume absorption</span>
           </div>
         </>
       ) : (
         <div className="flex h-40 items-center justify-center rounded-xl border border-dashed border-bg-border/60 text-xs text-text-muted">
-          No clean tape pulses in this snapshot.
+          No flow rows bucketed in this snapshot.
         </div>
       )}
     </div>

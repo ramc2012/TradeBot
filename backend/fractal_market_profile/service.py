@@ -1576,9 +1576,13 @@ class FractalMarketProfileService:
         daily_direction = str(daily_profile.get("direction_bias") or "neutral")
         order_flow_direction = "bullish" if float(order_flow.get("delta") or 0.0) >= 0 else "bearish"
         order_flow_alignment = float(order_flow.get("timing_confidence") or 0.0)
-        # Only a genuine book may nudge confidence — mirrors the order_flow_ready
-        # gate: real ticks for indices, or the accepted bar/futures proxy for MCX.
-        # A synthesized index book (LTP±tick, size 1.0) is noise, not order flow.
+        # Only a genuine quote stream may nudge confidence — mirrors the
+        # order_flow_ready gate: the index quote-tick stream, or the accepted
+        # bar/futures proxy for MCX. A synthesized index book (LTP±tick, size
+        # 1.0) is noise, not order flow. NB (2026-07-19): "genuine" here means
+        # the QUOTES are observed; the buy/sell attribution built on them is
+        # inferred either way (no aggressor tape — analytics/orderflow.py).
+        # Gate logic unchanged.
         _of_source = str(order_flow.get("source") or "")
         order_flow_genuine = _of_source == "market_ticks" or (
             _is_mcx_symbol(symbol_code) and _of_source in {"bar_proxy", "bar_fallback", "bar_proxy_timeout"}

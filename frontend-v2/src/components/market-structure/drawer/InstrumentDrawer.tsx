@@ -164,7 +164,7 @@ export function InstrumentDrawer({
               <div className="text-[11.5px] text-text-muted">No blockers reported this cycle.</div>
             )}
             <div className="font-mono text-[11px] text-text-muted">
-              cvd source {row.convergence.cvdSource ?? "—"} · footprint source {row.convergence.footprintSource ?? "—"}
+              cvd source {row.convergence.cvdSource ?? "—"} · footprint source {row.convergence.footprintSource ?? "—"} · sides inferred from quotes (no aggressor tape)
               {row.tickAgeMs != null
                 ? ` · tick age ${formatNumber(row.tickAgeMs / 1000, 1)}s${row.tickLimitMs != null ? ` / ${formatNumber(row.tickLimitMs / 1000, 0)}s limit` : ""}`
                 : ""}
@@ -226,14 +226,14 @@ export function InstrumentDrawer({
         )}
       </DrawerSection>
 
-      <DrawerSection title="Flow (MP + OF)">
+      <DrawerSection title="Flow (MP + OF) · sides inferred from quotes">
         {!row.mpof.available ? (
           <Empty reason={row.mpof.reason} />
         ) : (
           <div className="space-y-1.5">
             <div className="flex flex-wrap items-center gap-2">
               <StatusBadge label={row.mpof.signal ?? row.mpof.candidate ?? "no signal"} variant={row.mpof.signal ? "success" : "neutral"} />
-              {row.mpof.ofSource ? <StatusBadge label={`of ${row.mpof.ofSource}`} variant="warn" /> : null}
+              {row.mpof.ofSource ? <StatusBadge label={`of ${row.mpof.ofSource} · sides inferred`} variant="warn" /> : null}
               {row.mpof.confidence != null ? (
                 <StatusBadge label={`confidence ${row.mpof.confidence.toFixed(2)}`} variant="neutral" />
               ) : null}

@@ -11,6 +11,12 @@
  *      layer the auction-specific extras OrderFlowPanel doesn't break out.
  *   2. Regime strip — label + confidence + allowed-direction chips + each
  *      scorecard factor as a mini-bar.
+ *
+ * HONESTY (2026-07-19): every buy/sell-ATTRIBUTED number here (cumulative
+ * delta, delta, the aggression split) is INFERRED from the quote stream. No
+ * wired Indian retail broker pushes public aggressor-tagged trade prints
+ * (`backend/analytics/orderflow.py`) and `market_ticks` stores no per-trade
+ * size or side, so nothing on this panel may be described as a tape read.
  */
 import { Activity, Gauge } from "lucide-react";
 
@@ -146,7 +152,7 @@ export function MicrostructurePanel({ of, regime }: { of?: OrderFlow | null; reg
       <Section
         title="Microstructure"
         icon={<Activity size={16} />}
-        description="Signed flow, book imbalance and aggression — the tape behind the regime call"
+        description="Signed flow, book imbalance and aggression behind the regime call — buy/sell sides are inferred from the quote stream, not read off an aggressor tape"
       >
         <div className="grid gap-4 lg:grid-cols-3">
           {/* signed CVD headline + price tiles */}
@@ -181,7 +187,12 @@ export function MicrostructurePanel({ of, regime }: { of?: OrderFlow | null; reg
           <div className="flex flex-col justify-start gap-2.5 self-start">
             <div>
               <div className="flex items-center justify-between text-[10.5px]">
-                <span className="text-text-muted">Aggression split</span>
+                <span
+                  className="text-text-muted"
+                  title="Aggressive buy vs sell volume, with both sides INFERRED from the quote stream — market_ticks carries no per-trade size and no broker aggressor flag (backend/analytics/orderflow.py)."
+                >
+                  Aggression split (inferred)
+                </span>
                 <span className="font-mono text-text-secondary">
                   {((aggBuy / aggTot) * 100).toFixed(0)}/{((aggSell / aggTot) * 100).toFixed(0)}
                 </span>

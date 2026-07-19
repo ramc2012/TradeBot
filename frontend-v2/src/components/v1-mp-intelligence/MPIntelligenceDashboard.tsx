@@ -44,23 +44,26 @@ import {
 } from "@/lib/api";
 import { usePersistentSnapshotQuery } from "@/hooks/usePersistentSnapshotQuery";
 
-// ─── Live order-flow (real microstructure from the auction engine) ──────────
+// ─── Live order-flow (quote-derived microstructure from the auction engine) ─
+// 2026-07-19: labels below state the DERIVATION. No wired broker pushes
+// aggressor-tagged trade prints (backend/analytics/orderflow.py), so no badge
+// here may say the buy/sell split was observed.
 
 const OF_SOURCE_BADGE: Record<string, { label: string; cls: string; note: string }> = {
   tick_reconstruction_book: {
-    label: "LIVE BOOK",
-    cls: "border-emerald-500/50 bg-emerald-500/15 text-emerald-300",
-    note: "Real futures/option order book — genuine sizes + trade tape.",
+    label: "LIVE BOOK · SIDES INFERRED",
+    cls: "border-sky-500/50 bg-sky-500/15 text-sky-300",
+    note: "Futures/option L2 book snapshots — real sizes, but buy/sell sides are inferred (no aggressor tape).",
   },
   tick_reconstruction: {
     label: "TICK-RECON",
     cls: "border-amber-500/50 bg-amber-500/15 text-amber-200",
-    note: "Reconstructed from index ticks; L2 sizes floored (index has no book).",
+    note: "Rebuilt from index quote ticks; L2 sizes floored (index has no book); sides inferred.",
   },
   bar_inference: {
     label: "SYNTHETIC",
     cls: "border-rose-500/50 bg-rose-500/15 text-rose-300",
-    note: "Fabricated from candle colour — no real microstructure. Wire AUCTION_OF_BOOK_SYMBOLS to a real book.",
+    note: "Fabricated from candle colour — no quote stream behind it. Wire AUCTION_OF_BOOK_SYMBOLS to an L2 book stream.",
   },
 };
 
@@ -1459,7 +1462,8 @@ export default function MPIntelligenceDashboard() {
     refetchOnWindowFocus: false,
   });
 
-  // Live microstructure order flow (the auction engine's OrderFlowSnapshot).
+  // Quote-derived order flow (the auction engine's OrderFlowSnapshot) — sides
+  // inferred, no aggressor tape.
   // Real when AUCTION_OF_BOOK_SYMBOLS maps this index to a futures/option book,
   // else synthetic (the panel badge is explicit about which).
   const liveOFQuery = useQuery({
@@ -1739,8 +1743,8 @@ export default function MPIntelligenceDashboard() {
                 <div>
                   <SectionHeader
                     icon={Activity}
-                    title="Live Order Flow · microstructure"
-                    sub="OrderFlowSnapshot from the auction engine — REAL when a futures/option book is wired (AUCTION_OF_BOOK_SYMBOLS), else synthetic. Badge shows which."
+                    title="Live Order Flow · quote-derived microstructure"
+                    sub="OrderFlowSnapshot from the auction engine — L2 book snapshots when one is wired (AUCTION_OF_BOOK_SYMBOLS), else synthetic. Buy/sell sides are inferred from quotes either way; the badge shows the stream."
                   />
                   <LiveOrderFlowPanel snapshot={liveOFQuery.data} loading={liveOFQuery.isLoading} />
                 </div>

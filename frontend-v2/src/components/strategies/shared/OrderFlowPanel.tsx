@@ -5,9 +5,11 @@
  * The lanes emit an identical order_flow block (CVD, imbalances, queue
  * pressure, toxicity, VWAP drift, aggressive buy/sell, fill odds).
  *
- * The panel header always states the tick-source honesty (REAL TICKS vs
- * BAR PROXY / INFERRED) and the data timestamp — fabricated flow must never
- * be readable as real.
+ * The panel header always states the source honesty (TICK/BOOK QUOTES vs BAR
+ * PROXY) and the data timestamp. 2026-07-19: every buy/sell-attributed number
+ * below (delta, cumulative delta, aggressive buy/sell, trade imbalance) is
+ * INFERRED FROM QUOTES — no wired broker sends aggressor-tagged trade prints
+ * (`backend/analytics/orderflow.py`), so none of these is a measured side.
  */
 import { Waves } from "lucide-react";
 
@@ -97,7 +99,7 @@ export function OrderFlowPanel({
     <Section
       title="Order flow"
       icon={<Waves size={16} />}
-      description="Live microstructure: delta, imbalances, queue pressure, toxicity"
+      description="Quote-derived microstructure: delta, imbalances, queue pressure, toxicity — buy/sell sides inferred, no aggressor tape"
       rightSlot={
         <div className="flex flex-wrap items-center gap-2">
           <OfSourceBadge source={source ?? f.source ?? f.order_flow_source} />

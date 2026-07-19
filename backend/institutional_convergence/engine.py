@@ -352,6 +352,12 @@ def evaluate_rules(
     noon = noon_quarantine and (now.hour == 12 or (now.hour == 11 and now.minute >= 45) or (now.hour == 13 and now.minute <= 15))
     readiness_gates = {
         "tick_fresh": tick_fresh,
+        # `real_tick_cvd` is a HISTORICAL KEY NAME (kept: the UI, tests and the
+        # lane registry all key off it). What it actually asserts is that CVD
+        # came from the observed QUOTE-tick stream rather than from bar shape.
+        # It is NOT a claim of trade-print provenance: market_ticks carries no
+        # trade id, no per-trade size and no aggressor flag, so `build_footprint`
+        # infers every side. See analytics/orderflow.py. Condition unchanged.
         "real_tick_cvd": cvd_source == "market_ticks",
         "outside_noon_quarantine": not noon,
         "vix_available": vix is not None if require_vix else True,

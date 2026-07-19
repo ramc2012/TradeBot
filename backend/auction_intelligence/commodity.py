@@ -20,10 +20,15 @@ Key differences from the NSE lane, and why:
     to the 30-minute auction bar size. The profile is built at the per-root
     COARSE value tick (``CommodityContractSpec.mp_profile_tick()``) so POC/VAH/VAL
     concentrate instead of smearing across thousands of one-rupee TPO levels.
-  * Order flow = the REAL MCX tick tape (``market_ticks`` keyed by the resolved
-    futures symbol, which this lane subscribes on the shared WS router), fed
-    through the same tick-reconstruction path as the NSE book path — tick-first,
-    degrading to bar inference only when the tape is thin.
+  * Order flow = the MCX QUOTE tick stream (``market_ticks`` keyed by the
+    resolved futures symbol, which this lane subscribes on the shared WS
+    router), fed through the same tick-reconstruction path as the NSE book
+    path — tick-first, degrading to bar inference only when the stream is thin.
+    NOTE (2026-07-19): ``market_ticks`` stores quotes only (ltp / OHLC /
+    cumulative volume / oi / bid / ask / sizes) — there is no trade id, no
+    per-trade quantity and no broker aggressor flag, so every buy/sell side
+    below is INFERRED from those quotes, never a trade print. See
+    ``analytics/orderflow.py``.
   * Instrument traded = the futures contract DIRECTLY (no options remap — the NSE
     option mapper only knows index/stock underlyings, so it would empty every
     commodity plan). The auction agents already emit price-based LONG/SHORT
@@ -203,7 +208,8 @@ async def _build_commodity_inputs(
 
     Returns the ``SessionContext`` + 30-minute current/prior bars + tick-first
     order-flow quote/trades/depth/history + metadata, all built from the unified
-    1-minute MCX store and the real MCX tick tape.
+    1-minute MCX store and the MCX quote-tick stream (sides inferred, not a
+    trade-print tape).
     """
     contract_symbol = str(contract.get("symbol") or "")
     if not contract_symbol:

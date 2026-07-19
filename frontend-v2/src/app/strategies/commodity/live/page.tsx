@@ -720,8 +720,13 @@ function CVDChip({ row }: { row: WatchRow }) {
   const arrow = session > 0 ? "↑" : session < 0 ? "↓" : "·";
   const tone =
     agrees === true ? "text-emerald-300" : agrees === false ? "text-rose-300" : colorForDelta(session);
+  // The buy/sell sign is INFERRED — commodity CVD is derived from 1-minute bar
+  // volume, and even the tick path carries no aggressor flag.
   return (
-    <span className={`font-mono ${tone}`} title={`Session CVD ${session.toLocaleString("en-IN")}`}>
+    <span
+      className={`font-mono ${tone}`}
+      title={`Session CVD ${session.toLocaleString("en-IN")} — sign inferred from bar/quote shape, not an aggressor-tagged tape`}
+    >
       {arrow} {compactNumber(Math.abs(session))}
     </span>
   );

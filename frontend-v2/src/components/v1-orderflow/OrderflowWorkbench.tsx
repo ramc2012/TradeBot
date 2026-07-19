@@ -865,8 +865,9 @@ function DomLadder({
 /**
  * Sierra Chart-style Time and Sales tape. Newest print first, painted
  * green for up-ticks and red for down-ticks, with bold rows for block
- * trades (≥3× median quantity in the recent window). Side chip shows
- * the aggressor when the broker exposes it.
+ * trades (≥3× median quantity in the recent window). The side chip is an
+ * INFERRED side — no wired Indian retail broker exposes an aggressor flag
+ * (backend/analytics/orderflow.py), so it is derived from quotes.
  */
 function TapeFeed({
   tape,
@@ -886,14 +887,14 @@ function TapeFeed({
           Time & sales
         </div>
         <div className="font-mono text-[10px] uppercase tracking-[0.16em] text-text-muted">
-          {rows.length} prints {synthetic ? "· bar-derived" : ""}
+          {rows.length} rows {synthetic ? "· bar-derived" : "· sides inferred"}
         </div>
       </div>
       {rows.length === 0 ? (
         <div className="mt-3 text-[11px] leading-5 text-text-muted">
           {synthetic
             ? "MCX prints not exposed by broker session — use footprint delta for flow signal."
-            : "Tape will populate as the next minute's trade prints land in the broker snapshot."}
+            : "Tape will populate as the next minute's quote rows land in the broker snapshot (sides inferred, no aggressor tape)."}
         </div>
       ) : (
         <div className="mt-2 max-h-[260px] overflow-y-auto font-mono text-[11px]">

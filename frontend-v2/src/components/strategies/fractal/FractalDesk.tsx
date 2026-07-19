@@ -203,7 +203,7 @@ export default function FractalDesk() {
   return (
     <DeskShell
       title="Fractal Market Profile"
-      description="Self-similar hourly profile stack — value migration, day structure and live microstructure across the session."
+      description="Self-similar hourly profile stack — value migration, day structure and quote-derived order flow (sides inferred) across the session."
       asOf={snap?.generated_at}
       isFetching={liveQuery.isFetching}
       paperMode

@@ -12,6 +12,13 @@
  *                    (cumulative-delta) line below.
  *   tape           → time-and-sales tape + DOM ladder + block/whale prints.
  *   profile        → Market-Profile TPO histogram + heatmap reference levels.
+ *
+ * HONESTY (2026-07-19): the QUOTE stream and the OHLCV bars behind this desk
+ * are observed; every buy/sell ATTRIBUTION on top of them (CVD, footprint
+ * delta, aggressive buy/sell, tape "side") is INFERRED. No wired Indian retail
+ * broker pushes public aggressor-tagged trade prints — see
+ * `backend/analytics/orderflow.py` — and `market_ticks` stores no per-trade
+ * size or side. Labels here must never claim trade-print provenance.
  */
 import { useMemo, useState, useTransition } from "react";
 import { useQuery } from "@tanstack/react-query";
@@ -259,7 +266,7 @@ export default function OrderflowWorkbench() {
   return (
     <DeskShell
       title="Order-flow Workbench"
-      description="Institutional microstructure: footprint delta, CVD, DOM ladder, time-and-sales tape, and market-profile reference levels."
+      description="Quote-derived microstructure: footprint delta, CVD, DOM ladder, time-and-sales, market-profile levels. Buy/sell sides are inferred — no aggressor trade tape exists on this feed."
       // Freshness reflects the DATA timestamp, not the server render time
       // (snap.as_of is "now" on every poll and would always read "1s ago").
       asOf={inst?.timestamp ?? snap?.as_of}
@@ -366,7 +373,7 @@ export default function OrderflowWorkbench() {
           <Section
             title="Cumulative delta (CVD)"
             icon={<Waves size={16} />}
-            description="Net signed volume accumulated across the session — divergence vs price flags absorption."
+            description="Net signed volume accumulated across the session, with the sign INFERRED FROM QUOTES (no aggressor tape) — divergence vs price flags absorption."
           >
             <CvdChart bars={bars} />
           </Section>
@@ -410,15 +417,19 @@ export default function OrderflowWorkbench() {
 
 // ─── Data-quality / source row ──────────────────────────────────────────────
 
-// The order-flow tape names this workbench accepts as genuine live
-// microstructure. Deliberately STRICTER than the shared contract's `observed`
+// The order-flow stream names this workbench accepts as a genuinely live
+// QUOTE feed. Deliberately STRICTER than the shared contract's `observed`
 // grade — a TimescaleDB history read grades as observed for provenance but is
-// not a live tape, and this surface gates execution readiness.
+// not a live stream, and this surface gates execution readiness.
+//
+// UNCHANGED 2026-07-19: this predicate keeps calling `classifySourceGrade`
+// bare (source grading), so the readiness gate behaves exactly as before. Only
+// the DISPLAYED grade below is corrected to the flow grade.
 const LIVE_OF_SOURCES = new Set(["market_ticks"]);
-// Max data age (seconds) for intraday microstructure to count as live.
+// Max data age (seconds) for intraday order flow to count as live.
 const MAX_LIVE_AGE_SEC = 90;
 
-/** Strict readiness: live source AND fresh data AND real microstructure. */
+/** Strict readiness: live quote source AND fresh data AND flow coverage. */
 export function evaluateReadiness(dq: DataQuality, inst?: Instrument): {
   ready: boolean;
   notLiveReason: string | null;
@@ -446,11 +457,11 @@ export function evaluateReadiness(dq: DataQuality, inst?: Instrument): {
     : !isLiveSource
       ? dataMode === "historical_replay"
         ? "REPLAY"
-        : `SOURCE: ${ofSource || "—"} (${sourceGradeLabel(grade)})`
+        : `SOURCE: ${ofSource || "—"} (${sourceGradeLabel(classifySourceGrade(ofSource, "flow_attribution"))})`
       : !isFresh
         ? `STALE ${formatAge(ageSec)}`
         : !hasMicro
-          ? "NO MICROSTRUCTURE"
+          ? "NO FLOW COVERAGE"
           : dq.degraded_reason || "DEGRADED";
 
   return { ready, notLiveReason };
@@ -605,8 +616,8 @@ function TapePanel({ rows }: { rows: TapeRow[] }) {
     <Section
       title="Time & sales"
       icon={<ListOrdered size={16} />}
-      description="Most-recent prints first — blocks highlighted"
-      rightSlot={<StatusBadge label={`${rows.length} prints`} variant="neutral" />}
+      description="Most-recent rows first — 'side' is inferred from quotes, not a broker aggressor flag; blocks highlighted"
+      rightSlot={<StatusBadge label={`${rows.length} rows`} variant="neutral" />}
     >
       <div className="-mx-2 max-h-[420px] overflow-y-auto">
         <table className="w-full border-collapse">
@@ -660,7 +671,7 @@ function TapePanel({ rows }: { rows: TapeRow[] }) {
             ) : (
               <tr>
                 <td colSpan={4} className="px-2.5 py-8 text-center text-sm text-text-muted">
-                  No trade prints in this snapshot.
+                  No time-and-sales rows in this snapshot.
                 </td>
               </tr>
             )}

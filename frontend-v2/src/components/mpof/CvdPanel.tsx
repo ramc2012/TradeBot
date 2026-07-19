@@ -3,9 +3,15 @@
 /**
  * CvdPanel — cumulative-volume-delta sparkline vs close overlay.
  *
+ * CVD is INFERRED FROM QUOTES, never measured: there is no aggressor-tagged
+ * trade tape on any wired broker (`backend/analytics/orderflow.py`), so each
+ * bar's buy/sell split is a heuristic over ltp + L1 snapshots. The panel says
+ * so on its face.
+ *
  * Dual-axis recharts line (price left / CVD right) with:
- *   · a PROMINENT order-flow-source badge (REAL TICKS vs BAR PROXY) — the
- *     honest-data distinction is the headline, not a footnote
+ *   · a PROMINENT order-flow-source badge (TICK/BOOK QUOTES vs BAR PROXY —
+ *     sides inferred either way) — the derivation is the headline, not a
+ *     footnote
  *   · divergence markers drawn ON the chart: when the lane flags a
  *     divergence, the two swing points (price extreme vs CVD disagreement)
  *     are dotted and connected on both axes
@@ -96,6 +102,9 @@ export function CvdPanel({
         <div className="mb-2 flex flex-wrap items-center justify-between gap-2">
           <div className="flex flex-wrap items-center gap-2">
             <OfSourceBadge source={source} />
+            <span className="text-[10px] uppercase tracking-[0.12em] text-text-muted" title="market_ticks carries quotes only (ltp / OHLC / cumulative volume / bid / ask) — no trade_id, no per-trade size, no broker aggressor flag. Each bar's buy/sell split is inferred.">
+              CVD · inferred from quotes
+            </span>
             {divKind ? (
               <StatusBadge
                 label={`divergence · ${divKind}${divergence?.strength != null ? ` ${formatNumber(Number(divergence.strength) * 100, 0)}%` : ""}`}
@@ -113,6 +122,7 @@ export function CvdPanel({
           density="caption"
           provenance={provenanceOf({
             source,
+            feature: "flow_attribution",
             asOf: lastTime,
             timeframe,
             dataMode,
@@ -166,7 +176,7 @@ export function CvdPanel({
                     contentStyle={{ background: "#0d1117", border: "1px solid rgba(255,255,255,0.12)", borderRadius: 8, fontSize: 11 }}
                     labelFormatter={(v) => `${formatIST(v)} IST`}
                     // eslint-disable-next-line @typescript-eslint/no-explicit-any
-                    formatter={(value: any) => [formatNumber(Number(value), 0), "Δ delta"]}
+                    formatter={(value: any) => [formatNumber(Number(value), 0), "Δ delta (inferred)"]}
                   />
                   <ReferenceLine y={0} stroke="rgba(255,255,255,0.15)" />
                   <Bar dataKey="delta" isAnimationActive={false} maxBarSize={14}>

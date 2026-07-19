@@ -1246,9 +1246,11 @@ def evaluate_commodity_mp_signal(
     # A historical scale baseline cannot rescue missing observations. When the
     # recent MP buckets lack usable volume, OF-dependent entries are blocked —
     # but only on the BAR-INFERENCE path. The R0 gate exists because sparse
-    # bar-OHLCV volume makes inferred CVD noise; real tick-tape CVD
-    # (of_source == "market_ticks") is measured flow, not inference, so the
-    # gate does not apply there.
+    # bar-OHLCV volume makes bar-inferred CVD noise; quote-tick CVD
+    # (of_source == "market_ticks") is derived from an observed quote stream
+    # rather than from bar shape, so the gate does not apply there. Note the
+    # buy/sell SIDES are inferred in both cases — there is no aggressor trade
+    # tape (analytics/orderflow.py). Gate condition unchanged.
     volume_coverage = _of_volume_coverage(closed_1m, period_bars=period_bars)
     of_degraded = (
         settings.COMMODITY_OF_QUALITY_GATE_ENABLED

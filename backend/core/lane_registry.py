@@ -180,7 +180,12 @@ def get_registry() -> tuple[LaneSpec, ...]:
             runner_keys=("institutional_convergence_commodity",),
             paper_book_source="institutional_convergence commodity book",
             status_endpoint="/api/institutional-convergence/commodity/status",
-            notes="real_tick_cvd honest-gate blocks MCX entries until futures stream on the WS.",
+            notes=(
+                "real_tick_cvd honest-gate blocks MCX entries until futures stream on the WS. "
+                "The gate name is historical: it requires CVD derived from the observed QUOTE-tick "
+                "stream rather than from bar shape — no broker sends an aggressor trade tape, so "
+                "the buy/sell sides are inferred either way (analytics/orderflow.py)."
+            ),
         ),
         LaneSpec(
             key="fractal_market_profile",

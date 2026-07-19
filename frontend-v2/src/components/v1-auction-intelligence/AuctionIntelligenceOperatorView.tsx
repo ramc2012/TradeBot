@@ -2017,7 +2017,7 @@ export default function AuctionIntelligenceOperatorView() {
                   </ComposedChart>
                 </ResponsiveContainer>
               ) : (
-                <div className="flex h-full items-center justify-center text-sm text-slate-400">No aligned quote or trade tape available.</div>
+                <div className="flex h-full items-center justify-center text-sm text-slate-400">No aligned quote or flow rows available.</div>
               )}
             </div>
 

@@ -261,14 +261,20 @@ const dayTypeColor = (dt?: string) => (dt ? DAY_TYPE_TONE[dt] ?? "#94a3b8" : "#9
  * three strings and silently fell back to "synthetic" for everything else —
  * the desk-local notes stay because they explain what each source means HERE.
  */
+// 2026-07-19: notes describe the DERIVATION, not a trade tape. No wired
+// broker sends aggressor-tagged prints, so a buy/sell side is never measured
+// here — only the underlying quote/book stream differs in granularity.
 const OF_SOURCE_NOTE: Record<string, string> = {
-  tick_reconstruction_book: "Real futures/option book — genuine sizes + tape.",
-  tick_reconstruction: "Reconstructed from index ticks; L2 sizes floored.",
-  bar_inference: "Inferred from candle colour — no real microstructure.",
+  tick_reconstruction_book: "Futures/option L2 book snapshots — real sizes, sides still inferred (no aggressor tape).",
+  tick_reconstruction: "Rebuilt from index quote ticks; L2 sizes floored, sides inferred.",
+  bar_inference: "Inferred from candle shape — no quote stream behind it at all.",
 };
 
 function ofBadgeOf(source: string): { label: string; variant: "success" | "warn" | "error" | "info" | "neutral"; note: string } {
-  const grade = classifySourceGrade(source);
+  // Order flow is a buy/sell-ATTRIBUTED feature: grade it as such, so the
+  // badge can never read OBSERVED off a quote-only stream. The readiness
+  // predicates elsewhere still use the bare source grade — unchanged.
+  const grade = classifySourceGrade(source, "flow_attribution");
   return {
     label: sourceGradeLabel(grade).toLowerCase(),
     variant: sourceGradeVariant(grade),
@@ -377,7 +383,7 @@ export default function MpDesk() {
   return (
     <DeskShell
       title="MP Intelligence"
-      description="Live market-profile structure — TPO distribution, value migration, regime history, drift & setup diagnostics."
+      description="Live market-profile structure — TPO distribution, value migration, regime history, drift & setup diagnostics. Order-flow sides are inferred from quotes."
       asOf={asOf}
       /* `live_appended` is a BACKFILL-APPEND flag, not liveness — it used to
          light the shell's "armed" dot. Data honesty now lives in the
@@ -531,7 +537,7 @@ function LiveTab({
 
       <SetupCard signal={signal} skipReason={skipReason} rag={rag} regime={regime} positional={positional} />
 
-      <Section title="Live order flow" icon={<Waves size={16} />} rightSlot={<StatusBadge label={ofBadge.label} variant={ofBadge.variant} />} description={ofBadge.note}>
+      <Section title="Order flow (sides inferred from quotes)" icon={<Waves size={16} />} rightSlot={<StatusBadge label={ofBadge.label} variant={ofBadge.variant} />} description={ofBadge.note}>
         {orderFlow ? <OrderFlowPanel of={orderFlow} /> : <div className="py-8 text-center text-sm text-text-muted">No live order-flow snapshot (market closed or desk idle).</div>}
       </Section>
     </div>

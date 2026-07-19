@@ -14,6 +14,7 @@
  *   dataMode        live | historical_replay |   — what the numbers describe
  *                   bar_inference
  *   sourceGrade     observed | reconstructed |   — how the numbers were obtained
+ *                   modelled_from_quotes |
  *                   modelled | bar_inferred | unavailable
  *   freshness       fresh | stale | absent       — when they were obtained
  *   sufficiency     ok | degraded | insufficient — whether they can be acted on
@@ -26,6 +27,47 @@
 
 import { freshnessTone } from "@/components/common/LastUpdated";
 import { toDate } from "@/components/desk-ui/formatters";
+import {
+  NO_AGGRESSOR_TAPE_NOTE,
+  classifySourceGrade,
+  normalizeSource,
+  sourceGradeLabel,
+  type BadgeVariant,
+  type MarketFeature,
+  type SourceGrade,
+} from "./flow-provenance";
+
+/**
+ * Source grading lives in `./flow-provenance` (pure, dependency-free, unit
+ * tested) because it is FEATURE-AWARE as of 2026-07-19: the quote/bar stream
+ * grades `observed`, but any buy/sell-ATTRIBUTED number built on it grades
+ * `modelled_from_quotes` — `backend/analytics/orderflow.py` states outright
+ * that no Indian retail broker pushes aggressor-tagged trade prints, so CVD /
+ * footprint sides / delta / aggression / absorption are approximations from
+ * OHLCV bars + L1 snapshots, never measurements. Re-exported here so every
+ * existing `@/lib/market-semantics` import keeps working unchanged.
+ */
+export {
+  classifySourceGrade,
+  classifyFlowGrade,
+  classifyOfSource,
+  describeFlowDerivation,
+  isFabricatedGrade,
+  isInferredSideGrade,
+  normalizeSource,
+  sourceGradeLabel,
+  sourceGradeVariant,
+  AGGRESSOR_TAPE_AVAILABLE,
+  FLOW_ATTRIBUTION_FEATURES,
+  NO_AGGRESSOR_TAPE_NOTE,
+} from "./flow-provenance";
+export type {
+  BadgeVariant,
+  MarketFeature,
+  OfSourceClass,
+  OfSourceKind,
+  SourceGrade,
+} from "./flow-provenance";
 
 // ─── Vocabulary ─────────────────────────────────────────────────────────────
 
@@ -39,17 +81,8 @@ export type SchedulerState =
   | "error"
   | "unknown";
 export type DataMode = "live" | "historical_replay" | "bar_inference" | "unknown";
-export type SourceGrade =
-  | "observed"
-  | "reconstructed"
-  | "modelled"
-  | "bar_inferred"
-  | "unavailable";
 export type Freshness = "fresh" | "stale" | "absent";
 export type Sufficiency = "ok" | "degraded" | "insufficient";
-
-/** Badge variants supported by `StatusBadge` — the contract emits only these. */
-export type BadgeVariant = "neutral" | "success" | "warn" | "error" | "info";
 
 export type Completeness = {
   have: number | null;
@@ -73,101 +106,6 @@ export type Provenance = {
   /** degraded_reason, blocked_reasons, "no stop", … — always human-readable. */
   reasons: string[];
 };
-
-// ─── Source grading ─────────────────────────────────────────────────────────
-
-/**
- * Directly observed prints from a real tape / book. `tick_reconstruction_book`
- * is graded `reconstructed` — it is a genuine book but the per-trade aggressor
- * side is inferred, and that distinction matters when reading a footprint.
- */
-const OBSERVED_SOURCES = new Set([
-  "market_ticks",
-  "tick_reconstruction",
-  "ticks",
-  "live_tick",
-]);
-
-const RECONSTRUCTED_SOURCES = new Set([
-  "tick_reconstruction_book",
-  "depth_reconstruction",
-]);
-
-/** Fabricated from OHLCV bars — never a tape. */
-const BAR_INFERRED_SOURCES = new Set([
-  "bar_inference",
-  "bar_proxy",
-  "bar_fallback",
-  "bar_proxy_timeout",
-  "insufficient_ticks",
-  "spot_index_proxy",
-  "historical_bar_inference",
-  "snapshot",
-  "scan_guarded",
-]);
-
-/** Computed by a model (Black-Scholes greeks, policy heads, fitted regimes). */
-const MODELLED_SOURCES = new Set([
-  "black_scholes",
-  "bs_model",
-  "greeks_model",
-  "policy",
-  "policy_head",
-  "modelled",
-  "model",
-  "synthetic_quote",
-]);
-
-const UNAVAILABLE_SOURCES = new Set(["", "unknown", "unavailable", "none", "null"]);
-
-export function normalizeSource(source?: string | null): string {
-  return String(source ?? "").trim().toLowerCase();
-}
-
-/** Classify a backend source string into the shared grade vocabulary. */
-export function classifySourceGrade(source?: string | null): SourceGrade {
-  const s = normalizeSource(source);
-  if (UNAVAILABLE_SOURCES.has(s)) return "unavailable";
-  if (OBSERVED_SOURCES.has(s)) return "observed";
-  if (RECONSTRUCTED_SOURCES.has(s)) return "reconstructed";
-  if (BAR_INFERRED_SOURCES.has(s)) return "bar_inferred";
-  if (MODELLED_SOURCES.has(s)) return "modelled";
-  // TimescaleDB history reads are observed prints replayed from storage.
-  if (s.startsWith("timescaledb") || s.startsWith("timescale_")) return "observed";
-  if (s.includes("bar_") || s.includes("_proxy") || s.includes("inference")) return "bar_inferred";
-  if (s.includes("tick")) return "reconstructed";
-  // Unrecognised string: do NOT promote it. Unverified reads as inferred-grade.
-  return "bar_inferred";
-}
-
-const GRADE_LABEL: Record<SourceGrade, string> = {
-  observed: "OBSERVED",
-  reconstructed: "RECONSTRUCTED",
-  modelled: "MODELLED",
-  bar_inferred: "BAR INFERRED",
-  unavailable: "SOURCE UNKNOWN",
-};
-
-const GRADE_VARIANT: Record<SourceGrade, BadgeVariant> = {
-  observed: "success",
-  reconstructed: "info",
-  modelled: "info",
-  bar_inferred: "warn",
-  unavailable: "neutral",
-};
-
-export function sourceGradeLabel(grade: SourceGrade): string {
-  return GRADE_LABEL[grade];
-}
-
-export function sourceGradeVariant(grade: SourceGrade): BadgeVariant {
-  return GRADE_VARIANT[grade];
-}
-
-/** True when a grade means "this was fabricated from bars, not observed". */
-export function isFabricatedGrade(grade: SourceGrade): boolean {
-  return grade === "bar_inferred" || grade === "unavailable";
-}
 
 // ─── Data mode ──────────────────────────────────────────────────────────────
 
@@ -439,6 +377,11 @@ export function deriveSufficiency(input: SufficiencyInput): SufficiencyVerdict {
   if (input.degradedReason) reasons.push(String(input.degradedReason));
   for (const r of input.blockedReasons ?? []) if (r) reasons.push(String(r));
   if (grade === "bar_inferred") reasons.push("inferred from bars, not a tape");
+  // NOTE: `modelled_from_quotes` deliberately does NOT add a sufficiency
+  // reason. Sufficiency answers "can this be acted on", and every flow lane
+  // acts on quote-derived sides BY DESIGN — that is the lane's contract, not a
+  // degradation. The derivation is stated in the badge/caption instead, so
+  // this correction relabels without silently amber-ing every desk.
   if (input.dataMode === "historical_replay") reasons.push("replayed session");
   if (freshness === "stale") reasons.push("observation is stale");
   if (
@@ -480,6 +423,14 @@ export function sufficiencyVariant(s: Sufficiency): BadgeVariant {
 
 export type ProvenanceInput = {
   source?: string | null;
+  /**
+   * What KIND of number this provenance describes. Defaults to `"quote"`, i.e.
+   * the pre-2026-07-19 source-only grading, so every existing caller is
+   * unchanged. Flow surfaces (CVD, footprint, delta, aggression, absorption)
+   * MUST pass `"flow_attribution"` — the buy/sell split is inferred from
+   * quotes, never observed (`backend/analytics/orderflow.py`).
+   */
+  feature?: MarketFeature;
   asOf?: string | number | Date | null;
   timeframe?: string | null;
   have?: number | null;
@@ -501,7 +452,8 @@ export type ProvenanceInput = {
 export function provenanceOf(input: ProvenanceInput): Provenance {
   const ds = input.dataStatus;
   const source = input.source ?? ds?.order_flow_source ?? ds?.quote_source ?? ds?.history_source ?? null;
-  const grade = classifySourceGrade(source);
+  const feature: MarketFeature = input.feature ?? "quote";
+  const grade = classifySourceGrade(source, feature);
   const { freshness, ageSeconds, asOf } = deriveFreshness(input.asOf, {
     nowMs: input.nowMs,
     staleAfterSeconds: input.staleAfterSeconds,
@@ -557,6 +509,7 @@ export function describeProvenance(p: Provenance): string {
     p.freshness === "absent" ? "no timestamp" : `${formatAgeShort(p.ageSeconds)} old`,
   );
   if (p.dataMode !== "live") parts.push(dataModeLabel(p.dataMode));
+  if (p.grade === "modelled_from_quotes") parts.push(NO_AGGRESSOR_TAPE_NOTE);
   return parts.join(" · ");
 }
 

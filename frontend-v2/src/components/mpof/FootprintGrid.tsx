@@ -9,7 +9,12 @@
  * condition is visible at a glance. Each bar's volume POC row is outlined
  * amber. Per-bar Δ / cumulative delta / volume run underneath along with a
  * stacked imbalance summary (buy- vs sell-imbalanced level counts), and the
- * header carries the tick-source honesty badge + the last bar's timestamp.
+ * header carries the source honesty badge + the last bar's timestamp.
+ *
+ * HONESTY (2026-07-19): the bid/ask split is INFERRED, not observed. The feed
+ * carries no aggressor-tagged prints (`backend/analytics/orderflow.py`) and
+ * `market_ticks` has no per-trade size or side, so `build_footprint` buckets
+ * `ltp` and assigns sides heuristically. Every label here says "inferred".
  */
 import { useMemo } from "react";
 
@@ -147,6 +152,7 @@ export function FootprintGrid({
     () =>
       provenanceOf({
         source,
+        feature: "flow_attribution",
         asOf: lastTime,
         timeframe,
         dataMode,
@@ -162,7 +168,7 @@ export function FootprintGrid({
       <div className="space-y-2">
         {!hideHeader ? <OfSourceBadge source={source} /> : null}
         <div className="flex h-32 items-center justify-center rounded-xl border border-dashed border-bg-border/60 text-xs text-text-muted">
-          No footprint bars — no genuine tick tape reconstructed yet.
+          No footprint bars — no quote stream reconstructed for this window yet.
         </div>
       </div>
     );
@@ -174,6 +180,9 @@ export function FootprintGrid({
         <div className="mb-2 flex flex-wrap items-center justify-between gap-2">
           <div className="flex flex-wrap items-center gap-2">
             <OfSourceBadge source={source} />
+            <span className="text-[10px] uppercase tracking-[0.12em] text-text-muted" title="Sides are INFERRED from the quote stream — the feed carries no aggressor-tagged trade prints, so no cell here is a measured buy or sell.">
+              sides inferred from quotes
+            </span>
             <span className="text-[10px] uppercase tracking-[0.12em] text-text-muted" title={`A level is ringed when one side is ≥${ratioHighlight}× the other, or when the opposing side has no volume at all ("one-sided"). Cell tooltips state the bounded 0–100% share, never an unbounded ratio.`}>≥{ratioHighlight}× or one-sided ringed</span>
             <span className="text-[10px] uppercase tracking-[0.12em] text-text-muted"><span className="text-accent-red/80">sell @ bid</span> · <span className="text-accent-green/80">buy @ ask</span></span>
             <span className="rounded border border-accent-amber/60 px-1 text-[9px] uppercase tracking-[0.1em] text-accent-amber">bar POC outlined</span>
@@ -192,8 +201,8 @@ export function FootprintGrid({
               <div key={i} className="w-[128px] shrink-0 text-center font-mono text-[10px] text-text-muted" title={`${formatIST(bar.time)} IST`}>
                 {formatISTTime(bar.time) || `bar ${i + 1}`}
                 <div className="mt-0.5 flex justify-between px-1 text-[8.5px] uppercase tracking-[0.1em]">
-                  <span className="text-accent-red/80" title="sell volume executed at the bid">bid ×</span>
-                  <span className="text-accent-green/80" title="buy volume executed at the ask">× ask</span>
+                  <span className="text-accent-red/80" title="volume assigned to the bid side — inferred from quotes, not an aggressor-tagged print">bid ×</span>
+                  <span className="text-accent-green/80" title="volume assigned to the ask side — inferred from quotes, not an aggressor-tagged print">× ask</span>
                 </div>
               </div>
             ))}
@@ -214,7 +223,7 @@ export function FootprintGrid({
                       <div
                         key={barIdx}
                         className="w-[128px] shrink-0 bg-bg-secondary/10"
-                        title="no prints at this price in this bar"
+                        title="no volume bucketed at this price in this bar"
                       />
                     );
                   }

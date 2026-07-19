@@ -2253,7 +2253,7 @@ export default function AuctionIntelligenceWorkspace() {
             Order Flow
           </div>
           <div className="mt-4 grid gap-x-6 gap-y-2 sm:grid-cols-2">
-            <SmallMetric label="Delta" value={analysis ? formatSigned(analysis.order_flow.delta) : "—"} hint="Aggressive buy volume minus sell volume." />
+            <SmallMetric label="Delta" value={analysis ? formatSigned(analysis.order_flow.delta) : "—"} hint="Buy-side minus sell-side volume, with sides inferred from quotes (no aggressor tape)." />
             <SmallMetric label="Cumulative delta" value={analysis ? formatSigned(analysis.order_flow.cumulative_delta) : "—"} hint="Session flow pressure across the replay tape." />
             <SmallMetric label="Top imbalance" value={analysis ? formatPct(analysis.order_flow.top_imbalance) : "—"} hint="Best bid versus ask liquidity." />
             <SmallMetric label="Depth imbalance" value={analysis ? formatPct(analysis.order_flow.depth_imbalance) : "—"} hint="Multi-level book skew." />

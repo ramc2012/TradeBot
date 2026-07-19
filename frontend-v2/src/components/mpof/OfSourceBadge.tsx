@@ -3,64 +3,47 @@
 /**
  * Order-flow source honesty badge.
  *
- * Every OF visualization must state where its data came from:
- *   REAL TICKS   (green, solid)   — reconstructed from an actual tick tape /
- *                                   futures book (market_ticks,
- *                                   tick_reconstruction, tick_reconstruction_book)
- *   BAR PROXY    (amber, pulsing) — INFERRED from bar OHLCV, not a tape
- *                                   (bar_inference, bar_proxy, bar_fallback, …)
- *   SOURCE UNKNOWN (neutral)      — payload didn't say; treat with suspicion.
+ * Every OF visualization must state HOW its buy/sell split was obtained:
+ *   TICK QUOTES · SIDES INFERRED (info)  — flow rebuilt from the L1 quote/tick
+ *                                          stream (market_ticks,
+ *                                          tick_reconstruction)
+ *   BOOK QUOTES · SIDES INFERRED (info)  — rebuilt from L2 book snapshots
+ *                                          (tick_reconstruction_book)
+ *   BAR PROXY · SIDES INFERRED (amber, pulsing)
+ *                                        — fabricated from bar OHLCV shape
+ *   SOURCE UNKNOWN (neutral)             — payload didn't say; treat with
+ *                                          suspicion.
  *
- * The pulse on the amber badge is deliberate — fabricated flow must be
- * impossible to mistake for the real thing.
+ * 2026-07-19 — this badge used to say "REAL TICKS". That claimed a trade-print
+ * tape the feed has never carried: `market_ticks` stores only quotes
+ * (ltp/OHLC/cumulative volume/oi/bid/ask/qty — no trade_id, no per-trade size,
+ * no aggressor), and `backend/analytics/orderflow.py` says outright that
+ * Indian retail brokers do not push public trade prints, so CVD/footprint
+ * sides are approximated from OHLCV bars + L1 snapshots. The quote STREAM is
+ * observed; the SIDES are not. Labels now say which.
  *
- * Grading is delegated to the shared semantic contract
- * (`@/lib/market-semantics`) so this badge, the provenance chip and every
- * desk's own honesty label can never disagree about the same source string.
+ * The pulse on the amber badge is deliberate — bar-fabricated flow must be
+ * impossible to mistake for quote-derived flow.
+ *
+ * Classification is delegated to the shared semantic contract
+ * (`@/lib/market-semantics` → `lib/flow-provenance`) so this badge, the
+ * provenance chip and every desk's own honesty label can never disagree.
  */
-import { classifySourceGrade, normalizeSource } from "@/lib/market-semantics";
+import { classifyOfSource } from "@/lib/market-semantics";
 
-export type OfSourceKind = "real" | "inferred" | "unknown";
+export { classifyOfSource };
+export type { OfSourceKind, OfSourceClass } from "@/lib/market-semantics";
 
-/**
- * The order-flow tape names this badge is allowed to call "REAL TICKS".
- * Deliberately narrower than the shared `classifySourceGrade` — a TimescaleDB
- * history read grades as `observed` for provenance purposes but is NOT a live
- * order-flow tape, so it must never light this badge green.
- */
-const OF_TAPE_SOURCES = new Set(["market_ticks", "tick_reconstruction", "tick_reconstruction_book"]);
-
-/**
- * DEPRECATED in favour of `classifySourceGrade` from `@/lib/market-semantics`.
- * Kept as a thin adapter because nine surfaces render this exact badge: the
- * *grade* now comes from the shared contract, the *labels* are unchanged.
- */
-export function classifyOfSource(source?: string | null): { kind: OfSourceKind; label: string } {
-  const s = normalizeSource(source);
-  if (OF_TAPE_SOURCES.has(s)) {
-    return { kind: "real", label: s === "tick_reconstruction_book" ? "REAL TICKS · BOOK" : "REAL TICKS" };
-  }
-  const grade = classifySourceGrade(s);
-  if (grade === "unavailable") return { kind: "unknown", label: "SOURCE UNKNOWN" };
-  if (s === "insufficient_ticks") return { kind: "inferred", label: "INSUFFICIENT TICKS · INFERRED" };
-  if (INFERRED_LABEL_SOURCES.has(s)) return { kind: "inferred", label: "BAR PROXY · INFERRED" };
-  // Recognised by the contract but not a known OF tape name — show it verbatim
-  // and flag it as inferred-grade rather than silently promoting it.
-  return { kind: "inferred", label: `${s.replace(/_/g, " ").toUpperCase()} · UNVERIFIED` };
-}
-
-const INFERRED_LABEL_SOURCES = new Set([
-  "bar_inference",
-  "bar_proxy",
-  "bar_fallback",
-  "bar_proxy_timeout",
-  "spot_index_proxy",
-]);
-
-const STYLE: Record<OfSourceKind, string> = {
-  real: "border-accent-green/50 bg-accent-green/15 text-accent-green",
-  inferred: "border-accent-amber/50 bg-accent-amber/15 text-accent-amber animate-pulse",
+const STYLE: Record<string, string> = {
+  quote_derived: "border-accent-blue/50 bg-accent-blue/15 text-accent-blue",
+  bar_inferred: "border-accent-amber/50 bg-accent-amber/15 text-accent-amber animate-pulse",
   unknown: "border-bg-border bg-bg-secondary/40 text-text-muted",
+};
+
+const DOT: Record<string, string> = {
+  quote_derived: "bg-accent-blue",
+  bar_inferred: "bg-accent-amber",
+  unknown: "bg-text-muted",
 };
 
 export function OfSourceBadge({
@@ -72,18 +55,14 @@ export function OfSourceBadge({
   size?: "sm" | "md";
   className?: string;
 }) {
-  const { kind, label } = classifyOfSource(source);
+  const { kind, label, note } = classifyOfSource(source);
   const pad = size === "sm" ? "px-1.5 py-[1px] text-[9px]" : "px-2.5 py-0.5 text-[10.5px]";
   return (
     <span
       className={`inline-flex items-center gap-1.5 rounded-full border font-semibold uppercase tracking-[0.12em] ${pad} ${STYLE[kind]} ${className ?? ""}`}
-      title={`order-flow source: ${source || "not reported"}`}
+      title={`order-flow source: ${source || "not reported"} — ${note}`}
     >
-      <span
-        className={`h-1.5 w-1.5 shrink-0 rounded-full ${
-          kind === "real" ? "bg-accent-green" : kind === "inferred" ? "bg-accent-amber" : "bg-text-muted"
-        }`}
-      />
+      <span className={`h-1.5 w-1.5 shrink-0 rounded-full ${DOT[kind]}`} />
       {label}
     </span>
   );

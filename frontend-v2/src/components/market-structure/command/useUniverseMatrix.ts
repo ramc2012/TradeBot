@@ -49,6 +49,7 @@ import {
 } from "@/lib/api";
 import {
   type Freshness,
+  type MarketFeature,
   type Provenance,
   type SourceGrade,
   type Sufficiency,
@@ -78,6 +79,14 @@ export type MatrixRowBase = {
   /** Per-symbol observation timestamp — the basis of the readiness column. */
   asOf: string | null;
   source: string | null;
+  /**
+   * What KIND of number `source` describes. MCX rows fall back to the
+   * convergence CVD/footprint source, which is a buy/sell-ATTRIBUTED feature —
+   * grading that `observed` would claim a trade tape the feed does not carry
+   * (`backend/analytics/orderflow.py`, 2026-07-19). Quote/watchlist sources
+   * stay `"quote"`, i.e. unchanged.
+   */
+  sourceFeature: MarketFeature;
   /** Convergence tick telemetry, feeds readiness sufficiency when present. */
   tickAgeMs: number | null;
   tickLimitMs: number | null;
@@ -308,6 +317,7 @@ function emptyRow(symbol: string, market: MarketKey, kind: string): MatrixRowBas
     expiry: null,
     asOf: null,
     source: null,
+    sourceFeature: "quote" as MarketFeature,
     tickAgeMs: null,
     tickLimitMs: null,
     degradedReason: null,
@@ -471,7 +481,10 @@ export function useUniverseMatrix(market: MarketKey): UniverseMatrix {
 
       // MCX rows have no watchlist; the convergence scan time is their as_of.
       if (!row.asOf) row.asOf = convergence.data?.latest?.generated_at ?? null;
-      if (!row.source) row.source = r.cvd?.source ?? r.footprint?.source ?? null;
+      if (!row.source) {
+        row.source = r.cvd?.source ?? r.footprint?.source ?? null;
+        if (row.source) row.sourceFeature = "flow_attribution";
+      }
     }
 
     // 3 — MP + MP/OF overlay. NSE indices only; every other row keeps its
@@ -648,6 +661,7 @@ export function decorateRows(
   return rows.map((r) => {
     const provenance = provenanceOf({
       source: r.source,
+      feature: r.sourceFeature,
       asOf: r.asOf,
       dataMode: replayed ? "historical_replay" : undefined,
       dataStatus: replayed ? { snapshot_mode: "historical_replay" } : undefined,

@@ -1863,10 +1863,10 @@ const OrderFlowPanel = memo(function OrderFlowPanel({
         icon={<Radar size={14} className="text-emerald-300" />}
         eyebrow="Order Flow"
         title="Microstructure timing"
-        detail="Live tape reconstruction feeds the top-book bias and signed trade pressure. When raw ticks are absent, the module falls back to a bar-proxy series so the session never goes blind."
+        detail="Quote-tick reconstruction feeds the top-book bias and signed trade pressure; the buy/sell sides are inferred from quotes, not read off an aggressor tape. When raw ticks are absent, the module falls back to a bar-proxy series so the session never goes blind."
         action={
           <StatusPill
-            label={orderFlow?.source === "market_ticks" ? "Tick tape" : orderFlow?.source === "bar_proxy" ? "Bar proxy" : "Unknown"}
+            label={orderFlow?.source === "market_ticks" ? "Quote ticks · sides inferred" : orderFlow?.source === "bar_proxy" ? "Bar proxy" : "Unknown"}
             className={orderFlow?.source === "market_ticks" ? "border-emerald-400/25 bg-emerald-400/10 text-emerald-200" : "border-amber-400/25 bg-amber-400/10 text-amber-200"}
           />
         }
