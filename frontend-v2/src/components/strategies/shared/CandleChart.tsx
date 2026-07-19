@@ -35,12 +35,26 @@ export function CandleChart({
   showVolume = true,
   tzOffsetMinutes = 330,
   fitKey,
+  onChartReady,
+  onChartDispose,
 }: {
   bars: CandleBar[];
   priceLines?: ChartPriceLine[];
   overlays?: ChartLineSeries[];
   height?: number;
   showVolume?: boolean;
+  /**
+   * OPT-IN pane linking (2026-07-19). Called ONCE with the live chart + candle
+   * series after creation, so a parent (the Structure view's
+   * `LinkedChartProvider`) can wire a shared crosshair / synchronized zoom
+   * across several panes. Default undefined: when it is not passed NOTHING is
+   * subscribed and the three existing call sites (ChartsWorkbench,
+   * OrderflowWorkbench, OptionStudyChart) behave byte-identically.
+   */
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  onChartReady?: (chart: any, series: any) => void;
+  /** Paired with `onChartReady` — fires just before the chart is removed. */
+  onChartDispose?: () => void;
   /** Display the time axis in this fixed UTC offset (default +330 = IST).
    *  lightweight-charts renders the axis in UTC, so we shift the plotted
    *  timestamps by the offset to show local session times (no DST for IST). */
@@ -56,6 +70,12 @@ export function CandleChart({
   // Tracks the fitKey the viewport was last fitted for. null until the first
   // non-empty push, so we always fit once on initial load.
   const fitRef = useRef<string | null>(null);
+  // The create-once effect has [] deps, so it would capture the FIRST callback
+  // identity forever. Held in refs and read at call time instead.
+  const readyRef = useRef(onChartReady);
+  const disposeRef = useRef(onChartDispose);
+  readyRef.current = onChartReady;
+  disposeRef.current = onChartDispose;
 
   // create chart once
   useEffect(() => {
@@ -100,10 +120,13 @@ export function CandleChart({
       ro.observe(containerRef.current);
       chart.applyOptions({ width: containerRef.current.clientWidth });
       pushData();
+      // Opt-in only. No callback ⇒ no subscription, no behaviour change.
+      readyRef.current?.(chart, candle);
     })();
     return () => {
       disposed = true;
       ro?.disconnect();
+      if (refs.current.chart) disposeRef.current?.();
       refs.current.chart?.remove();
       refs.current = { lines: [], overlays: [] };
     };

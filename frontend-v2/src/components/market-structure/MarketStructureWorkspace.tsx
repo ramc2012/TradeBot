@@ -29,6 +29,9 @@ import { ContextBar } from "./ContextBar";
 import { useWorkspaceContext } from "./context/useWorkspaceContext";
 import type { WorkspaceView } from "./context/schema";
 import { InstrumentDrawer } from "./drawer/InstrumentDrawer";
+import { FlowView } from "./flow/FlowView";
+import { StrategiesView } from "./strategies/StrategiesView";
+import { StructureView } from "./structure/StructureView";
 import { PlaceholderView } from "./views/PlaceholderView";
 import { ViewNav } from "./ViewNav";
 
@@ -167,7 +170,17 @@ export default function MarketStructureWorkspace() {
       */}
       <div className={drawerOpen ? "grid gap-4 2xl:grid-cols-[minmax(0,1fr)_minmax(360px,420px)]" : ""}>
         <div className="min-w-0">
-          {ctx.view === "command" ? (
+          {ctx.view === "structure" ? (
+            // Both built views receive the SAME decorated row the header and
+            // the matrix read. A second freshness computation inside a view
+            // would re-open exactly the drift the one-decoration-pass rule
+            // above exists to close.
+            <StructureView ctx={ctx} row={selectedRow} />
+          ) : ctx.view === "flow" ? (
+            <FlowView ctx={ctx} row={selectedRow} />
+          ) : ctx.view === "strategies" ? (
+            <StrategiesView ctx={ctx} row={selectedRow} />
+          ) : ctx.view === "command" ? (
             <CommandView
               ctx={ctx}
               rows={decorated}
@@ -179,7 +192,7 @@ export default function MarketStructureWorkspace() {
               onQuery={(q) => setCtx({ query: q })}
             />
           ) : (
-            <PlaceholderView view={ctx.view} ctx={ctx} />
+            <PlaceholderView view={ctx.view as "risk" | "research"} ctx={ctx} />
           )}
         </div>
         {drawerOpen ? (

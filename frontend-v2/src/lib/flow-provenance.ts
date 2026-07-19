@@ -483,3 +483,78 @@ export function describeFlowDerivation(featureLabel: string, source?: string | n
     kind === "quote_derived" ? "inferred from quotes" : kind === "bar_inferred" ? "inferred from bars" : "source unknown";
   return `${featureLabel} · ${basis} · no aggressor tape`;
 }
+
+// ─── Structurally-absent capabilities ───────────────────────────────────────
+//
+// Some panels a trading terminal is EXPECTED to have cannot be built on this
+// stack at all — not "no data today", but "no wired feed carries this". Those
+// two cases must look different on screen, so the absence is declared HERE as
+// data (one table) and rendered by one card component. A panel that would need
+// a missing capability renders the card; it never renders a proxy in the slot
+// the real thing would occupy.
+//
+// Kept pure and dependency-free so the capability card, the depth panel and any
+// future horizon/lane gating all read the SAME record and cannot drift.
+
+export type CapabilityKey = "BROKER_AGGRESSOR_PRINTS" | "DEPTH_L2";
+
+export type MissingCapability = {
+  key: CapabilityKey;
+  /** Short display name of the capability itself. */
+  label: string;
+  /** What a panel would use it for. */
+  wants: string;
+  /** Why it is absent, in prose the trader can act on. */
+  reason: string;
+  /** The repo file that establishes the absence — quoted, not paraphrased. */
+  citation: string;
+  /**
+   * True when no runtime probe can flip it on today's wired brokers. Both of
+   * these are permanent in that sense: they are feed-capability gaps, not
+   * outages, so they never render as "stale" or "loading".
+   */
+  permanent: true;
+  /** What IS available instead, so the card is not a dead end. */
+  insteadUse: string;
+};
+
+export const MISSING_CAPABILITIES: Record<CapabilityKey, MissingCapability> = {
+  BROKER_AGGRESSOR_PRINTS: {
+    key: "BROKER_AGGRESSOR_PRINTS",
+    label: "Aggressor-tagged trade prints",
+    wants:
+      "a per-trade feed carrying price, size and the exchange's own buyer/seller-initiated flag",
+    reason:
+      "No wired Indian retail broker pushes public trade prints to subscribers. The market_ticks table stores quotes only — ltp, OHLC, CUMULATIVE volume, oi, bid, ask, bid_qty, ask_qty — with no trade id, no per-trade size and no broker-supplied side. Every buy/sell attribution in this terminal is therefore inferred from those quotes.",
+    citation: "backend/analytics/orderflow.py (module docstring); flow-provenance AGGRESSOR_TAPE_AVAILABLE = false",
+    permanent: true,
+    insteadUse:
+      "the quote-derived flow panels, which state their derivation on their face (CVD, footprint sides, aggression)",
+  },
+  DEPTH_L2: {
+    key: "DEPTH_L2",
+    label: "Real L2 order-book depth",
+    wants: "the full resting-liquidity ladder, per price level, updating per event",
+    reason:
+      "The DOM and heatmap served by the backend are built from a broker depth PROXY plus market-profile levels, and raw exchange MBO sweep data is not available. Rendering them in a slot labelled 'depth' would present a reconstruction as an observed book.",
+    citation: "backend/api/routers/orderflow.py — reference_model.heatmap / reference_model.whales",
+    permanent: true,
+    insteadUse:
+      "the L1 quote spread and queue-pressure metrics, which ARE observed, and the OI wall ladder from the option chain",
+  },
+};
+
+/** All declared gaps, for surfaces that enumerate rather than look one up. */
+export const MISSING_CAPABILITY_KEYS = Object.keys(MISSING_CAPABILITIES) as CapabilityKey[];
+
+export function missingCapability(key: CapabilityKey): MissingCapability {
+  return MISSING_CAPABILITIES[key];
+}
+
+/**
+ * True when a capability is structurally absent. Written as a lookup rather
+ * than a boolean constant so a future wired feed is a one-line table change.
+ */
+export function isCapabilityMissing(key: string): boolean {
+  return Object.prototype.hasOwnProperty.call(MISSING_CAPABILITIES, key);
+}

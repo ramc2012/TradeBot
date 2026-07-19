@@ -1,10 +1,11 @@
 "use client";
 
 /**
- * Placeholder views — honest scaffolding for the five views that are NOT built.
+ * Placeholder views — honest scaffolding for the two views that are NOT built.
  *
- * They echo the pinned context (so switching views visibly keeps the pin) and
- * deep-link into the existing desk that serves that function today. They render
+ * Two views remain: Risk & Execution and Research. They echo the pinned context
+ * (so switching views visibly keeps the pin) and deep-link into the existing
+ * desk that serves that function today. They render
  * no data, because a half-built panel is indistinguishable from a broken one,
  * and a terminal whose panels might be either is worse than one with a gap.
  */
@@ -13,40 +14,18 @@ import Link from "next/link";
 
 import { StatusBadge } from "@/components/desk-ui";
 
-import { VIEW_LABEL, deskHref, describeContext, type WorkspaceContext, type WorkspaceView } from "../context/schema";
+import { VIEW_LABEL, deskHref, describeContext, type WorkspaceContext } from "../context/schema";
 
 type Plan = { blurb: string; sources: string; desks: Array<{ label: string; path: string }> };
 
-const PLAN: Record<Exclude<WorkspaceView, "command">, Plan> = {
-  structure: {
-    blurb:
-      "Profile, value area, developing POC, migration and the higher-timeframe acceptance for the pinned instrument.",
-    sources: "market_profiles + the commodity/index MP monitor + the convergence TPO detail",
-    desks: [
-      { label: "MP Live", path: "/strategies/mp" },
-      { label: "Auction IQ", path: "/strategies/auction" },
-      { label: "Commodity", path: "/strategies/commodity" },
-    ],
-  },
-  flow: {
-    blurb:
-      "CVD, footprint imbalance, absorption and the tape's own grade — with the bounded imbalance, never a ratio.",
-    sources: "convergence /status/{symbol} levels + the order-flow workbench",
-    desks: [
-      { label: "Orderflow", path: "/orderflow" },
-      { label: "Convergence", path: "/strategies/institutional-convergence" },
-    ],
-  },
-  strategies: {
-    blurb:
-      "Every lane's read on the pinned instrument side by side: setup, horizon, expiry, evidence and blockers.",
-    sources: "the per-lane summary endpoints already behind each desk",
-    desks: [
-      { label: "Strategy overview", path: "/strategies/overview" },
-      { label: "Long Premium", path: "/strategies/directional" },
-      { label: "MACD Refined", path: "/strategies/macd-refined" },
-    ],
-  },
+/**
+ * ONLY the views that are genuinely not built. `command`, `structure`, `flow`
+ * and `strategies` have real components; keeping a plan entry for a built view
+ * would let a future edit route a working view back into this scaffold.
+ */
+export type PlaceholderViewKey = "risk" | "research";
+
+const PLAN: Record<PlaceholderViewKey, Plan> = {
   risk: {
     blurb:
       "Plan completeness, sizing inputs, exposure and the execution path — including why a plan is not actionable.",
@@ -66,7 +45,7 @@ const PLAN: Record<Exclude<WorkspaceView, "command">, Plan> = {
   },
 };
 
-export function PlaceholderView({ view, ctx }: { view: Exclude<WorkspaceView, "command">; ctx: WorkspaceContext }) {
+export function PlaceholderView({ view, ctx }: { view: PlaceholderViewKey; ctx: WorkspaceContext }) {
   const plan = PLAN[view];
   return (
     <section className="rounded-2xl border border-bg-border bg-bg-secondary/22 p-5">

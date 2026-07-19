@@ -4,9 +4,14 @@
  * ViewNav — the six stable views of the terminal.
  *
  * All six are wired to the SAME pinned context, so switching view never loses
- * the instrument. Only Command is built; the rest are labelled placeholders,
- * deliberately not half-implemented — a panel that renders something plausible
- * from nothing is exactly the failure this rebuild exists to remove.
+ * the instrument. Command, Structure, Flow and Strategies are built; Risk &
+ * Execution and Research are labelled placeholders, deliberately not
+ * half-implemented — a panel that renders something plausible from nothing is
+ * exactly the failure this rebuild exists to remove.
+ *
+ * `BUILT` must flip in the SAME commit the view lands. Flipping it early is the
+ * worse failure of the two: a "soon" tag over a working view merely understates,
+ * while a missing tag over a stub overstates.
  */
 import { clsx } from "clsx";
 
@@ -14,9 +19,9 @@ import { VIEWS, VIEW_LABEL, type WorkspaceView } from "./context/schema";
 
 const BUILT: Record<WorkspaceView, boolean> = {
   command: true,
-  structure: false,
-  flow: false,
-  strategies: false,
+  structure: true,
+  flow: true,
+  strategies: true,
   risk: false,
   research: false,
 };

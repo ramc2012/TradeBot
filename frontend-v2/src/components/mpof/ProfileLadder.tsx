@@ -47,6 +47,21 @@ export type ProfileLadderProps = {
   tpoLetters?: Record<string | number, string> | null;
   /** per-price traded volume for the volume-profile overlay (toggleable). */
   volumeByPrice?: Array<{ price: number; volume: number }> | null;
+  /**
+   * Poor (unfinished) high / low — a single-TPO extreme the auction left
+   * un-repaired. ADDITIVE and optional: omitted ⇒ nothing is drawn, so every
+   * existing call site renders exactly as before. Pass only a level the lane
+   * actually emitted; never derive one here.
+   */
+  poorHigh?: number | null;
+  poorLow?: number | null;
+  /**
+   * Initial histogram mode. Defaults reproduce the shipped behaviour (TPO on,
+   * volume off) so the 9 existing call sites are untouched; the Profile
+   * Workbench drives them from its own mode control.
+   */
+  defaultShowTpo?: boolean;
+  defaultShowVol?: boolean;
   height?: number;
   /** Decimal places for level labels (indices 0-1, commodities up to 2). */
   digits?: number;
@@ -66,6 +81,7 @@ type Levels = {
   ghost: { vah: number | null; val: number | null; poc: number | null };
   hvns: number[];
   singles: number[];
+  poor: { high: number | null; low: number | null };
   tpoRows: Array<{ price: number; count: number; letters?: string }>;
   volRows: Array<{ price: number; volume: number }>;
 };
@@ -85,14 +101,18 @@ export function ProfileLadder({
   tpoCounts,
   tpoLetters,
   volumeByPrice,
+  poorHigh,
+  poorLow,
+  defaultShowTpo = true,
+  defaultShowVol = false,
   height = 320,
   digits = 1,
   hideLegend = false,
   hideControls = false,
   expandTitle,
 }: ProfileLadderProps) {
-  const [showTpo, setShowTpo] = useState(true);
-  const [showVol, setShowVol] = useState(false);
+  const [showTpo, setShowTpo] = useState(defaultShowTpo);
+  const [showVol, setShowVol] = useState(defaultShowVol);
   const [zoomVA, setZoomVA] = useState(false);
   const [expanded, setExpanded] = useState(false);
 
@@ -101,6 +121,7 @@ export function ProfileLadder({
     const ghost = { vah: num(prior?.vah), val: num(prior?.val), poc: num(prior?.poc) };
     const hvns = (hvnPrices ?? []).map(num).filter((p): p is number => p != null);
     const singles = (singlePrints ?? []).map(num).filter((p): p is number => p != null);
+    const poor = { high: num(poorHigh), low: num(poorLow) };
     const tpoRows = Object.entries(tpoCounts ?? {})
       .map(([p, c]) => ({ price: Number(p), count: Number(c), letters: tpoLetters ? String(tpoLetters[p] ?? "") || undefined : undefined }))
       .filter((r) => Number.isFinite(r.price) && Number.isFinite(r.count) && r.count > 0)
@@ -109,13 +130,14 @@ export function ProfileLadder({
       .map((r) => ({ price: Number(r?.price), volume: Number(r?.volume) }))
       .filter((r) => Number.isFinite(r.price) && Number.isFinite(r.volume) && r.volume > 0)
       .sort((a, b) => b.price - a.price);
-    return { cur, ghost, hvns, singles, tpoRows, volRows };
-  }, [spot, vah, val, poc, ibHigh, ibLow, dayHigh, dayLow, prior, hvnPrices, singlePrints, tpoCounts, tpoLetters, volumeByPrice]);
+    return { cur, ghost, hvns, singles, poor, tpoRows, volRows };
+  }, [spot, vah, val, poc, ibHigh, ibLow, dayHigh, dayLow, prior, hvnPrices, singlePrints, poorHigh, poorLow, tpoCounts, tpoLetters, volumeByPrice]);
 
   const fullDomain = useMemo(() => {
     const all = [
       ...Object.values(levels.cur),
       ...Object.values(levels.ghost),
+      ...Object.values(levels.poor),
       ...levels.hvns,
       ...levels.singles,
       ...levels.tpoRows.map((r) => r.price),
@@ -185,6 +207,7 @@ export function ProfileLadder({
           {hasVol && showVol ? <LegendSwatch color="rgba(0,212,163,0.5)" label="VOL" /> : null}
           {levels.ghost.poc != null || levels.ghost.vah != null || levels.ghost.val != null ? <LegendSwatch color="#a78bfa" label="prior" /> : null}
           {levels.hvns.length ? <LegendSwatch color="#a78bfa" label="HVN ·" round /> : null}
+          {levels.poor.high != null || levels.poor.low != null ? <LegendSwatch color="#f472b6" label="poor hi/lo" /> : null}
           {levels.cur.spot != null ? <LegendSwatch color={spotColorOf(levels)} label="spot" /> : null}
         </div>
       ) : null}
@@ -219,7 +242,7 @@ function LadderSvg({ levels, domain, height, digits, showTpo, showVol }: { level
   const y = (p: number) => PAD.t + (1 - (p - domain.lo) / (domain.hi - domain.lo || 1)) * (height - PAD.t - PAD.b);
   const inDomain = (p: number | null | undefined): p is number => p != null && p >= domain.lo && p <= domain.hi;
   const clampY = (p: number) => Math.max(PAD.t, Math.min(height - PAD.b, y(p)));
-  const { cur, ghost, hvns, singles, tpoRows, volRows } = levels;
+  const { cur, ghost, hvns, singles, poor, tpoRows, volRows } = levels;
   const fmt = (p: number) => formatNumber(p, digits);
   const lineEnd = VB_W - PAD.r;
   const spotColor = spotColorOf(levels);
@@ -337,6 +360,16 @@ function LadderSvg({ levels, domain, height, digits, showTpo, showVol }: { level
           <title>single print {fmt(p)}</title>
         </rect>
       ))}
+
+      {/* poor (unfinished) high / low — drawn only when the lane emitted one */}
+      {([{ p: poor.high, label: "poor high" }, { p: poor.low, label: "poor low" }] as const)
+        .filter((x) => inDomain(x.p))
+        .map((x) => (
+          <g key={x.label}>
+            <line x1={PAD.l} x2={lineEnd} y1={y(x.p as number)} y2={y(x.p as number)} stroke="#f472b6" strokeWidth={1} strokeDasharray="1 2" />
+            <text x={PAD.l + 1} y={y(x.p as number) - 2} fill="#f472b6" fontSize={7}>{x.label}</text>
+          </g>
+        ))}
 
       {/* spot marker */}
       {inDomain(cur.spot) ? (

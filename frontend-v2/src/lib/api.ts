@@ -682,9 +682,21 @@ export const getOrderflowSnapshot = (
   symbols = "NIFTY",
   intervals = "3,5,15,30",
   historySessions = 5,
+  /**
+   * The multi-timeframe footprint history is ~99% of the payload and is not
+   * needed for the live snapshot. Default `undefined` keeps the backend's own
+   * default (`true`), so every existing caller is unchanged; the market-
+   * structure workspace passes `false` and drops ~2 MB per poll to ~20 KB.
+   */
+  includeTimeframes?: boolean,
 ) =>
   api.get("/api/orderflow/snapshot", {
-    params: { symbols, intervals, history_sessions: historySessions },
+    params: {
+      symbols,
+      intervals,
+      history_sessions: historySessions,
+      ...(includeTimeframes === undefined ? {} : { include_timeframes: includeTimeframes }),
+    },
     timeout: 60_000,
   });
 
