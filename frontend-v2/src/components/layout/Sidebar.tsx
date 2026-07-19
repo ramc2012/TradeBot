@@ -31,6 +31,7 @@ import {
   // Fingerprint — only used by the parked Fractal MP nav entry (see below).
   FlaskConical,
   Globe,
+  Grid3x3,
   Inbox,
   LayoutDashboard,
   Layers3,
@@ -66,6 +67,14 @@ const NAV_GROUPS: NavGroup[] = [
     title: "Strategy desks",
     icon: Target,
     items: [
+      // The instrument-centric workspace sits first: it is the entry point that
+      // spans every lane. The per-lane desks below remain unchanged.
+      {
+        href: "/strategies/market-structure",
+        label: "Market Structure",
+        icon: Grid3x3,
+        matchers: ["/strategies/market-structure"],
+      },
       { href: "/strategies/overview", label: "Overview", icon: LayoutDashboard },
       { href: "/strategies/nse/live", label: "MACD Strategy", icon: Crosshair, matchers: ["/strategies/nse"] },
       { href: "/strategies/macd-refined", label: "MACD Refined", icon: BarChart3, matchers: ["/strategies/macd-refined"] },
