@@ -13,7 +13,7 @@ from sqlalchemy import text
 
 from brokers.base import Tick
 from db.database import AsyncSessionLocal
-from market_data import index_band_guard
+from market_data import index_band_guard, stock_band_guard
 from market_data.candle_timeframes import CANDLE_INTERVALS_MINUTES, floor_timestamp
 from market_data.commodity_contract_specs import extract_commodity_root
 from market_data.symbols import DISPLAY_NAMES
@@ -179,6 +179,29 @@ class LiveCandleStore:
             if not index_band_guard.passes(tick.symbol, ltp):
                 _record_reject("spot_magnitude")
                 return False
+        elif stock_band_guard.is_equity_symbol(tick.symbol):
+            # F1 — NSE equity spot. The Fyers WS delivers whole, internally
+            # coherent frames belonging to OTHER instruments under the wrong
+            # symbol label (2026-07-17: 13847 / 949.30 / 254.50 under BHEL at
+            # ~443). Structural checks cannot see that; only a magnitude test
+            # against an anchor external to the tape can. The anchor is that
+            # name's own most recent NON-live_tick close. Out-of-band prints are
+            # DROPPED — never clamped, never interpolated, never fabricated.
+            stock_band_guard.note_symbol(tick.symbol)
+            if not stock_band_guard.passes(tick.symbol, ltp):
+                _record_reject("stock_magnitude")
+                loud, count = stock_band_guard.note_reject(tick.symbol)
+                if loud:
+                    logger.warning(
+                        "[live_candle_store] rejected out-of-band equity tick "
+                        "{symbol} ltp={ltp} (±{tol:.0%} of external anchor); "
+                        "{count} rejected for this name so far",
+                        symbol=tick.symbol,
+                        ltp=ltp,
+                        tol=stock_band_guard.REL_TOL,
+                        count=count,
+                    )
+                return False
         elif tick.symbol.startswith("MCX:") and tick.symbol.endswith("FUT"):
             anchor = self._latest_mcx_price.get(tick.symbol)
             if anchor and not (anchor * 0.65 <= ltp <= anchor * 1.35):
@@ -274,6 +297,10 @@ class LiveCandleStore:
             await index_band_guard.maybe_refresh_reference_closes(AsyncSessionLocal)
         except Exception as exc:  # noqa: BLE001 — must never disturb ingest
             logger.debug(f"[LiveCandleStore] index reference refresh skipped: {exc}")
+        try:
+            await stock_band_guard.maybe_refresh_reference_closes(AsyncSessionLocal)
+        except Exception as exc:  # noqa: BLE001 — must never disturb ingest
+            logger.debug(f"[LiveCandleStore] equity anchor refresh skipped: {exc}")
 
     async def _drain_queue(self) -> None:
         while not self._queue.empty():
@@ -523,10 +550,17 @@ class LiveCandleStore:
                     index_band_guard.app_symbol_for_underlying(r["underlying"]) or "",
                     r["open"], r["high"], r["low"], r["close"],
                 )
+                # F1 — same re-check for equity bars: a single contaminating
+                # print inside the minute poisons that bar's high/low even when
+                # its close is legitimate, so the assembled bar is re-tested
+                # leg-by-leg against the external anchor before it is persisted.
+                and stock_band_guard.check_ohlc(
+                    r["underlying"], r["open"], r["high"], r["low"], r["close"],
+                )
             ]
             if len(_kept_spot) != len(spot_rows):
                 logger.warning(
-                    "[live_candle_store] dropped {n} out-of-band index spot bars at write",
+                    "[live_candle_store] dropped {n} out-of-band spot bars at write",
                     n=len(spot_rows) - len(_kept_spot),
                 )
                 spot_rows = _kept_spot

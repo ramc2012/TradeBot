@@ -36,6 +36,7 @@ from loguru import logger
 from sqlalchemy import text
 
 from db.database import AsyncSessionLocal
+from market_data import index_band_guard
 
 
 # ─── Universe / routing ───────────────────────────────────────────────────
@@ -151,22 +152,114 @@ async def load_index_1m_spot(
             {"underlying": underlying, "lookback_days": int(lookback_days)},
         )
         rows = result.fetchall()
+    # F3 (2026-07-20) — read-boundary magnitude guard.
+    #
+    # This lane was the ONE unfiltered consumer of index 1m spot: no source
+    # filter, no band, none in the caller. Index 1m is ~100% ``live_tick``-
+    # sourced, so filtering the source would blind the lane; instead every bar
+    # is re-tested leg-by-leg against the same external absolute/reference band
+    # the write path uses (market_data.index_band_guard), mirroring
+    # api/routers/charts.py::_guard_rows. Bars that fail are DROPPED, not
+    # repaired — a gap in the TPO ladder is recoverable, a 27,005 print on a
+    # 24,190 index is the input that blew the ladder up on 2026-07-13.
+    #
+    # No strategy math, gate, threshold or sizing rule is touched here.
+    app_symbol = index_band_guard.app_symbol_for_underlying(underlying) or ""
     out: list[dict[str, Any]] = []
+    dropped = 0
     for row in rows:
         try:
-            out.append(
-                {
-                    "time": row.time,
-                    "open": float(row.open),
-                    "high": float(row.high),
-                    "low": float(row.low),
-                    "close": float(row.close),
-                    "volume": int(row.volume or 0),
-                }
-            )
+            candle = {
+                "time": row.time,
+                "open": float(row.open),
+                "high": float(row.high),
+                "low": float(row.low),
+                "close": float(row.close),
+                "volume": int(row.volume or 0),
+            }
         except (TypeError, ValueError):
             continue
+        if not index_band_guard.check_ohlc(
+            app_symbol, candle["open"], candle["high"], candle["low"], candle["close"]
+        ):
+            dropped += 1
+            continue
+        out.append(candle)
+
+    out, session_dropped = _drop_off_session_bars(out)
+    dropped += session_dropped
+    if dropped:
+        logger.warning(
+            "[S2] dropped {n} out-of-band 1m spot bars for {underlying} at read "
+            "(cross-symbol contamination in underlying_spot_candles)",
+            n=dropped,
+            underlying=underlying,
+        )
     return out
+
+
+# Per-session tolerance for the second guard stage. An index's own intraday
+# range is well under 2%; 8% (the same value the already-shipped
+# institutional_convergence index guard uses) is hugely generous and still
+# rejects the 2026-07-17 NIFTY 26,923/27,005 prints, which sat ~11.5% off that
+# session's median and slipped through the absolute/multi-day band.
+S2_SESSION_BAND_TOL = 0.08
+
+# Below this many bars a session median is not a meaningful reference, so the
+# stage is skipped rather than guessed at.
+S2_SESSION_BAND_MIN_BARS = 30
+
+
+def _drop_off_session_bars(rows: list[dict[str, Any]]) -> tuple[list[dict[str, Any]], int]:
+    """Second guard stage: drop bars far from their OWN session's median.
+
+    Why a session median is the right reference here and not the poisonable
+    self-referential median this codebase distrusts elsewhere:
+
+    * It runs SECOND. The external, poison-proof ``index_band_guard`` has
+      already removed the gross cross-index frames, so this stage only ever
+      sees a near-clean population — it cannot be inverted by the bursts that
+      inverted the guards it sits behind.
+    * The reference TRACKS THE DAY. On a genuine 10% circuit-halt day the
+      session median moves with the market, so real extremes stay a few percent
+      from it — unlike a fixed multi-day anchor, which is why the write-boundary
+      band cannot be tightened past the circuit limit.
+
+    Bars that fail are dropped. Nothing is clamped, interpolated or fabricated.
+    """
+    from statistics import median as _median
+
+    from paper_engine.commodity_strategy_agent import _parse_iso_timestamp, IST
+
+    # Rows arrive time-ascending from SQL; index-keyed grouping preserves that
+    # order exactly, so nothing downstream sees a reordered tape.
+    by_session: dict[Any, list[int]] = {}
+    for idx, row in enumerate(rows):
+        ts = _parse_iso_timestamp(row.get("time"))
+        if ts is None:
+            continue  # unparseable timestamp ⇒ no session ⇒ left as-is
+        by_session.setdefault(ts.astimezone(IST).date(), []).append(idx)
+
+    reject: set[int] = set()
+    for _session, idxs in by_session.items():
+        closes = [rows[i]["close"] for i in idxs if rows[i]["close"] > 0]
+        if len(closes) < S2_SESSION_BAND_MIN_BARS:
+            continue
+        ref = float(_median(closes))
+        if ref <= 0:
+            continue
+        lo = ref * (1.0 - S2_SESSION_BAND_TOL)
+        hi = ref * (1.0 + S2_SESSION_BAND_TOL)
+        for i in idxs:
+            bar = rows[i]
+            legs = (bar["open"], bar["high"], bar["low"], bar["close"])
+            if not all(lo <= leg <= hi for leg in legs if leg > 0):
+                reject.add(i)
+
+    if not reject:
+        return rows, 0
+    kept = [row for i, row in enumerate(rows) if i not in reject]
+    return kept, len(reject)
 
 
 # ─── Evaluator (BUY/SELL → CE/PE + expiry tracks) ─────────────────────────

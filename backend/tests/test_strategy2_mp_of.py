@@ -256,3 +256,112 @@ def test_resolve_skips_today_and_past_for_weekly() -> None:
     targets = s2.resolve_s2_expiry_targets("NIFTY", scope)
     weekly_expiries = [e for t, e in targets if t == "weekly"]
     assert today_iso not in weekly_expiries
+
+
+# ─── F3 (2026-07-20): read-boundary contamination guard ───────────────────
+#
+# ``load_index_1m_spot`` was the one unfiltered consumer of index 1m spot.
+# These cover the second (per-session) stage, which is the one that catches the
+# same-decade contamination the write-boundary band cannot.
+
+from datetime import datetime, timedelta, timezone  # noqa: E402
+
+
+def _session_bars(n: int, level: float, start_hour_utc: int = 4) -> list[dict]:
+    base = datetime(2026, 7, 17, start_hour_utc, 0, tzinfo=timezone.utc)
+    return [
+        {
+            "time": base + timedelta(minutes=i),
+            "open": level,
+            "high": level + 5.0,
+            "low": level - 5.0,
+            "close": level,
+            "volume": 100,
+        }
+        for i in range(n)
+    ]
+
+
+def test_session_band_drops_the_observed_nifty_contamination() -> None:
+    bars = _session_bars(200, 24150.0)
+    # The 2026-07-17 leak: a 26,923 print ~11.5% off the session median, which
+    # sits INSIDE the write-boundary multi-day band.
+    bars[50]["high"] = 26923.0
+    bars[120]["close"] = 27005.7
+    kept, dropped = s2._drop_off_session_bars(bars)
+    assert dropped == 2
+    assert len(kept) == 198
+    assert all(bar["high"] < 26000.0 for bar in kept)
+    assert all(bar["close"] < 26000.0 for bar in kept)
+
+
+def test_session_band_drops_a_low_side_frame() -> None:
+    bars = _session_bars(200, 14771.0)
+    bars[10]["low"] = 12485.0          # observed MIDCPNIFTY low, -15%
+    kept, dropped = s2._drop_off_session_bars(bars)
+    assert dropped == 1
+    assert len(kept) == 199
+
+
+def test_session_band_preserves_order_and_never_alters_values() -> None:
+    bars = _session_bars(200, 24150.0)
+    bars[7]["high"] = 26923.0
+    kept, dropped = s2._drop_off_session_bars(bars)
+    assert dropped == 1
+    times = [bar["time"] for bar in kept]
+    assert times == sorted(times)
+    # Surviving bars are the same objects, untouched — nothing is clamped,
+    # interpolated or fabricated.
+    assert kept[0] is bars[0]
+    assert all(bar["close"] == 24150.0 for bar in kept)
+
+
+def test_session_band_leaves_a_clean_session_completely_alone() -> None:
+    bars = _session_bars(200, 24150.0)
+    kept, dropped = s2._drop_off_session_bars(bars)
+    assert dropped == 0
+    assert kept is bars
+
+
+def test_session_band_survives_a_genuine_trending_session() -> None:
+    """A real 10% circuit-halt move must NOT be rejected.
+
+    The reference is the session's own median, so it tracks the day — the whole
+    reason this stage can be tight where a fixed multi-day anchor cannot.
+    """
+    base = datetime(2026, 7, 17, 4, 0, tzinfo=timezone.utc)
+    bars = []
+    for i in range(200):
+        level = 24150.0 * (1.0 - 0.10 * (i / 199.0))  # -10% over the session
+        bars.append(
+            {
+                "time": base + timedelta(minutes=i),
+                "open": level,
+                "high": level,
+                "low": level,
+                "close": level,
+                "volume": 100,
+            }
+        )
+    _kept, dropped = s2._drop_off_session_bars(bars)
+    assert dropped == 0
+
+
+def test_session_band_skips_sessions_with_too_few_bars_to_judge() -> None:
+    bars = _session_bars(5, 24150.0)
+    bars[0]["close"] = 26923.0
+    kept, dropped = s2._drop_off_session_bars(bars)
+    assert dropped == 0
+    assert len(kept) == 5
+
+
+def test_session_band_scopes_each_session_independently() -> None:
+    day_one = _session_bars(200, 24150.0)
+    day_two = [
+        {**bar, "time": bar["time"] + timedelta(days=1)} for bar in _session_bars(200, 22000.0)
+    ]
+    bars = day_one + day_two
+    kept, dropped = s2._drop_off_session_bars(bars)
+    # Two sessions 9% apart: neither is judged against the other's level.
+    assert dropped == 0
+    assert len(kept) == 400

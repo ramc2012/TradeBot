@@ -2455,7 +2455,41 @@ class ATMWatchlistService:
                     price_refs AS (
                         SELECT
                             med.underlying,
-                            COALESCE(spot.spot_price, premium.spot_price, med.median_strike) AS reference_price
+                            -- Plausibility gate on the spot legs (2026-07-20).
+                            -- `latest_spot` reads underlying_spot_candles with no
+                            -- source filter, and that table carries cross-symbol
+                            -- contaminated `live_tick` rows (2026-07-17: RELIANCE
+                            -- closes of 162.96 and 11,791 against a true ~1,320).
+                            -- A garbage reference here silently selects a garbage
+                            -- ATM strike, which is what the whole watchlist — and
+                            -- S1's scan — is then keyed on.
+                            --
+                            -- The anchor is EXTERNAL to the candle tape: the median
+                            -- listed strike for this underlying/expiry, which by
+                            -- construction brackets the real spot. A reference more
+                            -- than 2x away from it (or under half) is rejected and
+                            -- we fall through to the next leg — never clamped,
+                            -- never interpolated. When no median strike exists the
+                            -- legs pass through unchanged (fail-open, unchanged
+                            -- behaviour) because there is then nothing to judge
+                            -- against.
+                            COALESCE(
+                                CASE
+                                    WHEN med.median_strike IS NULL OR med.median_strike <= 0
+                                        THEN spot.spot_price
+                                    WHEN spot.spot_price > med.median_strike * 0.5
+                                     AND spot.spot_price < med.median_strike * 2.0
+                                        THEN spot.spot_price
+                                END,
+                                CASE
+                                    WHEN med.median_strike IS NULL OR med.median_strike <= 0
+                                        THEN premium.spot_price
+                                    WHEN premium.spot_price > med.median_strike * 0.5
+                                     AND premium.spot_price < med.median_strike * 2.0
+                                        THEN premium.spot_price
+                                END,
+                                med.median_strike
+                            ) AS reference_price
                         FROM median_strikes med
                         LEFT JOIN latest_spot spot
                           ON spot.underlying = med.underlying

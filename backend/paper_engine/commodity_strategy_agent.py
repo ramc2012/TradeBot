@@ -2630,10 +2630,25 @@ class CommodityStrategyAgent(BaseStrategyAgent):
                                 ROW_NUMBER() OVER (
                                     PARTITION BY time
                                     ORDER BY
+                                        -- F4 (2026-07-20): live_tick used to rank
+                                        -- FIRST here. On 2026-07-16 the MCX
+                                        -- live_tick tape was cross-symbol
+                                        -- scrambled all session (SILVER 222k,
+                                        -- NATURALGAS 10.3k and a base metal at
+                                        -- 281 all interleaved under GOLD's key,
+                                        -- ~41% of its 1m bars), so preferring it
+                                        -- meant preferring the corrupt row
+                                        -- wherever a clean broker-history row
+                                        -- existed at the same timestamp.
+                                        -- Demoted below both broker sources.
+                                        -- This changes only WHICH ROW is chosen
+                                        -- when several exist at one timestamp —
+                                        -- no timestamp loses coverage, and no
+                                        -- strategy threshold is touched.
                                         CASE
-                                            WHEN source = 'live_tick' THEN 0
-                                            WHEN source = 'commodity_broker_history' THEN 1
-                                            WHEN source = 'fyers_mcx_cont' THEN 2
+                                            WHEN source = 'commodity_broker_history' THEN 0
+                                            WHEN source = 'fyers_mcx_cont' THEN 1
+                                            WHEN source = 'live_tick' THEN 2
                                             ELSE 3
                                         END,
                                         instrument_key DESC

@@ -81,3 +81,53 @@ def test_rejects_crosswired_contract_tick_against_top_of_book():
     )
 
     assert store._validate_tick(tick) is False
+
+
+# ─── F1 (2026-07-20): NSE equity spot magnitude gate ──────────────────────
+
+
+def test_equity_ticks_are_rejected_against_their_external_anchor():
+    from market_data import stock_band_guard
+
+    stock_band_guard.clear_reference_closes()
+    try:
+        stock_band_guard.set_reference_close("BHEL", 443.85)
+        store = LiveCandleStore()
+        # The 2026-07-17 tape under NSE:BHEL-EQ: three complete, internally
+        # coherent frames belonging to OTHER instruments.
+        assert store._validate_tick(_mk("NSE:BHEL-EQ", 13847.0)) is False
+        assert store._validate_tick(_mk("NSE:BHEL-EQ", 949.30)) is False
+        assert store._validate_tick(_mk("NSE:BHEL-EQ", 254.50)) is False
+        # Real BHEL prints are untouched.
+        assert store._validate_tick(_mk("NSE:BHEL-EQ", 443.85)) is True
+        assert store._validate_tick(_mk("NSE:BHEL-EQ", 446.15)) is True
+        assert store._validate_tick(_mk("NSE:BHEL-EQ", 420.80)) is True
+    finally:
+        stock_band_guard.clear_reference_closes()
+
+
+def test_equity_tick_without_an_anchor_is_not_blocked():
+    """Fail-open on an unjudgeable name — a guard must not blind a new lane."""
+    from market_data import stock_band_guard
+
+    stock_band_guard.clear_reference_closes()
+    try:
+        store = LiveCandleStore()
+        assert store._validate_tick(_mk("NSE:NEWLISTING-EQ", 1234.5)) is True
+        # ...but the name is queued so the next refresh anchors it.
+        assert "NEWLISTING" in stock_band_guard._pending
+    finally:
+        stock_band_guard.clear_reference_closes()
+
+
+def test_equity_gate_does_not_disturb_the_commodity_gate():
+    from market_data import stock_band_guard
+
+    stock_band_guard.clear_reference_closes()
+    try:
+        store = LiveCandleStore()
+        assert store._validate_tick(_mk("MCX:GOLD25AUGFUT", 141240.0)) is True
+        # 222k SILVER frame under GOLD's key — still the commodity anchor's job.
+        assert store._validate_tick(_mk("MCX:GOLD25AUGFUT", 222400.0)) is False
+    finally:
+        stock_band_guard.clear_reference_closes()

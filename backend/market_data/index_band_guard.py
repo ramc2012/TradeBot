@@ -21,7 +21,7 @@ tape**, so no run of bad prints can ever move it:
    current levels: comfortably outside a circuit-halt move (±20%) so a real
    index can never be false-rejected, yet tight enough to catch a foreign
    instrument's level.
-2. An optional tighter **prior-session-close band** (``±REL_TOL``, default 20%)
+2. An optional tighter **recent-session-close band** (``±REL_TOL``, default 12%)
    applied when a reference close has been seeded from history. This catches the
    20%+ cross-index contamination that sits inside the wide absolute band
    (FMCG/ENERGY/MIDCPNIFTY levels landing on NIFTY). The reference is the *median*
@@ -40,16 +40,49 @@ force, never blocks ingest).
 from __future__ import annotations
 
 import time as _time
+from datetime import datetime as _datetime, timedelta as _timedelta, timezone as _timezone
 from statistics import median
 from typing import Any, Iterable, Optional
 
 from loguru import logger
 
 # Reject a print that deviates more than this fraction from the seeded
-# prior-session reference close. 20% is generous — a broad index intraday move
-# beyond ±20% would already have tripped exchange circuit breakers — while still
-# catching every documented cross-index magnitude swap of 30%+.
-REL_TOL = 0.20
+# reference close.
+#
+# F2 (2026-07-20): was 0.20, which demonstrably LEAKED — 2026-07-17 NIFTY 1m
+# bars carried highs to 27,005.7 (+11.6%) and MIDCPNIFTY a low of 12,485
+# (−15%) on a ~24,190 / ~14,700 index, and those bars fed the S1 MP+OF TPO
+# ladder. NSE index-wide circuit breakers halt trading at a 10% move, so ±20%
+# was looser than the market itself allows. 12% keeps a two-percent margin over
+# a full circuit-halt day while closing the leak.
+#
+# Tightening a band is only safe if its reference is FRESH — a stale anchor plus
+# a tight band is how you false-reject a real trend. Hence the seed window below
+# was shortened at the same time (see _REFERENCE_LOOKBACK_DAYS).
+#
+# HONEST LIMIT, measured against the live table: with a 3-day median anchor of
+# 24,150 for NIFTY, 0.12 rejects the MIDCPNIFTY 12,485 low and the BANKNIFTY-
+# class 15-20% swaps, but does NOT reject the NIFTY 26,923/27,005 prints
+# (+11.5%). Going to 0.10 would catch them — and would also blind the lane on a
+# genuine 10% circuit-halt day, which is exactly the day the lane matters most.
+# That residual (10-12%, same-decade) class is caught instead by the per-SESSION
+# band at the read boundary in paper_engine/strategy2_mp_of.load_index_1m_spot,
+# whose reference tracks the day itself and so survives a crash day.
+REL_TOL = 0.12
+
+# Seed window for the reference close. Short enough that the median tracks the
+# current level (a tight REL_TOL needs a fresh anchor), long enough that a
+# holiday/weekend still leaves a full session of rows to take a median over.
+#
+# NOTE on sources: the seed deliberately does NOT exclude ``source='live_tick'``.
+# It is a MEDIAN over ~1000+ rows and the observed contamination is a per-symbol
+# minority of single digits, so it cannot move the anchor; meanwhile the
+# non-live_tick alternatives are either a derived COPY of the same rows
+# (``timescaledb_spot_1minute`` carries the identical 26,923 NIFTY print) or
+# futures with a basis. Excluding live_tick would buy no cleanliness and add
+# basis error. The anchor's robustness here comes from the median, not the
+# source filter.
+_REFERENCE_LOOKBACK_DAYS = 3
 
 # Minimum seconds between prior-session reference refreshes (see
 # ``maybe_refresh_reference_closes``). ~6h ⇒ at most a few refreshes/day, driven
@@ -193,19 +226,27 @@ async def refresh_reference_closes(session_factory: Any = None) -> int:
     from sqlalchemy import text
 
     seeded = 0
+    # Inline the cutoff as a SQL literal, not a bound parameter: TimescaleDB
+    # only does plan-time chunk exclusion against a constant, and on this
+    # ~1,300-chunk hypertable the difference measured 1.9 s planning
+    # (NOW() - INTERVAL) vs 6.8 ms (literal), per index, per refresh. Generated
+    # from the system clock — no user input, no injection surface.
+    cutoff = (
+        _datetime.now(_timezone.utc) - _timedelta(days=_REFERENCE_LOOKBACK_DAYS)
+    ).strftime("%Y-%m-%d %H:%M:%S+00")
     try:
         async with session_factory() as session:
             for underlying, app_symbol in _UNDERLYING_TO_APP.items():
                 try:
                     result = await session.execute(
                         text(
-                            """
+                            f"""
                             SELECT percentile_cont(0.5) WITHIN GROUP (ORDER BY close) AS med
                             FROM underlying_spot_candles
                             WHERE underlying = :underlying
                               AND interval = '1minute'
                               AND close > 0
-                              AND time >= (NOW() - INTERVAL '7 days')
+                              AND time >= TIMESTAMPTZ '{cutoff}'
                             """
                         ),
                         {"underlying": underlying},
