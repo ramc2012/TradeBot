@@ -116,3 +116,6 @@ build/
 /sniper-paper/src/sniper_paper/ingest/broker_creds.py
 /sniper-paper/src/sniper_paper/model/
 /sniper-paper/src/sniper_paper/runner.py
+
+# Quarantine backups of provably-corrupt rows (CSV copies of PG side tables)
+data/quarantine/
