@@ -184,11 +184,27 @@ def map_signal_to_option_side(signal: Optional[str]) -> Optional[str]:
     return None
 
 
+def s2_symbol_supported(underlying: str) -> bool:
+    """Capability check: is this underlying an explicitly-routed S2 symbol?
+
+    ``expiry_tracks_for`` returns a ``("monthly",)`` default for anything not
+    in :data:`S2_EXPIRY_ROUTING`, which silently trades a *defaulted* monthly
+    contract for a mis-configured symbol. Callers building the S2 request
+    matrix should gate on this predicate and skip-and-report unsupported
+    symbols instead, so a future universe mis-config fails closed rather than
+    trading an assumed expiry. The current universe (NIFTY/SENSEX) is fully
+    routed, so this is a no-op for present behaviour.
+    """
+    return str(underlying or "").upper() in S2_EXPIRY_ROUTING
+
+
 def expiry_tracks_for(underlying: str) -> tuple[str, ...]:
     """Return the expiry types to trade for an underlying.
 
     Default fallback is ``("monthly",)`` so an unknown symbol still trades
     the safer (deeper) contract instead of silently dropping the signal.
+    Kept for callers that have already passed :func:`s2_symbol_supported`;
+    the capability check is the fail-closed gate, not this resolver.
     """
     return S2_EXPIRY_ROUTING.get(str(underlying).upper(), ("monthly",))
 

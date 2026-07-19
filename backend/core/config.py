@@ -352,6 +352,14 @@ class Settings(BaseSettings):
     # the standard mp_* fields, which the lane maps to ATM CE/PE on the
     # weekly+monthly expiry tracks declared in strategy2_mp_of.S2_EXPIRY_ROUTING.
     NSE_S2_USE_MP_OF_ENGINE: bool = True
+    # Attribution honesty for S2 when the MP+OF engine is silent (insufficient
+    # 1-min history / no prior session). "named_fallback" (default) preserves
+    # the current trade BEHAVIOR — the legacy MACD gate still fires — but the
+    # emitted signal is explicitly labelled `s2_macd_fallback` so the paper
+    # journal records which engine actually fired (never an unlabelled MP_OF).
+    # "block" is an owner opt-in that skips the trade instead (labelled
+    # `s2_blocked`). Only "block" changes WHEN S2 trades.
+    NSE_S2_ON_INSUFFICIENT_MP: str = "named_fallback"  # "named_fallback" | "block"
     PAPER_TRADING_ONLY: bool = False
     PAPER_RUNTIME_PREWARM_ENABLED: bool = True
     MARKET_HOURS_PAPER_SUPERVISOR_ENABLED: bool = True

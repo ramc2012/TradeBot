@@ -17,6 +17,7 @@ from paper_engine.strategy_agent import (
     _ensure_ist_datetime,
     _latest_populated_session_rows,
     _latest_session_rows,
+    _s2_engine_labels,
     _strategy2_expected_session_date,
     _strategy2_is_regular_session,
     detect_greeks_signal,
@@ -1814,3 +1815,66 @@ def test_closed_market_prep_empty_watchlist_retries_are_bounded(monkeypatch) -> 
 
     assert len(prep_calls) == CLOSED_PREP_MAX_ATTEMPTS
     assert agent._closed_prep_done is False
+
+
+# ── S2 engine attribution honesty (P1: identity changes silently) ────────────
+
+def test_s2_engine_labels_mp_of_active() -> None:
+    labels = _s2_engine_labels(True, {"signal": "BUY", "entry_style": "open_drive"})
+    assert labels["strategy_id"] == "s2_mp_of"
+    assert labels["strategy_version"] == "2.0"
+    assert labels["engine"] == "mp_of"
+    assert labels["fallback_reason"] is None
+
+
+def test_s2_engine_labels_named_fallback_when_mp_silent() -> None:
+    # MP+OF silent (insufficient history) → labelled MACD fallback, NOT MP_OF.
+    labels = _s2_engine_labels(False, {"signal": None, "reason": "insufficient_1m_spot"})
+    assert labels["strategy_id"] == "s2_macd_fallback"
+    assert labels["strategy_version"] == "1.0"
+    assert labels["engine"] == "macd_fallback"
+    assert labels["fallback_reason"] == "insufficient_1m_spot"
+
+
+def test_s2_engine_labels_blocked() -> None:
+    labels = _s2_engine_labels(False, {"signal": None, "reason": "no_session_rows"}, blocked=True)
+    assert labels["strategy_id"] == "s2_blocked"
+    assert labels["engine"] == "blocked"
+    assert labels["fallback_reason"] == "no_session_rows"
+
+
+def test_s2_engine_labels_blocked_defaults_reason_when_absent() -> None:
+    labels = _s2_engine_labels(False, {}, blocked=True)
+    assert labels["strategy_id"] == "s2_blocked"
+    assert labels["fallback_reason"] == "mp_of_insufficient_history"
+
+
+def test_s2_capability_gate_skips_unsupported_symbol(monkeypatch) -> None:
+    """The S2 request matrix must fail closed on an unrouted symbol (report it
+    as unresolved) instead of silently defaulting it to a monthly expiry."""
+    import paper_engine.strategy_agent as sa
+    import paper_engine.strategy2_mp_of as s2
+
+    agent = PaperStrategyAgent()
+    requested: list[list[str]] = []
+
+    # Universe carries one supported (NIFTY) and one unrouted (BANKEX) symbol.
+    monkeypatch.setattr(sa, "STRATEGY2_UNDERLYINGS", ("NIFTY", "BANKEX"))
+
+    async def _fake_inputs(_underlying):
+        return {}  # forces the legacy resolver path for supported symbols
+
+    async def _fake_watchlist(*, expiry=None, symbols=None, live_refresh=False):
+        requested.append(list(symbols or []))
+        return {"rows": [], "detail": None}
+
+    monkeypatch.setattr(s2, "load_s2_expiry_inputs", _fake_inputs)
+    monkeypatch.setattr(sa.atm_watchlist_service, "get_watchlist", _fake_watchlist)
+
+    scope = {"index_monthlies": {"NIFTY": "2026-04-28"}}
+    asyncio.run(agent._load_strategy2_native_watchlist_rows(scope, live_refresh=False))
+
+    # BANKEX is reported unresolved and never requested; NIFTY still resolves.
+    assert agent._strategy2_unresolved == [{"underlying": "BANKEX", "reason": "unsupported_s2_symbol"}]
+    assert all("BANKEX" not in syms for syms in requested)
+    assert any("NIFTY" in syms for syms in requested)

@@ -1293,6 +1293,12 @@ class StrategyEntryMixin:
                 "tte_days": candidate["tte_days"],
                 "entry_bar_time": candidate["latest_bar_time"],
                 "setup_type": candidate.get("spot_setup"),
+                # Engine attribution (S2): which engine actually fired this
+                # entry. None for lanes that don't set it.
+                "strategy_id": candidate.get("strategy_id"),
+                "strategy_version": candidate.get("strategy_version"),
+                "engine": candidate.get("engine"),
+                "fallback_reason": candidate.get("fallback_reason"),
                 "entry_iv_pct": _round_or_none(candidate.get("iv_pct"), 1),
                 "regime": regime_label,
                 "mp_day_type": candidate.get("mp_day_type"),

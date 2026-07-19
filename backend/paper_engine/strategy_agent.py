@@ -194,6 +194,58 @@ def _report_interval_seconds(value: str) -> int:
 # tuning — not stretching the weekly-tuned strike + decay logic onto
 # month-long contracts.
 STRATEGY2_UNDERLYINGS = ("NIFTY", "SENSEX")
+
+# ── S2 engine attribution labels ─────────────────────────────────────────────
+# S2 can fire from two distinct engines behind the same "Strategy 2" display
+# name: the MP+OF auction engine, or the legacy 15-min option-premium MACD gate
+# it falls back to when MP+OF is silent. Journalling both identically corrupts
+# attribution/expectancy (a trade recorded as MP+OF may actually have been
+# MACD). These stable (id, version) pairs are attached to every emitted signal
+# so the paper journal records WHICH engine fired. This is labelling only — it
+# does not change WHEN S2 trades (see NSE_S2_ON_INSUFFICIENT_MP for the one
+# opt-in that does).
+S2_ENGINE_MP_OF = ("s2_mp_of", "2.0")
+S2_ENGINE_FALLBACK = ("s2_macd_fallback", "1.0")
+S2_ENGINE_BLOCKED = ("s2_blocked", "1.0")
+
+
+def _s2_engine_labels(
+    mp_of_active: bool,
+    mp_of_signal: Optional[dict[str, Any]],
+    *,
+    blocked: bool = False,
+) -> dict[str, Any]:
+    """Return the stable engine-attribution fields for one S2 signal.
+
+    ``mp_of_active`` — MP+OF emitted a directional side that drove the entry.
+    ``blocked`` — config opted to skip the trade on insufficient MP data.
+    """
+    sig = mp_of_signal or {}
+    if blocked:
+        sid, ver = S2_ENGINE_BLOCKED
+        return {
+            "strategy_id": sid,
+            "strategy_version": ver,
+            "engine": "blocked",
+            "fallback_reason": sig.get("reason") or "mp_of_insufficient_history",
+        }
+    if mp_of_active:
+        sid, ver = S2_ENGINE_MP_OF
+        return {
+            "strategy_id": sid,
+            "strategy_version": ver,
+            "engine": "mp_of",
+            "fallback_reason": None,
+        }
+    sid, ver = S2_ENGINE_FALLBACK
+    return {
+        "strategy_id": sid,
+        "strategy_version": ver,
+        "engine": "macd_fallback",
+        "fallback_reason": sig.get("reason"),
+    }
+
+
 STRATEGY2_OPTION_TIMEFRAME = "15minute"
 STRATEGY2_OPTION_BAR_MINUTES = 15
 STRATEGY2_ENTRY_CUTOFF = time(15, 0)
@@ -1676,10 +1728,12 @@ class PaperStrategyAgent(StrategyExitMixin, StrategyEntryMixin, BaseStrategyAgen
         from paper_engine.strategy2_mp_of import (
             load_s2_expiry_inputs,
             resolve_s2_expiry_targets,
+            s2_symbol_supported,
             select_s2_expiry_targets,
         )
 
         today_iso = _now_ist().date().isoformat()
+        unresolved: list[dict[str, str]] = []
 
         # Build the (underlying, track, expiry) request matrix from the expiry
         # calendar catalog (fo_expiry_catalog monthlies + the underlying's own
@@ -1688,6 +1742,16 @@ class PaperStrategyAgent(StrategyExitMixin, StrategyEntryMixin, BaseStrategyAgen
         # resolver when the catalog has no rows for an underlying.
         requests: list[tuple[str, str, str]] = []
         for underlying in STRATEGY2_UNDERLYINGS:
+            # Capability gate: fail closed on an unrouted symbol instead of
+            # silently defaulting it to a monthly expiry. No-op for the current
+            # NIFTY/SENSEX universe (both routed); guards a future mis-config.
+            if not s2_symbol_supported(underlying):
+                unresolved.append({"underlying": underlying, "reason": "unsupported_s2_symbol"})
+                logger.warning(
+                    f"[Strategy2] {underlying} is not an S2-routed symbol; "
+                    "skipping (no defaulted expiry). Add it to S2_EXPIRY_ROUTING to trade it."
+                )
+                continue
             targets: list[tuple[str, str]] = []
             try:
                 inputs = await load_s2_expiry_inputs(underlying)
@@ -1735,6 +1799,10 @@ class PaperStrategyAgent(StrategyExitMixin, StrategyEntryMixin, BaseStrategyAgen
                 # First matching row per request is the ATM line we want;
                 # if the watchlist returned multiple, we take just one.
                 break
+        # Side channel (keeps the rows_by_key contract clean for the caller's
+        # .values() iteration): expose symbols skipped by the capability gate
+        # so the desk/journal can report them as unresolved rather than traded.
+        self._strategy2_unresolved = unresolved
         return rows_by_key
 
     @staticmethod
@@ -3218,6 +3286,13 @@ class PaperStrategyAgent(StrategyExitMixin, StrategyEntryMixin, BaseStrategyAgen
                 if direction == "CE"
                 else abs(float(context.get("pe_macd_value") or 0.0)),
                 "reason": f"strategy2_{context.get('gate_reason')}_{context.get('entry_reason') or 'macd_above_zero'}",
+                # Engine attribution — records WHICH S2 engine fired (MP+OF vs
+                # the legacy MACD fallback) so the paper journal never mislabels
+                # a MACD entry as MP+OF. Defaulted for pre-refactor contexts.
+                "strategy_id": context.get("strategy_id") or "s2_macd_fallback",
+                "strategy_version": context.get("strategy_version") or "1.0",
+                "engine": context.get("engine") or "macd_fallback",
+                "fallback_reason": context.get("fallback_reason"),
                 "rsi": latest_macd_rsi(closes).get("rsi"),
                 "opt_type": direction,
                 "iv_pct": _round_or_none(float(side.get("iv") or 0.0) * 100.0, 1) if side.get("iv") is not None else None,
@@ -3617,8 +3692,22 @@ class PaperStrategyAgent(StrategyExitMixin, StrategyEntryMixin, BaseStrategyAgen
                     f"{int(round(float(mp_of_signal.get('confidence') or 0.0) * 100))}%). "
                     f"{mp_of_signal.get('signal_validation_detail', '')}"
                 ).strip()
+            # Attribution honesty: when MP+OF is silent we're on the legacy
+            # MACD gate. Default (named_fallback) keeps that BEHAVIOR but labels
+            # the signal `s2_macd_fallback`; the "block" opt-in skips the entry.
+            s2_block = (
+                str(getattr(settings, "NSE_S2_ON_INSUFFICIENT_MP", "named_fallback")) == "block"
+                and not mp_of_active
+            )
+            if s2_block:
+                can_enter = False
+                if status == "entry-ready":
+                    status = "standby"
+                gate_reason = "mp_of_insufficient_history"
+            engine_labels = _s2_engine_labels(mp_of_active, mp_of_signal, blocked=s2_block)
             signal = {
                 "strategy": "Strategy 2",
+                **engine_labels,
                 "source": "live_scan",
                 "underlying": underlying,
                 "signal_date": started_at.date().isoformat(),
@@ -3687,6 +3776,7 @@ class PaperStrategyAgent(StrategyExitMixin, StrategyEntryMixin, BaseStrategyAgen
                 "day_type": day_type,
                 "gate_reason": gate_reason,
                 "entry_reason": entry_reason,
+                **engine_labels,
                 "signal": signal,
                 "pipeline": pipeline,
                 "can_enter": can_enter,
@@ -3810,6 +3900,22 @@ class PaperStrategyAgent(StrategyExitMixin, StrategyEntryMixin, BaseStrategyAgen
             freshness = "stale"
         can_enter = can_enter and freshness == "live"
 
+        # Engine attribution (same contract as the bypass path): whether the
+        # MP+OF engine actually drove this directional entry, or we fell
+        # through to the legacy MACD gate. Labels the signal so the paper
+        # journal never records a MACD entry as MP+OF.
+        mp_of_active = bool(mp_of_signal.get("signal")) and direction in {"CE", "PE"}
+        s2_block = (
+            str(getattr(settings, "NSE_S2_ON_INSUFFICIENT_MP", "named_fallback")) == "block"
+            and not mp_of_active
+        )
+        if s2_block:
+            can_enter = False
+            if status == "entry-ready":
+                status = "standby"
+            gate_reason = "mp_of_insufficient_history"
+        engine_labels = _s2_engine_labels(mp_of_active, mp_of_signal, blocked=s2_block)
+
         side_macd_val = ce_macd_value if direction == "CE" else pe_macd_value if direction == "PE" else None
         side_closes_live = ce_closes if direction == "CE" else pe_closes if direction == "PE" else []
         latest_hist_val: Optional[float] = None
@@ -3847,6 +3953,7 @@ class PaperStrategyAgent(StrategyExitMixin, StrategyEntryMixin, BaseStrategyAgen
         )
         signal = {
             "strategy": "Strategy 2",
+            **engine_labels,
             "source": "live_scan",
             "underlying": underlying,
             "signal_date": started_at.date().isoformat(),
@@ -3897,6 +4004,7 @@ class PaperStrategyAgent(StrategyExitMixin, StrategyEntryMixin, BaseStrategyAgen
             "day_type": day_type,
             "gate_reason": gate_reason,
             "entry_reason": entry_reason,
+            **engine_labels,
             "signal": signal,
             "pipeline": pipeline,
             "can_enter": can_enter,

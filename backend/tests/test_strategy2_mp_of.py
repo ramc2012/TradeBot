@@ -35,6 +35,23 @@ def test_expiry_routing_is_case_insensitive() -> None:
     assert s2.expiry_tracks_for("nifty") == ("weekly", "monthly")
 
 
+def test_s2_symbol_supported_only_for_routed_symbols() -> None:
+    # Capability gate: the five routed indices are supported; anything else
+    # (a typo, a de-scoped symbol, a future addition) fails closed instead of
+    # trading a defaulted monthly expiry.
+    for symbol in ("NIFTY", "SENSEX", "BANKNIFTY", "FINNIFTY", "MIDCPNIFTY"):
+        assert s2.s2_symbol_supported(symbol)
+    assert not s2.s2_symbol_supported("BANKEX")
+    assert not s2.s2_symbol_supported("ASDF")
+    assert not s2.s2_symbol_supported("")
+    assert not s2.s2_symbol_supported(None)
+
+
+def test_s2_symbol_supported_is_case_insensitive() -> None:
+    assert s2.s2_symbol_supported("nifty")
+    assert not s2.s2_symbol_supported("bankex")
+
+
 def test_map_signal_buy_to_ce() -> None:
     assert s2.map_signal_to_option_side("BUY") == "CE"
 
