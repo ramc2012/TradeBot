@@ -436,6 +436,10 @@ export const runInstitutionalConvergence = () =>
   api.post("/api/institutional-convergence/run-once", undefined, { timeout: 650_000 });
 export const getCommodityInstitutionalConvergenceStatus = () =>
   api.get("/api/institutional-convergence/commodity/status");
+export const getInstitutionalConvergenceDetail = (symbol: string, market?: "NSE" | "MCX") =>
+  api.get(
+    `/api/institutional-convergence${market === "MCX" ? "/commodity" : ""}/status/${encodeURIComponent(symbol)}`,
+  );
 export const runCommodityInstitutionalConvergence = () =>
   api.post("/api/institutional-convergence/commodity/run-once", undefined, { timeout: 650_000 });
 // Execution/analytics endpoints (deployed separately from the desk — the UI

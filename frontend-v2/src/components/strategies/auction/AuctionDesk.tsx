@@ -34,6 +34,7 @@ import { SignalQualityTab } from "@/components/strategies/overview/SignalQuality
 import { StrategyLiveStream } from "@/components/strategies/shared/StrategyLiveStream";
 import { useStrategyPositionsStream, selectStrategySlice } from "@/hooks/useStrategyPositionsStream";
 import { useLiveSnapshotQuery } from "@/hooks/useLiveSnapshotQuery";
+import { useSystemState } from "@/hooks/useSystemState";
 import { createStrategySnapshotSocket } from "@/lib/websocket";
 import type { PaperPosition, PositionsPayload } from "@/lib/strategy-stats";
 import { api as apiClient } from "@/lib/api";
@@ -136,13 +137,32 @@ export default function AuctionDesk() {
   const ds = snap?.data_status;
   const paperMode = (snap?.mode ?? "paper") !== "live";
 
+  // Four separated facts (do NOT collapse into one green light):
+  //  · execution_mode → paperMode pill (paper/live)
+  //  · scheduler_state → the green "armed" dot = auto-run armed (NOT data live)
+  //  · data_mode      → live / historical_replay / bar_inference (data_status)
+  //  · freshness      → usable quote age within threshold + market session
+  const { autoRunArmed, nseOpen, mcxOpen } = useSystemState();
+  const asOf = (snap?.request?.quote?.timestamp as string | undefined) ?? undefined;
+  const asOfMs = asOf ? Date.parse(asOf) : NaN;
+  const freshOK = Number.isFinite(asOfMs) && Date.now() - asOfMs < 90_000;
+  const sessionOpen = nseOpen || mcxOpen;
+  const dataBadge: { label: string; variant: "success" | "warn" | "neutral" | "info" } =
+    ds?.snapshot_mode === "historical_replay" || ds?.live_mode === false
+      ? { label: "replay", variant: "warn" }
+      : ds?.live_mode && freshOK && sessionOpen
+        ? { label: "live data", variant: "success" }
+        : !sessionOpen
+          ? { label: "closed", variant: "neutral" }
+          : { label: "stale", variant: "warn" };
+
   return (
     <DeskShell
       title="Auction Intelligence"
       description="Market-profile auction theory · regime classification · agent sleeves · live microstructure"
       asOf={snap?.request?.quote?.timestamp as string | undefined}
       isFetching={liveQuery.isFetching}
-      isLive={ds?.live_mode}
+      isLive={autoRunArmed}
       paperMode={paperMode}
       tabs={TABS}
       activeTab={activeTab}
@@ -153,6 +173,7 @@ export default function AuctionDesk() {
           {activeTab === "performance" ? (
             <StatusBadge label={streamLive ? "● live" : "polling"} variant={streamLive ? "success" : "info"} />
           ) : null}
+          <StatusBadge label={dataBadge.label} variant={dataBadge.variant} />
           {ds?.snapshot_mode ? <StatusBadge label={ds.snapshot_mode.replace(/_/g, " ")} variant="info" /> : null}
           <OfSourceBadge source={ds?.order_flow_source} size="sm" />
           <Picker label="Symbol" value={symbol} options={universe} onChange={(v) => startTransition(() => setSymbol(v))} />
