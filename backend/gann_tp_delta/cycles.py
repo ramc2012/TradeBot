@@ -38,10 +38,19 @@ Families implemented
                     square-root of the count by 2, so a count at θ degrees
                     from day 1 is ``(1 + θ/180)**2`` days — reproducing the
                     classic 1, 4, 9, 16, 25, 36 … squares of time with the
-                    45° subdivisions between them.  Source: Gann's Square of
-                    Nine (Master "Squares" course); the time application is
-                    the same wheel read on the date ring rather than the
-                    price ring.
+                    45° subdivisions between them.
+
+                    **DERIVED HERE, NOT CITED.**  Gann's Square of Nine is a
+                    PRICE construction; applying the same wheel to the date
+                    ring is our own extension and no source was found that
+                    states it as a rule.  This matters for interpreting the
+                    2026-07-21 prominence study: 21 of the 29 index-grid
+                    cycles came from this invented family, so roughly three
+                    quarters of what was scored was not a Gann cycle number
+                    at all.  Treat any result on ``sq9_time`` as a test of
+                    our own construct, and weight the named families
+                    (``calendar``, ``week``, ``fractional_year``,
+                    ``anniversary``, ``seasonal``) accordingly.
 ``seasonal``        Equinoxes and solstices (≈ Mar 20, Jun 21, Sep 22, Dec 21)
                     — ABSOLUTE dates, not day-counts from an anchor.  Source:
                     Gann, *How to Make Profits in Commodities*, "Seasonal Time
@@ -280,6 +289,17 @@ def testable_cycles(history_days: int, min_observations: int = 20) -> list[Cycle
     This is a necessary condition only — the actual observation count depends
     on how many causal anchors exist.  A cycle that fails here can never be
     significant and is reported UNTESTABLE rather than "weak".
+
+    **CAUTION — this filter silently decided the outcome of the 2026-07-21
+    prominence study.**  At ``min_observations=20`` it excluded every long
+    cycle practitioners actually name (144 / 180 / 270 / 360 day, annual and
+    beyond) on ~5.1 years of index history, and excluded stocks almost
+    entirely on ~1.3 years — so the study scored mostly short, mostly
+    invented ``sq9_time`` counts and reported a null over a grid that had
+    already had the interesting hypotheses removed from it.  Callers MUST
+    pair this with :func:`untestable_cycles` and persist the excluded set
+    with its reason; a study that reports only what survived this filter is
+    reporting a filtered question, not the question asked.
     """
     span = max(int(history_days), 0)
     keep: list[CycleDef] = []
