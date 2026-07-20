@@ -1,0 +1,464 @@
+====================================================================================================
+(E) OPTION-LEVEL TRANSLATION — selection value on the actual option panel
+====================================================================================================
+
+Panel: monthly contracts, DTE 8-22, premium >= Rs 1, EOD (15:15 IST) snapshot.
+Bands: deep_ITM  = signed moneyness in [-10%, -3%)   (~0.65-0.8 delta)
+       slight_ITM= signed moneyness in [-3%, -0.75%)
+One contract per (underlying, session, side, band): closest to band centre.
+
+index : rows    1004  underlyings    6  sessions  217  2025-01-14 -> 2026-07-17
+stock : rows   33356  underlyings  211  sessions  162  2025-04-15 -> 2026-07-20
+
+Cost model (round-trip, % of premium): index 1.6%  stock 8.0%.  Sensitivity grid also reported: 0%, 2%, 5%, 10%
+The panel carries NO bid/ask, so spread is ASSUMED, not measured. Index
+near-ATM monthly quoted spread ~0.3-0.8%/side; single-stock options on this
+universe are far wider (the established ~10% round-trip figure). 8% is used
+for stocks as a deliberately still-generous number.
+
+====================================================================================================
+1. BASELINE — the unselected universe, net of costs
+====================================================================================================
+
+market band        side   h      n  sess   gross%     net%  med_net%   win%   t_clu  t_deov
+index  deep_ITM    CE     3    143    73     8.91     7.31      3.62   56.6    2.04    1.18
+index  deep_ITM    CE     5     55    33     5.53     3.93     11.44   61.8    0.68     nan
+index  deep_ITM    PE     3    137    79    -0.38    -1.98     -5.96   43.1   -0.44   -0.23
+index  deep_ITM    PE     5     82    45   -13.97   -15.57    -35.36   39.0   -2.01     nan
+index  slight_ITM  CE     3    300   145     6.99     5.39     -4.08   48.3    1.39    0.81
+index  slight_ITM  CE     5    170    79    10.28     8.68      4.17   52.9    1.39    0.61
+index  slight_ITM  PE     3    286   138    -3.55    -5.15    -31.20   29.0   -1.08   -0.61
+index  slight_ITM  PE     5    169    86    -8.23    -9.83    -38.47   30.8   -1.45   -0.81
+stock  deep_ITM    CE     3   7543   159    -5.33   -13.33    -17.42   33.1   -7.06   -4.07
+stock  deep_ITM    CE     5   3529    85    -5.41   -13.41    -22.38   34.3   -4.32   -1.98
+stock  deep_ITM    CE    10    281    10    -5.79   -13.79    -28.10   37.7   -1.12     nan
+stock  deep_ITM    PE     3   6159   159   -10.34   -18.34    -26.40   26.9   -8.03   -4.66
+stock  deep_ITM    PE     5   3357    85   -19.50   -27.50    -45.52   18.8   -8.58   -3.92
+stock  deep_ITM    PE    10    364     9   -38.25   -46.25    -65.51   14.6   -6.96     nan
+stock  slight_ITM  CE     3   8558   159    -4.24   -12.24    -21.09   33.3   -5.28   -3.03
+stock  slight_ITM  CE     5   4600    85    -0.73    -8.73    -24.67   35.1   -2.59   -1.22
+stock  slight_ITM  CE    10    466    10    12.19     4.19    -28.42   39.7    0.32     nan
+stock  slight_ITM  PE     3   7816   159    -8.78   -16.78    -28.70   28.5   -6.41   -3.68
+stock  slight_ITM  PE     5   4303    85   -19.81   -27.81    -42.84   22.0   -9.27   -4.19
+stock  slight_ITM  PE    10    470     9   -36.19   -44.19    -62.54   18.7   -7.67     nan
+
+====================================================================================================
+2. SELECTION ARMS vs UNSELECTED vs MATCHED RANDOM CONTROL
+====================================================================================================
+
+'lift' = arm net mean - unselected net mean (same cell). 'rand_pct' = the
+arm's position in the count-matched random-selection null (300 draws);
+>0.95 would be evidence the SELECTOR, not the trade count, did the work.
+
+--- index / slight_ITM / CE / h=3
+    arm                       n  sess     net%     med%   win%   t_clu  t_deov  lift_pp   rand%  randpct
+    unselected              300   145     5.39    -4.08   48.3    1.39    0.81     0.00     nan      nan
+    rv_bottom_quintile      267   129    -0.44    -9.62   45.7   -0.13   -0.08    -5.84   -0.02    0.030
+
+--- index / slight_ITM / PE / h=3
+    arm                       n  sess     net%     med%   win%   t_clu  t_deov  lift_pp   rand%  randpct
+    unselected              286   138    -5.15   -31.20   29.0   -1.08   -0.61     0.00     nan      nan
+    rv_bottom_quintile      254   118    -3.68   -30.66   28.3   -0.75   -0.43     1.47   -3.86    0.860
+
+--- stock / deep_ITM / CE / h=3
+    arm                       n  sess     net%     med%   win%   t_clu  t_deov  lift_pp   rand%  randpct
+    unselected             7543   159   -13.33   -17.42   33.1   -7.06   -4.07     0.00     nan      nan
+    RS_decile              1267   152    -9.67   -14.67   34.7   -4.82   -2.79     3.66  -13.27    1.000
+    RS_quintile            2542   152   -10.84   -15.82   33.5   -5.85   -3.36     2.49  -13.25    1.000
+    alpha_decile            905    98   -12.76   -17.71   34.0   -4.95   -2.85     0.58  -16.09    1.000
+    moverich_quintile      1472   156   -10.85    -9.57   40.0   -4.40   -2.53     2.49  -13.77    0.980
+    moverich_decile         593   129   -12.79   -23.38   28.8   -4.43   -2.59     0.54  -15.03    0.877
+    rv_quintile            1598   153   -13.34   -18.82   30.5   -5.56   -3.25    -0.01  -13.90    0.703
+    RS_and_moverich         526   142   -13.19   -12.78   34.2   -4.94   -2.83     0.14  -13.02    0.460
+    RS_decile_WRONGWAY      173    78   -13.09   -16.78   33.5   -2.53   -1.48     0.24   -9.75    0.150
+    rv_bottom_quintile      885   147   -11.70   -15.14   35.3   -4.62   -2.77     1.63  -14.77    0.987
+
+--- stock / deep_ITM / CE / h=5
+    arm                       n  sess     net%     med%   win%   t_clu  t_deov  lift_pp   rand%  randpct
+    unselected             3529    85   -13.41   -22.38   34.3   -4.32   -1.98     0.00     nan      nan
+    RS_decile               618    81    -9.56   -17.47   35.9   -2.99   -1.59     3.85  -11.11    0.790
+    RS_quintile            1229    82    -9.59   -17.11   36.9   -3.08   -1.47     3.82  -12.03    0.983
+    alpha_decile            426    52   -16.40   -23.30   32.4   -4.72     nan    -2.99  -17.68    0.693
+    moverich_quintile       707    84    -7.69    -8.18   43.0   -1.87   -0.84     5.72  -13.28    0.967
+    moverich_decile         291    67   -15.54   -32.39   24.1   -3.49   -1.53    -2.13  -16.23    0.600
+    rv_quintile             789    83   -12.69   -24.91   32.4   -3.46   -1.84     0.72  -12.73    0.500
+    RS_and_moverich         262    72    -6.98   -14.15   37.8   -1.46   -0.71     6.43   -8.22    0.627
+    RS_decile_WRONGWAY      103    48    -5.28   -12.88   40.8   -0.63     nan     8.13   -5.89    0.550
+    rv_bottom_quintile      352    79    -8.11   -17.51   39.2   -1.80   -0.80     5.30  -12.70    0.903
+
+--- stock / deep_ITM / CE / h=10
+    arm                       n  sess     net%     med%   win%   t_clu  t_deov  lift_pp   rand%  randpct
+    unselected              281    10   -13.79   -28.10   37.7   -1.12     nan     0.00     nan      nan
+    RS_quintile             115     9   -11.78   -27.47   38.3   -0.99     nan     2.00     nan      nan
+
+--- stock / deep_ITM / PE / h=3
+    arm                       n  sess     net%     med%   win%   t_clu  t_deov  lift_pp   rand%  randpct
+    unselected             6159   159   -18.34   -26.40   26.9   -8.03   -4.66     0.00     nan      nan
+    RS_decile              1174   152   -16.62   -19.90   30.7   -6.85   -3.94     1.73  -17.12    0.653
+    RS_quintile            2313   153   -17.13   -19.40   31.0   -7.17   -4.21     1.21  -17.33    0.590
+    alpha_decile            803    97   -15.07   -19.40   32.5   -4.80   -2.75     3.27  -18.75    0.997
+    moverich_quintile      1116   141   -15.49   -21.96   31.0   -5.34   -3.06     2.85  -17.47    0.930
+    moverich_decile         683   108   -11.75   -19.24   31.3   -3.50   -2.09     6.59  -16.01    0.980
+    rv_quintile            1175   148   -18.92   -26.15   27.3   -6.90   -4.02    -0.58  -16.85    0.037
+    RS_and_moverich         437   124   -19.97   -23.71   28.8   -6.03   -3.58    -1.63  -17.12    0.087
+    RS_decile_WRONGWAY      148    54   -35.01   -45.83   16.2   -6.23   -3.59   -16.67  -28.69    0.043
+    rv_bottom_quintile      915   144   -18.74   -23.20   29.1   -7.35   -4.24    -0.40  -18.29    0.350
+
+--- stock / deep_ITM / PE / h=5
+    arm                       n  sess     net%     med%   win%   t_clu  t_deov  lift_pp   rand%  randpct
+    unselected             3357    85   -27.50   -45.52   18.8   -8.58   -3.92     0.00     nan      nan
+    RS_decile               598    80   -26.20   -36.84   23.6   -7.57   -3.51     1.30  -25.32    0.343
+    RS_quintile            1135    81   -27.31   -39.16   21.1   -8.66   -3.96     0.20  -25.72    0.147
+    alpha_decile            421    51   -22.58   -34.19   26.8   -4.65     nan     4.92  -25.21    0.893
+    moverich_quintile       622    74   -22.30   -37.16   24.4   -4.96   -2.21     5.21  -27.51    0.993
+    moverich_decile         369    55   -18.81   -32.74   24.7   -3.70     nan     8.69  -24.64    0.950
+    rv_quintile             645    80   -31.80   -45.10   17.7   -7.92   -3.48    -4.29  -27.83    0.030
+    RS_and_moverich         220    64   -27.59   -36.84   20.9   -5.27   -2.61    -0.09  -28.17    0.590
+    RS_decile_WRONGWAY      112    37   -42.31   -55.83   13.4   -7.04     nan   -14.81  -40.46    0.380
+    rv_bottom_quintile      470    75   -28.36   -42.42   20.4   -7.06   -3.22    -0.86  -29.53    0.713
+
+--- stock / deep_ITM / PE / h=10
+    arm                       n  sess     net%     med%   win%   t_clu  t_deov  lift_pp   rand%  randpct
+    unselected              364     9   -46.25   -65.51   14.6   -6.96     nan     0.00     nan      nan
+    RS_quintile             117     9   -40.74   -55.68   21.4   -4.88     nan     5.51     nan      nan
+
+--- stock / slight_ITM / CE / h=3
+    arm                       n  sess     net%     med%   win%   t_clu  t_deov  lift_pp   rand%  randpct
+    unselected             8558   159   -12.24   -21.09   33.3   -5.28   -3.03     0.00     nan      nan
+    RS_decile               684   143    -6.75   -17.39   33.9   -1.85   -1.08     5.49  -12.00    0.970
+    RS_quintile            1601   151    -6.87   -16.65   35.3   -2.35   -1.44     5.37  -12.98    0.957
+    alpha_decile            571    97    -4.18   -16.64   33.1   -0.98   -0.62     8.06  -14.73    1.000
+    moverich_quintile      1119   155    -7.60   -12.98   40.8   -2.39   -1.37     4.64  -13.10    0.987
+    moverich_decile         523   117   -10.61   -27.72   30.4   -2.83   -1.65     1.64  -16.02    0.960
+    rv_quintile            1271   154   -13.24   -23.19   32.4   -4.81   -2.82    -0.99  -13.11    0.493
+    RS_and_moverich         220   106    -3.44   -13.27   41.8   -0.72   -0.42     8.80  -12.54    0.980
+    RS_decile_WRONGWAY      421   108   -17.76   -24.33   26.8   -4.91   -3.02    -5.52  -10.62    0.013
+    rv_bottom_quintile     1751   156   -12.91   -20.63   32.3   -5.24   -3.07    -0.67  -13.08    0.563
+
+--- stock / slight_ITM / CE / h=5
+    arm                       n  sess     net%     med%   win%   t_clu  t_deov  lift_pp   rand%  randpct
+    unselected             4600    85    -8.73   -24.67   35.1   -2.59   -1.22     0.00     nan      nan
+    RS_decile               411    78    -5.15   -20.00   36.0   -1.12   -0.61     3.58   -7.61    0.747
+    RS_quintile             925    80    -2.00   -17.09   39.4   -0.53   -0.26     6.73   -7.57    1.000
+    alpha_decile            339    52    -5.13   -23.18   35.1   -0.87     nan     3.60  -14.23    0.993
+    moverich_quintile       635    84     2.34    -0.02   49.9    0.45    0.18    11.07   -8.28    0.980
+    moverich_decile         273    62    -3.22   -24.97   34.4   -0.52   -0.30     5.51  -14.42    0.967
+    rv_quintile             690    83   -10.71   -27.87   32.5   -2.47   -1.37    -1.98   -8.80    0.240
+    RS_and_moverich         135    60     4.70    -2.66   49.6    0.65    0.26    13.43   -8.24    0.987
+    RS_decile_WRONGWAY      252    63    -6.56   -28.34   32.5   -0.95   -0.61     2.17   -6.58    0.523
+    rv_bottom_quintile      960    84    -8.37   -23.40   36.1   -2.11   -1.01     0.36   -8.82    0.600
+
+--- stock / slight_ITM / CE / h=10
+    arm                       n  sess     net%     med%   win%   t_clu  t_deov  lift_pp   rand%  randpct
+    unselected              466    10     4.19   -28.42   39.7    0.32     nan     0.00     nan      nan
+    RS_quintile             101     9     0.25   -36.69   39.6    0.02     nan    -3.93     nan      nan
+
+--- stock / slight_ITM / PE / h=3
+    arm                       n  sess     net%     med%   win%   t_clu  t_deov  lift_pp   rand%  randpct
+    unselected             7816   159   -16.78   -28.70   28.5   -6.41   -3.68     0.00     nan      nan
+    RS_decile               687   140   -13.63   -23.22   34.9   -4.19   -2.54     3.14  -15.44    0.783
+    RS_quintile            1732   148   -13.75   -22.81   32.9   -4.64   -2.90     3.02  -15.86    0.957
+    alpha_decile            444    89    -8.48   -17.83   38.1   -1.84   -1.25     8.30  -14.83    0.987
+    moverich_quintile       952   153   -13.57   -26.88   31.1   -4.11   -2.46     3.20  -15.94    0.880
+    moverich_decile         605   103   -13.97   -23.46   32.9   -3.84   -2.20     2.80  -14.72    0.617
+    rv_quintile            1055   152   -14.86   -30.60   27.3   -4.70   -2.78     1.91  -15.19    0.570
+    RS_and_moverich         186    92   -15.39   -30.28   28.0   -2.84   -2.09     1.38  -15.61    0.557
+    RS_decile_WRONGWAY      282    89   -28.19   -35.72   20.9   -5.62   -3.36   -11.42  -22.28    0.030
+    rv_bottom_quintile     1681   157   -18.09   -29.04   27.9   -7.18   -4.14    -1.32  -15.98    0.023
+
+--- stock / slight_ITM / PE / h=5
+    arm                       n  sess     net%     med%   win%   t_clu  t_deov  lift_pp   rand%  randpct
+    unselected             4303    85   -27.81   -42.84   22.0   -9.27   -4.19     0.00     nan      nan
+    RS_decile               395    78   -22.19   -41.07   27.3   -4.60   -2.10     5.62  -26.44    0.933
+    RS_quintile             941    81   -25.03   -37.15   26.5   -6.26   -3.12     2.78  -27.10    0.900
+    alpha_decile            260    51   -15.23   -27.38   32.7   -2.51     nan    12.58  -22.24    0.970
+    moverich_quintile       535    82   -19.43   -40.03   25.2   -4.15   -1.83     8.38  -27.93    1.000
+    moverich_decile         339    59   -15.32   -36.28   25.7   -2.70   -1.70    12.49  -23.21    0.973
+    rv_quintile             594    84   -29.09   -44.57   18.9   -7.33   -3.31    -1.28  -27.64    0.280
+    RS_and_moverich         103    55   -18.94   -40.33   28.2   -2.48     nan     8.88  -25.63    0.913
+    RS_decile_WRONGWAY      191    56   -25.08   -45.98   22.5   -3.75   -1.53     2.73  -31.84    0.937
+    rv_bottom_quintile      953    85   -26.77   -40.99   23.5   -7.56   -3.57     1.05  -27.78    0.723
+
+--- stock / slight_ITM / PE / h=10
+    arm                       n  sess     net%     med%   win%   t_clu  t_deov  lift_pp   rand%  randpct
+    unselected              470     9   -44.19   -62.54   18.7   -7.67     nan     0.00     nan      nan
+    RS_quintile             107     9   -45.50   -51.98   21.5   -4.78     nan    -1.31     nan      nan
+
+====================================================================================================
+2c. IS THE SELECTION LIFT ITSELF SIGNIFICANT? (paired by session)
+====================================================================================================
+
+d_t = mean(arm net on session t) - mean(unselected net on session t).
+Paired removes the common market move entirely, so this is the cleanest
+test of 'does the selector add anything'. t is over sessions (clusters);
+t_deov averages the phase-offset sub-samples spaced h apart.
+RIGHT-WRONG = right-way RS decile minus wrong-way RS decile, the purest
+directional statistic available (both arms are extreme-RS, so anything
+common to 'extreme RS' cancels).
+
+market band        side   h arm                     sess  lift_pp       t  t_deov
+index  deep_ITM    CE     3 RS_RIGHT_minus_WRONG       0      nan     nan     nan
+index  deep_ITM    CE     3 rv_bottom_quintile        59    -0.53   -1.10   -0.69
+index  deep_ITM    CE     5 RS_RIGHT_minus_WRONG       0      nan     nan     nan
+index  deep_ITM    PE     3 RS_RIGHT_minus_WRONG       0      nan     nan     nan
+index  deep_ITM    PE     3 rv_bottom_quintile        66     0.16    1.74    1.21
+index  deep_ITM    PE     5 RS_RIGHT_minus_WRONG       0      nan     nan     nan
+index  deep_ITM    PE     5 rv_bottom_quintile        38     0.24    1.41     nan
+index  slight_ITM  CE     3 RS_RIGHT_minus_WRONG       0      nan     nan     nan
+index  slight_ITM  CE     3 rv_bottom_quintile       129    -0.43   -1.71   -0.89
+index  slight_ITM  CE     5 RS_RIGHT_minus_WRONG       0      nan     nan     nan
+index  slight_ITM  CE     5 rv_bottom_quintile        73    -1.14   -1.73   -0.88
+index  slight_ITM  PE     3 RS_RIGHT_minus_WRONG       0      nan     nan     nan
+index  slight_ITM  PE     3 rv_bottom_quintile       118     0.16    0.91    0.67
+index  slight_ITM  PE     5 RS_RIGHT_minus_WRONG       0      nan     nan     nan
+index  slight_ITM  PE     5 rv_bottom_quintile        75    -0.07   -0.38    0.26
+stock  deep_ITM    CE     3 RS_RIGHT_minus_WRONG      78     4.94    1.06    0.64
+stock  deep_ITM    CE     3 RS_decile                152     3.54    2.76    1.65
+stock  deep_ITM    CE     3 RS_quintile              152     2.37    2.83    1.78
+stock  deep_ITM    CE     3 alpha_decile              98     3.33    2.04    1.35
+stock  deep_ITM    CE     3 moverich_quintile        156     3.15    2.39    1.36
+stock  deep_ITM    CE     3 moverich_decile          129     2.16    1.15    0.70
+stock  deep_ITM    CE     3 rv_quintile              153     0.65    0.48    0.11
+stock  deep_ITM    CE     3 RS_and_moverich          142    -0.16   -0.08   -0.05
+stock  deep_ITM    CE     3 RS_decile_WRONGWAY        78    -3.49   -0.84   -0.49
+stock  deep_ITM    CE     3 rv_bottom_quintile       147     3.21    1.79    0.92
+stock  deep_ITM    CE     5 RS_RIGHT_minus_WRONG      48    -0.67   -0.08     nan
+stock  deep_ITM    CE     5 RS_decile                 81     1.64    0.74    0.37
+stock  deep_ITM    CE     5 RS_quintile               82     2.48    1.79    1.01
+stock  deep_ITM    CE     5 alpha_decile              52     1.16    0.50     nan
+stock  deep_ITM    CE     5 moverich_quintile         84     5.60    2.60    1.13
+stock  deep_ITM    CE     5 moverich_decile           67     0.67    0.19    0.08
+stock  deep_ITM    CE     5 rv_quintile               83     0.01    0.01   -0.15
+stock  deep_ITM    CE     5 RS_and_moverich           72     1.32    0.37    0.21
+stock  deep_ITM    CE     5 RS_decile_WRONGWAY        48     1.07    0.16     nan
+stock  deep_ITM    CE     5 rv_bottom_quintile        79     4.94    1.57    0.75
+stock  deep_ITM    PE     3 RS_RIGHT_minus_WRONG      53     6.00    1.12    0.60
+stock  deep_ITM    PE     3 RS_decile                152     0.49    0.37    0.29
+stock  deep_ITM    PE     3 RS_quintile              153     0.19    0.20    0.07
+stock  deep_ITM    PE     3 alpha_decile              97     3.60    2.41    1.43
+stock  deep_ITM    PE     3 moverich_quintile        141     2.00    1.50    0.80
+stock  deep_ITM    PE     3 moverich_decile          108     4.43    2.25    1.31
+stock  deep_ITM    PE     3 rv_quintile              148    -2.05   -1.52   -0.97
+stock  deep_ITM    PE     3 RS_and_moverich          124    -2.87   -1.24   -0.77
+stock  deep_ITM    PE     3 RS_decile_WRONGWAY        54    -6.54   -1.49   -0.85
+stock  deep_ITM    PE     3 rv_bottom_quintile       144    -0.38   -0.26   -0.19
+stock  deep_ITM    PE     5 RS_RIGHT_minus_WRONG      36    -0.20   -0.04     nan
+stock  deep_ITM    PE     5 RS_decile                 80    -0.74   -0.42   -0.24
+stock  deep_ITM    PE     5 RS_quintile               81    -1.45   -0.96   -0.36
+stock  deep_ITM    PE     5 alpha_decile              51     2.54    1.29     nan
+stock  deep_ITM    PE     5 moverich_quintile         74     5.37    2.06    0.92
+stock  deep_ITM    PE     5 moverich_decile           55     5.81    1.58     nan
+stock  deep_ITM    PE     5 rv_quintile               80    -3.92   -1.55   -0.68
+stock  deep_ITM    PE     5 RS_and_moverich           64     0.45    0.11   -0.05
+stock  deep_ITM    PE     5 RS_decile_WRONGWAY        37    -1.78   -0.36     nan
+stock  deep_ITM    PE     5 rv_bottom_quintile        75     1.37    0.54    0.32
+stock  slight_ITM  CE     3 RS_RIGHT_minus_WRONG     103    13.16    2.69    1.56
+stock  slight_ITM  CE     3 RS_decile                143     5.53    1.88    1.06
+stock  slight_ITM  CE     3 RS_quintile              151     6.22    3.35    1.95
+stock  slight_ITM  CE     3 alpha_decile              97    10.28    3.34    1.90
+stock  slight_ITM  CE     3 moverich_quintile        155     5.33    2.58    1.50
+stock  slight_ITM  CE     3 moverich_decile          117     5.58    2.06    1.17
+stock  slight_ITM  CE     3 rv_quintile              154    -0.23   -0.16   -0.12
+stock  slight_ITM  CE     3 RS_and_moverich          106     8.34    2.28    1.30
+stock  slight_ITM  CE     3 RS_decile_WRONGWAY       108    -7.19   -2.54   -1.65
+stock  slight_ITM  CE     3 rv_bottom_quintile       156     0.13    0.09    0.10
+stock  slight_ITM  CE     5 RS_RIGHT_minus_WRONG      60     4.86    0.69    0.48
+stock  slight_ITM  CE     5 RS_decile                 78     2.53    0.63    0.25
+stock  slight_ITM  CE     5 RS_quintile               80     5.55    2.29    1.12
+stock  slight_ITM  CE     5 alpha_decile              52     9.20    2.17     nan
+stock  slight_ITM  CE     5 moverich_quintile         84    10.74    3.23    1.44
+stock  slight_ITM  CE     5 moverich_decile           62    10.94    2.44    1.22
+stock  slight_ITM  CE     5 rv_quintile               83    -1.87   -0.77   -0.59
+stock  slight_ITM  CE     5 RS_and_moverich           60    12.68    2.28    1.04
+stock  slight_ITM  CE     5 RS_decile_WRONGWAY        63    -0.48   -0.09   -0.14
+stock  slight_ITM  CE     5 rv_bottom_quintile        84     0.02    0.01   -0.02
+stock  slight_ITM  PE     3 RS_RIGHT_minus_WRONG      78    11.53    2.50    1.49
+stock  slight_ITM  PE     3 RS_decile                140     1.71    0.79    0.46
+stock  slight_ITM  PE     3 RS_quintile              148     2.12    1.96    1.19
+stock  slight_ITM  PE     3 alpha_decile              89     6.22    1.98    1.23
+stock  slight_ITM  PE     3 moverich_quintile        153     2.17    1.24    0.71
+stock  slight_ITM  PE     3 moverich_decile          103     0.70    0.32    0.15
+stock  slight_ITM  PE     3 rv_quintile              152     0.36    0.21    0.07
+stock  slight_ITM  PE     3 RS_and_moverich           92    -0.13   -0.03   -0.22
+stock  slight_ITM  PE     3 RS_decile_WRONGWAY        89    -6.13   -1.80   -1.02
+stock  slight_ITM  PE     3 rv_bottom_quintile       157    -2.19   -1.69   -1.01
+stock  slight_ITM  PE     5 RS_RIGHT_minus_WRONG      52    -2.33   -0.37     nan
+stock  slight_ITM  PE     5 RS_decile                 78     4.41    1.32    0.54
+stock  slight_ITM  PE     5 RS_quintile               81     1.99    1.05    0.61
+stock  slight_ITM  PE     5 alpha_decile              51     6.91    1.64     nan
+stock  slight_ITM  PE     5 moverich_quintile         82     8.44    2.82    1.33
+stock  slight_ITM  PE     5 moverich_decile           59     7.92    2.04    0.81
+stock  slight_ITM  PE     5 rv_quintile               84    -1.58   -0.67   -0.58
+stock  slight_ITM  PE     5 RS_and_moverich           55     6.21    1.15     nan
+stock  slight_ITM  PE     5 RS_decile_WRONGWAY        56     6.60    1.38    0.20
+stock  slight_ITM  PE     5 rv_bottom_quintile        85     1.05    0.50    0.20
+
+LIFT grid k = 75. Bonferroni alpha = 0.00067
+  positive lifts with de-overlapped p<0.05 raw: 0
+  positive lifts surviving BH-FDR 5%          : 0
+  positive lifts surviving Bonferroni         : 0
+
+Top 12 lifts by |t_deov|:
+market       band side  h                  arm  sess      lift    t_deov        p        q
+ stock slight_ITM   CE  3          RS_quintile   151  0.062206  1.950963 0.051061 0.874144
+ stock slight_ITM   CE  3         alpha_decile    97  0.102775  1.897417 0.057773 0.874144
+ stock   deep_ITM   CE  3          RS_quintile   152  0.023745  1.782693 0.074636 0.874144
+ stock   deep_ITM   CE  3            RS_decile   152  0.035427  1.650973 0.098744 0.874144
+ stock slight_ITM   CE  3   RS_decile_WRONGWAY   108 -0.071948 -1.649283 0.099090 0.874144
+ stock slight_ITM   CE  3 RS_RIGHT_minus_WRONG   103  0.131618  1.555278 0.119880 0.874144
+ stock slight_ITM   CE  3    moverich_quintile   155  0.053340  1.503985 0.132585 0.874144
+ stock slight_ITM   PE  3 RS_RIGHT_minus_WRONG    78  0.115335  1.493163 0.135395 0.874144
+ stock slight_ITM   CE  5    moverich_quintile    84  0.107397  1.440312 0.149779 0.874144
+ stock   deep_ITM   PE  3         alpha_decile    97  0.036030  1.431166 0.152383 0.874144
+ stock   deep_ITM   CE  3    moverich_quintile   156  0.031499  1.361472 0.173365 0.874144
+ stock   deep_ITM   CE  3         alpha_decile    98  0.033278  1.349631 0.177134 0.874144
+
+====================================================================================================
+3. ARE RS-SELECTED AND MOVE-RICH NAMES THE SAME NAMES?
+====================================================================================================
+
+stock name-sessions with both selectors: 25167
+cross-sectional Spearman(RS rank, prior-month move-count rank): +0.0437
+Spearman(|RS| rank, move-count rank): +0.1104
+Spearman(rv_21 rank, move-count rank): +0.1842
+
+per-session Jaccard(RS top quintile, move-rich top quintile): mean 0.108  median 0.093  (random-overlap expectation for two 20% sets ~= 0.111)
+
+====================================================================================================
+4. DO THE SELECTORS PICK NAMES WHOSE OPTIONS ACTUALLY MOVE?
+====================================================================================================
+
+Mean |option return| (gross) — dispersion is what a long-premium trade needs.
+market band          h arm                       n  mean|ret|%
+index  deep_ITM      3 unselected              143       24.08
+index  deep_ITM      3 rv_bottom_quintile      102       20.43
+index  slight_ITM    3 unselected              300       38.33
+index  slight_ITM    3 rv_bottom_quintile      267       35.00
+index  slight_ITM    5 unselected              170       48.78
+index  slight_ITM    5 rv_bottom_quintile      155       48.54
+stock  deep_ITM      3 unselected             7543       34.71
+stock  deep_ITM      3 RS_decile              1267       33.09
+stock  deep_ITM      3 RS_quintile            2542       32.25
+stock  deep_ITM      3 alpha_decile            905       35.04
+stock  deep_ITM      3 moverich_quintile      1472       33.99
+stock  deep_ITM      3 moverich_decile         593       34.36
+stock  deep_ITM      3 rv_quintile            1598       36.16
+stock  deep_ITM      3 RS_and_moverich         526       31.18
+stock  deep_ITM      3 RS_decile_WRONGWAY      173       39.48
+stock  deep_ITM      3 rv_bottom_quintile      885       32.89
+stock  deep_ITM      5 unselected             3529       43.20
+stock  deep_ITM      5 RS_decile               618       39.37
+stock  deep_ITM      5 RS_quintile            1229       40.45
+stock  deep_ITM      5 alpha_decile            426       40.41
+stock  deep_ITM      5 moverich_quintile       707       43.69
+stock  deep_ITM      5 moverich_decile         291       41.18
+stock  deep_ITM      5 rv_quintile             789       43.52
+stock  deep_ITM      5 RS_and_moverich         262       41.31
+stock  deep_ITM      5 RS_decile_WRONGWAY      103       50.01
+stock  deep_ITM      5 rv_bottom_quintile      352       43.61
+stock  deep_ITM     10 unselected              281       64.62
+stock  deep_ITM     10 RS_quintile             115       59.14
+stock  slight_ITM    3 unselected             8558       43.27
+stock  slight_ITM    3 RS_decile               684       46.19
+stock  slight_ITM    3 RS_quintile            1601       42.71
+stock  slight_ITM    3 alpha_decile            571       46.64
+stock  slight_ITM    3 moverich_quintile      1119       46.29
+stock  slight_ITM    3 moverich_decile         523       45.64
+stock  slight_ITM    3 rv_quintile            1271       44.70
+stock  slight_ITM    3 RS_and_moverich         220       45.61
+stock  slight_ITM    3 RS_decile_WRONGWAY      421       39.86
+stock  slight_ITM    3 rv_bottom_quintile     1751       39.99
+stock  slight_ITM    5 unselected             4600       49.26
+stock  slight_ITM    5 RS_decile               411       49.56
+stock  slight_ITM    5 RS_quintile             925       48.24
+stock  slight_ITM    5 alpha_decile            339       52.40
+stock  slight_ITM    5 moverich_quintile       635       52.88
+stock  slight_ITM    5 moverich_decile         273       50.22
+stock  slight_ITM    5 rv_quintile             690       48.96
+stock  slight_ITM    5 RS_and_moverich         135       53.04
+stock  slight_ITM    5 RS_decile_WRONGWAY      252       53.04
+stock  slight_ITM    5 rv_bottom_quintile      960       48.34
+stock  slight_ITM   10 unselected              466       77.22
+stock  slight_ITM   10 RS_quintile             101       75.03
+
+====================================================================================================
+4b. WHAT ARE THE ARMS ACTUALLY SELECTING? (contract characteristics)
+====================================================================================================
+
+stock / slight_ITM / CE / h=3 cell. If an arm's lift comes from picking
+lower-IV, lower-ATR names, the 'edge' is a bleed selection, not direction.
+arm                         n      iv  atr_pct%   premium  |mny|%
+unselected               8558    0.28      2.56      79.3    1.77
+RS_decile                 684    0.31      2.90      75.4    1.85
+RS_quintile              1601    0.29      2.72      75.5    1.86
+alpha_decile              571    0.30      2.95      73.9    1.84
+moverich_quintile        1119    0.27      2.69      80.2    1.83
+moverich_decile           523    0.26      2.49      80.0    1.80
+rv_quintile              1271    0.35      3.41     102.3    1.82
+RS_and_moverich           220    0.30      3.06      82.5    1.99
+RS_decile_WRONGWAY        421    0.30      2.82     112.9    1.68
+rv_bottom_quintile       1751    0.22      1.94      92.1    1.72
+
+====================================================================================================
+5. COST SENSITIVITY — what would have to be true for anything to clear
+====================================================================================================
+
+market band        side   h arm                     net@0%    net@2%    net@5%   net@10%
+index  deep_ITM    CE     3 unselected                8.91      6.91      3.91     -1.09
+index  deep_ITM    PE     3 unselected               -0.38     -2.38     -5.38    -10.38
+index  slight_ITM  CE     3 unselected                6.99      4.99      1.99     -3.01
+index  slight_ITM  CE     5 unselected               10.28      8.28      5.28      0.28
+index  slight_ITM  PE     3 unselected               -3.55     -5.55     -8.55    -13.55
+index  slight_ITM  PE     5 unselected               -8.23    -10.23    -13.23    -18.23
+stock  deep_ITM    CE     3 unselected               -5.33     -7.33    -10.33    -15.33
+stock  deep_ITM    CE     3 RS_decile                -1.67     -3.67     -6.67    -11.67
+stock  deep_ITM    CE     3 moverich_quintile        -2.85     -4.85     -7.85    -12.85
+stock  deep_ITM    CE     5 unselected               -5.41     -7.41    -10.41    -15.41
+stock  deep_ITM    CE     5 RS_decile                -1.56     -3.56     -6.56    -11.56
+stock  deep_ITM    CE     5 moverich_quintile         0.31     -1.69     -4.69     -9.69
+stock  deep_ITM    CE    10 unselected               -5.79     -7.79    -10.79    -15.79
+stock  deep_ITM    PE     3 unselected              -10.34    -12.34    -15.34    -20.34
+stock  deep_ITM    PE     3 RS_decile                -8.62    -10.62    -13.62    -18.62
+stock  deep_ITM    PE     3 moverich_quintile        -7.49     -9.49    -12.49    -17.49
+stock  deep_ITM    PE     5 unselected              -19.50    -21.50    -24.50    -29.50
+stock  deep_ITM    PE     5 RS_decile               -18.20    -20.20    -23.20    -28.20
+stock  deep_ITM    PE     5 moverich_quintile       -14.30    -16.30    -19.30    -24.30
+stock  deep_ITM    PE    10 unselected              -38.25    -40.25    -43.25    -48.25
+stock  slight_ITM  CE     3 unselected               -4.24     -6.24     -9.24    -14.24
+stock  slight_ITM  CE     3 RS_decile                 1.25     -0.75     -3.75     -8.75
+stock  slight_ITM  CE     3 moverich_quintile         0.40     -1.60     -4.60     -9.60
+stock  slight_ITM  CE     5 unselected               -0.73     -2.73     -5.73    -10.73
+stock  slight_ITM  CE     5 RS_decile                 2.85      0.85     -2.15     -7.15
+stock  slight_ITM  CE     5 moverich_quintile        10.34      8.34      5.34      0.34
+stock  slight_ITM  CE    10 unselected               12.19     10.19      7.19      2.19
+stock  slight_ITM  PE     3 unselected               -8.78    -10.78    -13.78    -18.78
+stock  slight_ITM  PE     3 RS_decile                -5.63     -7.63    -10.63    -15.63
+stock  slight_ITM  PE     3 moverich_quintile        -5.57     -7.57    -10.57    -15.57
+stock  slight_ITM  PE     5 unselected              -19.81    -21.81    -24.81    -29.81
+stock  slight_ITM  PE     5 RS_decile               -14.19    -16.19    -19.19    -24.19
+stock  slight_ITM  PE     5 moverich_quintile       -11.43    -13.43    -16.43    -21.43
+stock  slight_ITM  PE    10 unselected              -36.19    -38.19    -41.19    -46.19
+
+====================================================================================================
+6. MULTIPLICITY over the full selection grid
+====================================================================================================
+
+grid size k = 66 selection cells (arm x market x band x side x horizon)
+Bonferroni alpha = 0.00076
+cells with de-overlapped p < 0.05 raw : 38
+cells surviving BH-FDR 5%             : 33
+cells surviving Bonferroni            : 11
+
+Ten most extreme cells by de-overlapped p (note: NET returns, so a
+significantly NEGATIVE cell is a confirmed loser, not a finding):
+market       band side  h                arm    n       net    t_deov    p_raw     q_bh
+ stock   deep_ITM   PE  3 rv_bottom_quintile  915 -0.187441 -4.238698 0.000022 0.000752
+ stock   deep_ITM   PE  3        RS_quintile 2313 -0.171288 -4.205240 0.000026 0.000752
+ stock slight_ITM   PE  3 rv_bottom_quintile 1681 -0.180950 -4.143782 0.000034 0.000752
+ stock   deep_ITM   PE  3        rv_quintile 1175 -0.189180 -4.015195 0.000059 0.000878
+ stock   deep_ITM   PE  5        RS_quintile 1135 -0.273086 -3.963932 0.000074 0.000878
+ stock   deep_ITM   PE  3          RS_decile 1174 -0.166158 -3.944925 0.000080 0.000878
+ stock   deep_ITM   PE  3 RS_decile_WRONGWAY  148 -0.350083 -3.589197 0.000332 0.002658
+ stock   deep_ITM   PE  3    RS_and_moverich  437 -0.199750 -3.583060 0.000340 0.002658
+ stock slight_ITM   PE  5 rv_bottom_quintile  953 -0.267660 -3.566014 0.000362 0.002658
+ stock   deep_ITM   PE  5          RS_decile  598 -0.262034 -3.510242 0.000448 0.002955

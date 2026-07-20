@@ -122,3 +122,5 @@ data/quarantine/
 
 # Research panels regenerable from PG (hundreds of MB)
 backend/directional_options/research/**/data/
+
+backend/directional_options/research/**/data_rs/

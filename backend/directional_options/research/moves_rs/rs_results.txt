@@ -1,0 +1,184 @@
+
+==============================================================================
+0. UNIVERSE AND COVERAGE
+==============================================================================
+names            : 209
+sessions         : 312 (2025-03-28 .. 2026-07-15)
+name-days        : 65,076
+sessions/name    : min 306 med 311 max 312
+months/name      : ~14.8
+rows usable for the primary feature at fwd_5: 59,642 over 286 sessions
+first usable session (needs 120 sessions of beta): 2025-09-23
+
+NOTE: ~16 months of stock history is ONE regime. Nothing here is a
+multi-cycle result and it must not be read as one.
+
+==============================================================================
+1. RS FORMULATIONS AND HOW MUCH THEY OVERLAP
+==============================================================================
+computed:
+  rs_ret_21    log(P/N) 21-session relative return   [PRIMARY]
+  rs_ret_63    same, 63 sessions
+  rs_slope_21  normalised OLS slope of log(P/N), 21 sessions
+  alpha_21     21-session return minus beta_120 x NIFTY return
+  beta_120     the control
+  *_rank       cross-sectional percentile of each, per session
+
+PRIMARY = rs_ret_21. Reason: the lane chooses among instruments on a
+single day, so the natural object is a same-day cross-sectional
+comparison; 21 sessions matches the monthly frame the owner asked
+about; and it is the plainest reading of 'relative strength vs NIFTY'.
+
+IMPORTANT: a per-date Spearman IC is rank-invariant, so rs_ret_21 and
+its cross-sectional percentile rs_ret_21_rank have IDENTICAL IC by
+construction. The rank form is a distinct object only for decile and
+pooled work, never for IC. Reporting them as two 'formulations' with
+two ICs would be double counting, and is not done here.
+
+mean per-session cross-sectional Spearman correlation between forms:
+  rs_ret_21    vs rs_ret_63   : +0.553
+  rs_ret_21    vs rs_slope_21 : +0.875
+  rs_ret_21    vs alpha_21    : +0.980
+  rs_ret_21    vs beta_120    : -0.013
+  alpha_21     vs beta_120    : +0.010
+  rs_slope_21  vs alpha_21    : +0.860
+
+==============================================================================
+2. IS RS JUST BETA? (the classic trap)
+==============================================================================
+(a) XS corr(RS_21, beta_120): mean -0.013  sd 0.221  [-0.51 .. +0.54]
+
+(b) does the market's own direction drive the RS IC?
+    NIFTY forward return sign vs the same-day RS IC
+    h= 3: IC | NIFTY up   -0.0379 (n=140)   IC | NIFTY down +0.0547 (n=148)   corr(IC, NIFTY fwd) -0.368
+    h= 5: IC | NIFTY up   -0.0270 (n=139)   IC | NIFTY down +0.0459 (n=147)   corr(IC, NIFTY fwd) -0.345
+    h=10: IC | NIFTY up   -0.0410 (n=139)   IC | NIFTY down +0.0583 (n=142)   corr(IC, NIFTY fwd) -0.278
+    If RS were pure beta, the IC would flip sign with the market and
+    corr(IC, NIFTY fwd) would be strongly positive.
+
+(c) beta as a standalone signal, and RS after beta is removed:
+    rs_ret_21  h= 3: IC +0.0097  t_deoverlap +0.62  p 0.537
+    alpha_21   h= 3: IC +0.0245  t_deoverlap +1.40  p 0.168
+    beta_120   h= 3: IC +0.0015  t_deoverlap +0.06  p 0.950
+    rs_ret_21  h= 5: IC +0.0105  t_deoverlap +0.52  p 0.606
+    alpha_21   h= 5: IC +0.0299  t_deoverlap +1.32  p 0.195
+    beta_120   h= 5: IC +0.0086  t_deoverlap +0.25  p 0.804
+    rs_ret_21  h=10: IC +0.0092  t_deoverlap +0.31  p 0.758
+    alpha_21   h=10: IC +0.0377  t_deoverlap +1.11  p 0.283
+    beta_120   h=10: IC +0.0164  t_deoverlap +0.33  p 0.742
+    Verdict logic: if alpha_21 (beta-stripped) keeps whatever IC
+    rs_ret_21 has, RS is NOT just beta. If beta_120 alone carries the
+    same IC, it IS.
+
+(d) Fama-MacBeth: fwd ~ z(RS_21) + z(beta_120), per session
+    h= 3: RS  coef +0.039%/sd  t +0.67  p 0.508   |   beta coef +0.036%/sd  t +0.47  p 0.641
+    h= 5: RS  coef +0.080%/sd  t +0.82  p 0.416   |   beta coef +0.067%/sd  t +0.49  p 0.631
+    h=10: RS  coef +0.160%/sd  t +0.81  p 0.428   |   beta coef +0.158%/sd  t +0.54  p 0.594
+
+(e) period-matched check: alpha_21 needs 120 sessions of beta burn-in,
+    so it is measured on a LATER, SHORTER sample than rs_ret_21. Any
+    apparent alpha advantage could be the period, not the feature.
+    Re-running rs_ret_21 on alpha_21's exact date sample:
+    h= 3: alpha_21 IC +0.0245 (t +1.40)   rs_ret_21 on SAME dates IC +0.0161 (t +0.83)
+    h= 5: alpha_21 IC +0.0299 (t +1.32)   rs_ret_21 on SAME dates IC +0.0167 (t +0.67)
+    h=10: alpha_21 IC +0.0377 (t +1.11)   rs_ret_21 on SAME dates IC +0.0158 (t +0.44)
+
+==============================================================================
+3. CROSS-SECTIONAL IC BY HORIZON
+==============================================================================
+feature        h  n_dates   meanIC   raw t  deov t   worst    NW t  p_deov  IC>0%
+rs_ret_21      3      288  +0.0097   +1.08   +0.62   +0.26   +0.75   0.537  55.6%
+rs_ret_21      5      286  +0.0105   +1.17   +0.52   +0.43   +0.66   0.606  54.2%
+rs_ret_21     10      281  +0.0092   +1.01   +0.31   -0.03   +0.42   0.758  52.3%
+rs_ret_63      3      246  +0.0173   +1.64   +0.94   +0.79   +1.11   0.348  51.2%
+rs_ret_63      5      244  +0.0203   +1.87   +0.84   +0.65   +1.00   0.407  55.7%
+rs_ret_63     10      239  +0.0205   +1.88   +0.58   +0.44   +0.76   0.567  60.7%
+rs_slope_21    3      289  +0.0141   +1.65   +0.95   +0.75   +1.14   0.342  57.1%
+rs_slope_21    5      287  +0.0161   +1.90   +0.85   +0.70   +1.06   0.400  55.4%
+rs_slope_21   10      282  +0.0112   +1.32   +0.42   -0.04   +0.55   0.677  55.7%
+alpha_21       3      189  +0.0245   +2.43   +1.40   +0.94   +1.71   0.168  57.1%
+alpha_21       5      187  +0.0300   +2.97   +1.32   +0.85   +1.70   0.195  58.8%
+alpha_21      10      182  +0.0377   +3.57   +1.11   +0.71   +1.47   0.283  63.2%
+beta_120       3      189  +0.0015   +0.10   +0.06   -0.13   +0.07   0.950  49.2%
+beta_120       5      187  +0.0086   +0.56   +0.25   +0.14   +0.30   0.804  49.2%
+beta_120      10      182  +0.0165   +1.06   +0.33   +0.11   +0.41   0.742  49.5%
+
+==============================================================================
+4. DECILE MONOTONICITY (primary feature, XS-demeaned forward return)
+==============================================================================
+h= 3  D0:+0.07%  D1:-0.02%  D2:-0.02%  D3:-0.03%  D4:-0.06%  D5:-0.04%  D6:-0.03%  D7:+0.00%  D8:-0.00%  D9:+0.14%
+      monotonicity rho(decile, mean) = +0.224   D10-D1 +0.077%  t_deov +0.45  p 0.654
+h= 5  D0:+0.09%  D1:-0.03%  D2:-0.01%  D3:-0.09%  D4:-0.10%  D5:-0.05%  D6:-0.07%  D7:+0.02%  D8:-0.02%  D9:+0.24%
+      monotonicity rho(decile, mean) = +0.164   D10-D1 +0.149%  t_deov +0.50  p 0.618
+h=10  D0:+0.11%  D1:-0.04%  D2:+0.02%  D3:-0.12%  D4:-0.15%  D5:-0.05%  D6:-0.07%  D7:-0.07%  D8:-0.09%  D9:+0.46%
+      monotonicity rho(decile, mean) = -0.139   D10-D1 +0.359%  t_deov +0.59  p 0.557
+
+==============================================================================
+5. ERA STABILITY (primary feature; 4 equal-length eras)
+==============================================================================
+   h= 3:  E1[2025-03-28] IC -0.008 t -0.23  E2[2025-07-23] IC +0.013 t +0.49  E3[2025-11-18] IC +0.037 t +1.11  E4[2026-03-11] IC -0.009 t -0.30
+   h= 5:  E1[2025-03-28] IC -0.005 t -0.09  E2[2025-07-23] IC +0.018 t +0.57  E3[2025-11-18] IC +0.043 t +0.93  E4[2026-03-11] IC -0.020 t -0.48
+   h=10:  E1[2025-03-28] IC -0.010 t -0.17  E2[2025-07-23] IC +0.034 t +0.70  E3[2025-11-18] IC +0.032 t +0.45  E4[2026-03-11] IC -0.034 t -0.83
+
+==============================================================================
+6. DIRECTION ASYMMETRY — high-RS (CE leg) vs low-RS (PE leg)
+==============================================================================
+raw = actual forward move (what an option would see, before costs).
+xs  = the same, cross-sectionally demeaned (pure selection value).
+h= 3 CE / high-RS D10: n   6037  raw +0.31%  xs +0.144% (t_deov +1.27, p 0.207)  win 52.7%  MFE +2.99%  MAE -2.54%   [universe mean +0.16%]
+h= 3 PE / low-RS  D1: n   6037  raw -0.23%  xs -0.068% (t_deov -0.67, p 0.502)  win 50.3%  MFE +2.46%  MAE -2.78%   [universe mean +0.16%]
+h= 5 CE / high-RS D10: n   5995  raw +0.52%  xs +0.243% (t_deov +1.30, p 0.198)  win 53.3%  MFE +3.97%  MAE -3.30%   [universe mean +0.28%]
+h= 5 PE / low-RS  D1: n   5995  raw -0.38%  xs -0.095% (t_deov -0.56, p 0.579)  win 49.8%  MFE +3.24%  MAE -3.68%   [universe mean +0.28%]
+h=10 CE / high-RS D10: n   5890  raw +0.96%  xs +0.461% (t_deov +1.30, p 0.204)  win 54.0%  MFE +5.84%  MAE -4.65%   [universe mean +0.50%]
+h=10 PE / low-RS  D1: n   5890  raw -0.61%  xs -0.107% (t_deov -0.26, p 0.794)  win 48.6%  MFE +4.55%  MAE -5.27%   [universe mean +0.50%]
+
+==============================================================================
+7. DOES RS SELECT INSTRUMENTS THAT MOVE MORE? (spot excursion)
+==============================================================================
+fwd_exc_h = max(|max-high move|, |min-low move|) over t+1..t+h — the
+excursion a long-premium trade needs in order to pay for theta.
+  h= 3 IC(rs_ret_21  -> fwd excursion) +0.0295  t_deov +2.06  p 0.042
+  h= 3 IC(absrs_21   -> fwd excursion) +0.1101  t_deov +12.21  p 0.000
+  h= 5 IC(rs_ret_21  -> fwd excursion) +0.0308  t_deov +1.72  p 0.091
+  h= 5 IC(absrs_21   -> fwd excursion) +0.1153  t_deov +9.80  p 0.000
+  h=10 IC(rs_ret_21  -> fwd excursion) +0.0418  t_deov +1.59  p 0.123
+  h=10 IC(absrs_21   -> fwd excursion) +0.1186  t_deov +7.32  p 0.000
+
+  ADVERSARIAL CONTROL: is |RS| just trailing volatility in disguise?
+  rv_21 = trailing 21-session realised vol of daily returns (causal).
+  h= 3 IC(rv_21     -> fwd excursion) +0.3109  t_deov +28.71  p 0.000
+  h= 5 IC(rv_21     -> fwd excursion) +0.3146  t_deov +22.65  p 0.000
+  h=10 IC(rv_21     -> fwd excursion) +0.3206  t_deov +16.73  p 0.000
+  h= 3 IC(|RS|/rv_21 -> fwd excursion) +0.0077  t_deov +0.87  p 0.386   <- |RS| with the vol component divided out
+  h= 5 IC(|RS|/rv_21 -> fwd excursion) +0.0113  t_deov +0.96  p 0.342   <- |RS| with the vol component divided out
+  h=10 IC(|RS|/rv_21 -> fwd excursion) +0.0115  t_deov +0.68  p 0.499   <- |RS| with the vol component divided out
+
+  Fama-MacBeth on ranks: fwd_exc ~ z(rank|RS|) + z(rank rv_21)
+  h= 3: |RS| coef +0.087%/sd t +3.87 p 0.000   |   rv_21 coef +0.660%/sd t +21.01 p 0.000
+  h= 5: |RS| coef +0.118%/sd t +3.18 p 0.002   |   rv_21 coef +0.829%/sd t +16.45 p 0.000
+  h=10: |RS| coef +0.159%/sd t +2.22 p 0.035   |   rv_21 coef +1.154%/sd t +11.52 p 0.000
+  h=5 mean forward excursion by RS decile: D0:5.83%  D1:5.26%  D2:5.09%  D3:5.07%  D4:5.09%  D5:5.14%  D6:5.26%  D7:5.32%  D8:5.53%  D9:6.14%
+
+==============================================================================
+8. MULTIPLICITY OVER THE FULL IC GRID
+==============================================================================
+grid size = 15 tests (5 features x 3 horizons); Bonferroni alpha = 0.0033
+    feature  h      ic       t       p  p_bonf    q_bh
+   alpha_21  3 +0.0245   +1.40 +0.1676   +1.00 +0.8616
+   alpha_21  5 +0.0300   +1.32 +0.1946   +1.00 +0.8616
+   alpha_21 10 +0.0377   +1.11 +0.2828   +1.00 +0.8616
+rs_slope_21  3 +0.0141 +0.9541 +0.3424   +1.00 +0.8616
+  rs_ret_63  3 +0.0173 +0.9440 +0.3480   +1.00 +0.8616
+rs_slope_21  5 +0.0161 +0.8482 +0.3999   +1.00 +0.8616
+  rs_ret_63  5 +0.0203 +0.8367 +0.4069   +1.00 +0.8616
+  rs_ret_21  3 +0.0097 +0.6197 +0.5369   +1.00 +0.8616
+  rs_ret_63 10 +0.0205 +0.5805 +0.5672   +1.00 +0.8616
+  rs_ret_21  5 +0.0105 +0.5181 +0.6064   +1.00 +0.8616
+rs_slope_21 10 +0.0112 +0.4217 +0.6765   +1.00 +0.8616
+   beta_120 10 +0.0165 +0.3350 +0.7417   +1.00 +0.8616
+  rs_ret_21 10 +0.0092 +0.3111 +0.7581   +1.00 +0.8616
+   beta_120  5 +0.0086 +0.2498 +0.8041   +1.00 +0.8616
+   beta_120  3 +0.0015 +0.0635 +0.9496   +1.00 +0.9496
+
+surviving BH-FDR 5%: 0 / 15
+surviving Bonferroni : 0 / 15
