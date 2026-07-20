@@ -1,0 +1,161 @@
+==============================================================================
+VERIFICATION — pyramid economics on the REPAIRED option tape
+==============================================================================
+rows 9423   episodes 2824   underlyings 206
+
+[4a] EPISODE CLUSTERING — is one row really one episode?
+  deep_itm pyramid signal rows=346 distinct (underlying,entry_time,side)=346  -> duplicates: 0
+  episodes per underlying: median 2  max 6 (AUBANK)  n_underlyings 162
+  calendar gap between consecutive episodes of the SAME name: min 3d  p10 18d  median 76d
+  -> clustering by underlying (not by row) is therefore the right unit; 7.1% of consecutive episodes overlap a 10-session hold.
+
+[3] HEADLINE — mean return on ALLOCATED capital (Rs 75k), base cost
+band        arm         family           n   SHIPPED  REPAIRED              95% CI       p     lag1      liq
+deep_itm    pyramid     s1_primary     346   -0.0437   -0.0277 [-0.0443,-0.0103]  0.0025  -0.0303  -0.0281
+deep_itm    pyramid     ctrl_long      291   -0.0194   -0.0089 [-0.0291,+0.0113]  0.3805  -0.0133  -0.0086
+deep_itm    pyramid     ctrl_short     235   -0.0669   -0.0529 [-0.0765,-0.0243]  0.0010  -0.0543  -0.0530
+deep_itm    pyramid     ctrl_random    104   -0.0366   -0.0299 [-0.0636,+0.0062]  0.0960  -0.0222  -0.0313
+deep_itm    fixed_t1    s1_primary     430   -0.0819   +0.0036 [-0.0332,+0.0418]  0.8605  -0.0012  +0.0016
+deep_itm    fixed_t1    ctrl_long      340   -0.0488   -0.0066 [-0.0499,+0.0367]  0.7540  -0.0202  -0.0061
+deep_itm    fixed_t1    ctrl_short     262   -0.1348   -0.0747 [-0.1333,-0.0117]  0.0170  -0.0844  -0.0761
+deep_itm    fixed_t1    ctrl_random    119   -0.0697   -0.0331 [-0.1158,+0.0574]  0.4415  -0.0206  -0.0390
+deep_itm    fixed_hold  s1_primary     430   -0.1255   -0.0055 [-0.0561,+0.0460]  0.8300  -0.0172  -0.0093
+deep_itm    fixed_hold  ctrl_long      340   -0.1078   -0.0380 [-0.0999,+0.0285]  0.2385  -0.0527  -0.0381
+deep_itm    fixed_hold  ctrl_short     262   -0.1520   -0.0596 [-0.1377,+0.0234]  0.1710  -0.0774  -0.0666
+deep_itm    fixed_hold  ctrl_random    119   -0.1283   -0.0745 [-0.1713,+0.0403]  0.1740  -0.0713  -0.0860
+deep_itm    s2_only     s1_primary     133   -0.1311   -0.0334 [-0.1224,+0.0662]  0.4820  -0.0432  -0.0447
+deep_itm    s2_only     ctrl_long       76   -0.1133   -0.0265 [-0.1384,+0.0958]  0.6635  -0.0253  -0.0301
+deep_itm    s2_only     ctrl_short      49   -0.0859   +0.0563 [-0.1293,+0.2646]  0.5975  +0.0635  +0.0488
+deep_itm    s2_only     ctrl_random     27   -0.0397   +0.0257 [-0.1621,+0.2210]  0.8155  +0.0287  +0.0238
+slight_itm  pyramid     s1_primary     624   -0.0385   -0.0308 [-0.0466,-0.0137]  0.0015  -0.0315  -0.0309
+slight_itm  pyramid     ctrl_long      489   -0.0272   -0.0210 [-0.0392,-0.0015]  0.0320  -0.0211  -0.0207
+slight_itm  pyramid     ctrl_short     463   -0.0392   -0.0285 [-0.0554,+0.0021]  0.0625  -0.0306  -0.0284
+slight_itm  pyramid     ctrl_random    204   -0.0205   -0.0159 [-0.0446,+0.0140]  0.2910  -0.0148  -0.0186
+slight_itm  fixed_t1    s1_primary     711   -0.0677   -0.0303 [-0.0761,+0.0177]  0.2050  -0.0427  -0.0281
+slight_itm  fixed_t1    ctrl_long      534   -0.0336   -0.0051 [-0.0489,+0.0413]  0.8235  -0.0054  -0.0044
+slight_itm  fixed_t1    ctrl_short     494   -0.1055   -0.0830 [-0.1376,-0.0290]  0.0010  -0.0927  -0.0828
+slight_itm  fixed_t1    ctrl_random    218   -0.0311   +0.0128 [-0.0729,+0.1059]  0.7615  +0.0163  +0.0098
+slight_itm  fixed_hold  s1_primary     711   -0.0962   -0.0221 [-0.0748,+0.0345]  0.4300  -0.0423  -0.0207
+slight_itm  fixed_hold  ctrl_long      534   -0.1608   -0.0923 [-0.1548,-0.0287]  0.0040  -0.0859  -0.0931
+slight_itm  fixed_hold  ctrl_short     494   -0.1066   -0.0613 [-0.1269,+0.0063]  0.0795  -0.0628  -0.0647
+slight_itm  fixed_hold  ctrl_random    218   -0.0967   -0.0112 [-0.1166,+0.1057]  0.8305  -0.0155  -0.0177
+slight_itm  s2_only     s1_primary      72   -0.1740   -0.1188 [-0.2518,+0.0338]  0.1140  -0.1142  -0.1245
+slight_itm  s2_only     ctrl_long       41   -0.1454   -0.0451 [-0.2473,+0.1822]  0.6460  +0.0309  -0.0538
+slight_itm  s2_only     ctrl_short      37   -0.0034   +0.1313 [-0.1829,+0.4926]  0.4965  +0.1077  +0.1241
+
+[3b] SIGNAL vs MATCHED CONTROL (repaired tape, episode-clustered)
+band        arm         vs                diff              95% CI       p
+deep_itm    pyramid     ctrl_long      -0.0188 [-0.0434,+0.0065]  0.1390
+deep_itm    pyramid     ctrl_short     +0.0251 [-0.0072,+0.0534]  0.1270
+deep_itm    pyramid     ctrl_random    +0.0022 [-0.0364,+0.0403]  0.9240
+deep_itm    fixed_t1    ctrl_long      +0.0102 [-0.0443,+0.0667]  0.7130
+deep_itm    fixed_t1    ctrl_short     +0.0783 [+0.0104,+0.1422]  0.0245
+deep_itm    fixed_t1    ctrl_random    +0.0367 [-0.0603,+0.1281]  0.4410
+deep_itm    fixed_hold  ctrl_long      +0.0325 [-0.0465,+0.1062]  0.3950
+deep_itm    fixed_hold  ctrl_short     +0.0541 [-0.0361,+0.1419]  0.2405
+deep_itm    fixed_hold  ctrl_random    +0.0690 [-0.0576,+0.1845]  0.2665
+deep_itm    s2_only     ctrl_long      -0.0070 [-0.1471,+0.1351]  0.9540
+deep_itm    s2_only     ctrl_short     -0.0897 [-0.2958,+0.0995]  0.3825
+deep_itm    s2_only     ctrl_random    -0.0591 [-0.2695,+0.1471]  0.5900
+slight_itm  pyramid     ctrl_long      -0.0098 [-0.0303,+0.0106]  0.3600
+slight_itm  pyramid     ctrl_short     -0.0023 [-0.0356,+0.0276]  0.9075
+slight_itm  pyramid     ctrl_random    -0.0149 [-0.0477,+0.0160]  0.3845
+slight_itm  fixed_t1    ctrl_long      -0.0253 [-0.0831,+0.0316]  0.3860
+slight_itm  fixed_t1    ctrl_short     +0.0527 [-0.0145,+0.1207]  0.1385
+slight_itm  fixed_t1    ctrl_random    -0.0431 [-0.1363,+0.0446]  0.3365
+slight_itm  fixed_hold  ctrl_long      +0.0702 [-0.0102,+0.1458]  0.0865
+slight_itm  fixed_hold  ctrl_short     +0.0392 [-0.0471,+0.1243]  0.3635
+slight_itm  fixed_hold  ctrl_random    -0.0109 [-0.1409,+0.1147]  0.8900
+slight_itm  s2_only     ctrl_long      -0.0737 [-0.2832,+0.1148]  0.4770
+slight_itm  s2_only     ctrl_short     -0.2501 [-0.6011,+0.0700]  0.1425
+
+[3c] PYRAMID vs FIXED SIZING on the same signal (does the schedule help?)
+  deep_itm    pyramid - fixed_t1      -0.0313 [-0.0601,-0.0034] p=0.0280
+  deep_itm    pyramid - fixed_hold    -0.0222 [-0.0672,+0.0224] p=0.3525
+  deep_itm    pyramid - s2_only       +0.0057 [-0.0893,+0.0932] p=0.8520
+  slight_itm  pyramid - fixed_t1      -0.0005 [-0.0413,+0.0345] p=0.9680
+  slight_itm  pyramid - fixed_hold    -0.0087 [-0.0584,+0.0397] p=0.7360
+  slight_itm  pyramid - s2_only       +0.0880 [-0.0533,+0.2139] p=0.2065
+
+[4b] MULTIPLICITY — K = 60 comparisons reported above.
+     Bonferroni threshold alpha=0.05 -> raw p must be < 0.00083
+     comparisons surviving BH q<0.05: 5
+      kind       band        arm         fam   n     est      p  bonf      q
+   vs_zero   deep_itm    pyramid  ctrl_short 235 -0.0529 0.0010  0.06 0.0300
+   vs_zero slight_itm   fixed_t1  ctrl_short 494 -0.0830 0.0010  0.06 0.0300
+   vs_zero slight_itm    pyramid  s1_primary 624 -0.0308 0.0015  0.09 0.0300
+   vs_zero   deep_itm    pyramid  s1_primary 346 -0.0277 0.0025  0.15 0.0375
+   vs_zero slight_itm fixed_hold   ctrl_long 534 -0.0923 0.0040  0.24 0.0480
+   vs_zero   deep_itm   fixed_t1  ctrl_short 262 -0.0747 0.0170  1.00 0.1700
+   vs_ctrl   deep_itm   fixed_t1  ctrl_short 430  0.0783 0.0245  1.00 0.2100
+arm_vs_arm   deep_itm    pyramid    fixed_t1 346 -0.0313 0.0280  1.00 0.2100
+   vs_zero slight_itm    pyramid   ctrl_long 489 -0.0210 0.0320  1.00 0.2133
+   vs_zero slight_itm    pyramid  ctrl_short 463 -0.0285 0.0625  1.00 0.3750
+   vs_zero slight_itm fixed_hold  ctrl_short 494 -0.0613 0.0795  1.00 0.4325
+   vs_ctrl slight_itm fixed_hold   ctrl_long 711  0.0702 0.0865  1.00 0.4325
+   vs_zero   deep_itm    pyramid ctrl_random 104 -0.0299 0.0960  1.00 0.4431
+   vs_zero slight_itm    s2_only  s1_primary  72 -0.1188 0.1140  1.00 0.4750
+   vs_ctrl   deep_itm    pyramid  ctrl_short 346  0.0251 0.1270  1.00 0.4750
+   vs_ctrl slight_itm   fixed_t1  ctrl_short 711  0.0527 0.1385  1.00 0.4750
+   vs_ctrl   deep_itm    pyramid   ctrl_long 346 -0.0188 0.1390  1.00 0.4750
+   vs_ctrl slight_itm    s2_only  ctrl_short  72 -0.2501 0.1425  1.00 0.4750
+
+     of those, the ones that are SIGNAL-BEATS-CONTROL (the only kind that could justify wiring):
+     NONE
+
+[5a] HEADLINE WITHOUT THE TOP-3 EPISODES (repaired tape)
+band        arm         fam              n       all   ex-top3  ex-top5%  winrate  top5%share
+deep_itm    pyramid     s1_primary     346   -0.0277   -0.0354   -0.0510    0.353       0.436
+deep_itm    pyramid     ctrl_long      291   -0.0089   -0.0191   -0.0377    0.381       0.461
+deep_itm    fixed_t1    s1_primary     430   +0.0036   -0.0083   -0.0615    0.398       0.357
+deep_itm    fixed_t1    ctrl_long      340   -0.0066   -0.0233   -0.0696    0.391       0.361
+slight_itm  pyramid     s1_primary     624   -0.0308   -0.0388   -0.0614    0.349       0.486
+slight_itm  pyramid     ctrl_long      489   -0.0210   -0.0272   -0.0463    0.378       0.375
+slight_itm  fixed_t1    s1_primary     711   -0.0303   -0.0511   -0.1229    0.368       0.444
+slight_itm  fixed_t1    ctrl_long      534   -0.0051   -0.0200   -0.0878    0.401       0.369
+
+[5b] PER NON-OVERLAPPING QUARTER (repaired, mean roc, n in brackets)
+
+  deep_itm / pyramid
+    2025Q1  signal     n/a [  0]   ctrl_long +0.1494 [  1]   ctrl_short     n/a
+    2025Q2  signal -0.0266 [ 65]   ctrl_long -0.0467 [ 52]   ctrl_short -0.0786
+    2025Q3  signal -0.0237 [116]   ctrl_long +0.0012 [105]   ctrl_short -0.0647
+    2025Q4  signal -0.0357 [ 65]   ctrl_long -0.0011 [ 61]   ctrl_short -0.0596
+    2026Q1  signal +0.0137 [ 45]   ctrl_long -0.0387 [ 35]   ctrl_short +0.0825
+    2026Q2  signal -0.0621 [ 55]   ctrl_long +0.0265 [ 37]   ctrl_short -0.0599
+    -> signal positive in 1 of 5 quarters
+
+  deep_itm / fixed_t1
+    2025Q1  signal     n/a [  0]   ctrl_long +0.4483 [  1]   ctrl_short     n/a
+    2025Q2  signal -0.0113 [ 71]   ctrl_long -0.0803 [ 63]   ctrl_short -0.1998
+    2025Q3  signal +0.0211 [144]   ctrl_long +0.0005 [119]   ctrl_short -0.0676
+    2025Q4  signal -0.0128 [ 88]   ctrl_long +0.0404 [ 74]   ctrl_short -0.1150
+    2026Q1  signal +0.0622 [ 60]   ctrl_long -0.0842 [ 40]   ctrl_short +0.3999
+    2026Q2  signal -0.0494 [ 67]   ctrl_long +0.0622 [ 43]   ctrl_short -0.1642
+    -> signal positive in 2 of 5 quarters
+
+  slight_itm / pyramid
+    2025Q1  signal     n/a [  0]   ctrl_long +0.2236 [  1]   ctrl_short +0.4439
+    2025Q2  signal -0.0499 [132]   ctrl_long -0.0577 [101]   ctrl_short -0.0511
+    2025Q3  signal -0.0197 [195]   ctrl_long -0.0041 [143]   ctrl_short -0.0269
+    2025Q4  signal -0.0479 [149]   ctrl_long -0.0092 [133]   ctrl_short -0.0651
+    2026Q1  signal -0.0316 [ 76]   ctrl_long -0.0722 [ 51]   ctrl_short +0.2324
+    2026Q2  signal +0.0103 [ 72]   ctrl_long +0.0136 [ 59]   ctrl_short -0.0938
+    2026Q3  signal     n/a [  0]   ctrl_long +0.0230 [  1]   ctrl_short     n/a
+    -> signal positive in 1 of 5 quarters
+
+  slight_itm / fixed_t1
+    2025Q1  signal     n/a [  0]   ctrl_long +0.6709 [  1]   ctrl_short +1.3318
+    2025Q2  signal -0.0472 [147]   ctrl_long -0.1079 [110]   ctrl_short -0.1385
+    2025Q3  signal -0.0231 [216]   ctrl_long +0.0513 [150]   ctrl_short -0.0830
+    2025Q4  signal -0.0924 [171]   ctrl_long +0.0096 [147]   ctrl_short -0.1463
+    2026Q1  signal -0.0197 [ 88]   ctrl_long -0.1427 [ 53]   ctrl_short +0.4390
+    2026Q2  signal +0.0887 [ 89]   ctrl_long +0.0955 [ 72]   ctrl_short -0.2812
+    2026Q3  signal     n/a [  0]   ctrl_long +0.0691 [  1]   ctrl_short     n/a
+    -> signal positive in 1 of 5 quarters
+
+[3d] COSTS MATERIALLY APPLIED?
+  deep_itm    pyramid     premium turnover Rs 10,650,000   cost Rs 170,400  = 1.60% of turnover, 31.0% of |gross P&L| (gross -549,472 -> net -719,872)
+  deep_itm    fixed_t1    premium turnover Rs 32,250,000   cost Rs 516,000  = 1.60% of turnover, 81.8% of |gross P&L| (gross +630,699 -> net +114,699)
+  slight_itm  pyramid     premium turnover Rs 17,000,000   cost Rs 272,000  = 1.60% of turnover, 23.3% of |gross P&L| (gross -1,169,643 -> net -1,441,643)
+  slight_itm  fixed_t1    premium turnover Rs 53,325,000   cost Rs 853,200  = 1.60% of turnover, 111.6% of |gross P&L| (gross -764,604 -> net -1,617,804)

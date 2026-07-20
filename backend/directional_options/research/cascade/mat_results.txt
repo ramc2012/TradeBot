@@ -1,0 +1,167 @@
+==============================================================================
+(3) SATURATION / MATURITY — how much of a move is captured, causally
+==============================================================================
+horizon 20 sessions, hard stop -1.0 ATR, daily signal fired at close of s -> executed at OPEN of s+1
+episodes measured: 19202  families: ['ctrl_long', 'ctrl_random', 'ctrl_short', 's1_primary']
+
+------------------------------------------------------------------------------
+ALL stage-1 episodes   n=5323   mean MFE 1.803 ATR  median 1.015  stopped 74.7%
+exit rule           capture  mean ATR  med ATR  fired%  med lag
+adx_roll             -0.014    -0.025   -1.000     35%       20
+atr_contract         -0.020    -0.036   -1.000     25%       20
+macd_fade            -0.020    -0.036   -1.000     91%        9
+ma_ext               -0.009    -0.016   -1.000     21%       20
+range_compress        0.008     0.014   -0.175    100%        3
+state_off            -0.012    -0.022   -1.000     39%       20
+fix_3                 0.022     0.040   -0.093       -        -
+fix_5                 0.012     0.022   -0.420       -        -
+fix_10               -0.008    -0.014   -1.000       -        -
+oracle_mfe            1.000     1.803    1.015       -        -
+hold_full            -0.017    -0.031   -1.000       -        -
+
+------------------------------------------------------------------------------
+stage-1 that reached +2 ATR MFE (EX-POST subset)   n=1700   mean MFE 4.215 ATR  median 3.571  stopped 26.8%
+exit rule           capture  mean ATR  med ATR  fired%  med lag
+adx_roll              0.428     1.806    1.497     41%       20
+atr_contract          0.456     1.923    1.857     29%       20
+macd_fade             0.397     1.675    1.256     96%       11
+ma_ext                0.460     1.939    2.152     45%       20
+range_compress        0.237     0.997    0.635    100%        4
+state_off             0.445     1.874    1.508     67%       17
+fix_3                 0.238     1.004    0.846       -        -
+fix_5                 0.322     1.355    1.228       -        -
+fix_10                0.414     1.746    1.601       -        -
+oracle_mfe            1.000     4.215    3.571       -        -
+hold_full             0.460     1.939    1.818       -        -
+
+------------------------------------------------------------------------------
+matched control_long   n=5599   mean MFE 1.892 ATR  median 1.033  stopped 71.9%
+exit rule           capture  mean ATR  med ATR  fired%  med lag
+adx_roll              0.031     0.059   -1.000     38%       20
+atr_contract          0.023     0.043   -1.000     24%       20
+macd_fade             0.031     0.058   -1.000     74%       13
+ma_ext                0.038     0.072   -1.000     17%       20
+range_compress        0.032     0.060   -0.089    100%        3
+state_off             0.028     0.053   -1.000     28%       20
+fix_3                 0.034     0.065   -0.017       -        -
+fix_5                 0.038     0.072   -0.278       -        -
+fix_10                0.042     0.079   -1.000       -        -
+oracle_mfe            1.000     1.892    1.033       -        -
+hold_full             0.030     0.057   -1.000       -        -
+
+------------------------------------------------------------------------------
+matched control_random   n=2544   mean MFE 1.701 ATR  median 0.937  stopped 74.8%
+exit rule           capture  mean ATR  med ATR  fired%  med lag
+adx_roll             -0.033    -0.055   -1.000     39%       20
+atr_contract         -0.031    -0.053   -1.000     28%       20
+macd_fade            -0.023    -0.039   -1.000     76%       13
+ma_ext               -0.023    -0.040   -1.000     15%       20
+range_compress       -0.010    -0.017   -0.152    100%        3
+state_off            -0.028    -0.048   -1.000     26%       20
+fix_3                -0.009    -0.015   -0.107       -        -
+fix_5                -0.014    -0.024   -0.540       -        -
+fix_10               -0.013    -0.022   -1.000       -        -
+oracle_mfe            1.000     1.701    0.937       -        -
+hold_full            -0.028    -0.048   -1.000       -        -
+
+------------------------------------------------------------------------------
+BY MARKET (stage-1 episodes)
+  index  n=175  meanMFE 2.099
+    adx_roll          capture  -0.022  mean  -0.047
+    atr_contract      capture   0.020  mean   0.042
+    macd_fade         capture   0.049  mean   0.103
+    ma_ext            capture   0.054  mean   0.114
+    range_compress    capture   0.069  mean   0.144
+    state_off         capture   0.022  mean   0.047
+    fix_3             capture   0.129  mean   0.271
+    fix_5             capture   0.072  mean   0.151
+    fix_10            capture   0.024  mean   0.050
+    oracle_mfe        capture   1.000  mean   2.099
+    hold_full         capture   0.028  mean   0.058
+  stock  n=5148  meanMFE 1.793
+    adx_roll          capture  -0.013  mean  -0.024
+    atr_contract      capture  -0.021  mean  -0.038
+    macd_fade         capture  -0.023  mean  -0.040
+    ma_ext            capture  -0.011  mean  -0.020
+    range_compress    capture   0.005  mean   0.009
+    state_off         capture  -0.014  mean  -0.025
+    fix_3             capture   0.018  mean   0.032
+    fix_5             capture   0.010  mean   0.018
+    fix_10            capture  -0.009  mean  -0.017
+    oracle_mfe        capture   1.000  mean   1.793
+    hold_full         capture  -0.019  mean  -0.034
+
+------------------------------------------------------------------------------
+IS MATURITY DETECTABLE IN TIME TO ACT?  (stage-1 episodes that reached
++2 ATR MFE — the ex-post 'a move happened' population)
+  n=1700   median session of the MFE peak = 13  (mean 12.2)
+  rule              fired%  medFireSess  late vs peak   %late
+  adx_roll             41%           13           5.0     63%
+  atr_contract         29%           13           4.0     69%
+  macd_fade            96%           11           2.0     54%
+  ma_ext               45%            6          -5.0     13%
+  range_compress      100%            4          -8.0     16%
+  state_off            67%           13           3.0     67%
+
+PAIRED comparison against the two benchmarks that need beating, episode-clustered
+(cluster bootstrap by underlying, 2000 draws; BH across the whole block)
+  scope       rule            vs              diffATR              95% CI       p       q
+  all_s1      adx_roll        x_hold_full       0.006  [ -0.013,  0.026]  0.5105  0.6544
+  all_s1      atr_contract    x_hold_full      -0.005  [ -0.022,  0.011]  0.5635  0.6544
+  all_s1      macd_fade       x_hold_full      -0.005  [ -0.041,  0.030]  0.7955  0.8678
+  all_s1      ma_ext          x_hold_full       0.015  [ -0.015,  0.047]  0.3185  0.4410
+  all_s1      range_compress  x_hold_full       0.045  [  0.001,  0.089]  0.0470  0.0846
+  all_s1      state_off       x_hold_full       0.009  [ -0.018,  0.034]  0.5060  0.6544
+  all_s1      adx_roll        x_fix_10         -0.010  [ -0.043,  0.025]  0.5610  0.6544
+  all_s1      atr_contract    x_fix_10         -0.021  [ -0.052,  0.012]  0.1780  0.2670
+  all_s1      macd_fade       x_fix_10         -0.021  [ -0.042,  0.000]  0.0500  0.0857
+  all_s1      ma_ext          x_fix_10         -0.001  [ -0.032,  0.031]  0.9405  0.9674
+  all_s1      range_compress  x_fix_10          0.028  [ -0.001,  0.056]  0.0530  0.0867
+  all_s1      state_off       x_fix_10         -0.008  [ -0.037,  0.023]  0.6085  0.6846
+  all_s1      adx_roll        x_fix_3          -0.064  [ -0.108, -0.022]  0.0045  0.0108
+  all_s1      atr_contract    x_fix_3          -0.076  [ -0.119, -0.031]  0.0015  0.0042
+  all_s1      macd_fade       x_fix_3          -0.076  [ -0.111, -0.040]  0.0005  0.0016
+  all_s1      ma_ext          x_fix_3          -0.056  [ -0.095, -0.012]  0.0085  0.0180
+  all_s1      range_compress  x_fix_3          -0.026  [ -0.048, -0.003]  0.0235  0.0464
+  all_s1      state_off       x_fix_3          -0.062  [ -0.105, -0.018]  0.0060  0.0135
+  movesubset  adx_roll        x_hold_full      -0.133  [ -0.193, -0.077]  0.0005  0.0016
+  movesubset  atr_contract    x_hold_full      -0.016  [ -0.070,  0.031]  0.5405  0.6544
+  movesubset  macd_fade       x_hold_full      -0.264  [ -0.366, -0.163]  0.0005  0.0016
+  movesubset  ma_ext          x_hold_full      -0.000  [ -0.094,  0.090]  0.9970  0.9970
+  movesubset  range_compress  x_hold_full      -0.942  [ -1.064, -0.821]  0.0005  0.0016
+  movesubset  state_off       x_hold_full      -0.065  [ -0.145,  0.010]  0.0930  0.1456
+  movesubset  adx_roll        x_fix_10          0.060  [ -0.043,  0.163]  0.2615  0.3766
+  movesubset  atr_contract    x_fix_10          0.177  [  0.086,  0.272]  0.0010  0.0030
+  movesubset  macd_fade       x_fix_10         -0.071  [ -0.130, -0.014]  0.0245  0.0464
+  movesubset  ma_ext          x_fix_10          0.192  [  0.103,  0.285]  0.0005  0.0016
+  movesubset  range_compress  x_fix_10         -0.749  [ -0.822, -0.675]  0.0005  0.0016
+  movesubset  state_off       x_fix_10          0.127  [  0.041,  0.217]  0.0020  0.0051
+  movesubset  adx_roll        x_fix_3           0.802  [  0.685,  0.924]  0.0005  0.0016
+  movesubset  atr_contract    x_fix_3           0.919  [  0.803,  1.033]  0.0005  0.0016
+  movesubset  macd_fade       x_fix_3           0.671  [  0.577,  0.768]  0.0005  0.0016
+  movesubset  ma_ext          x_fix_3           0.935  [  0.829,  1.036]  0.0005  0.0016
+  movesubset  range_compress  x_fix_3          -0.007  [ -0.069,  0.056]  0.8275  0.8762
+  movesubset  state_off       x_fix_3           0.870  [  0.752,  0.986]  0.0005  0.0016
+  K = 36 paired comparisons; Bonferroni alpha = 0.00139
+
+------------------------------------------------------------------------------
+SENSITIVITY GRID (reported in full, NOT selected) — stage-1 episodes
+  rule            param             value  capture  meanATR  fired%
+  adx_roll        ADX_DROP            2.0   -0.010   -0.018     39%
+  adx_roll        ADX_DROP            4.0   -0.014   -0.025     35%
+  adx_roll        ADX_DROP            6.0   -0.013   -0.024     30%
+  atr_contract    ATR_ARM_MULT       1.05   -0.016   -0.028     53%
+  atr_contract    ATR_ARM_MULT       1.15   -0.020   -0.036     25%
+  atr_contract    ATR_ARM_MULT       1.25   -0.018   -0.033     12%
+  macd_fade       MACD_FADE_FRAC      0.3   -0.027   -0.049     87%
+  macd_fade       MACD_FADE_FRAC      0.5   -0.020   -0.036     91%
+  macd_fade       MACD_FADE_FRAC      0.7   -0.015   -0.028     92%
+  ma_ext          EXT_ATR             2.0    0.003    0.005     52%
+  ma_ext          EXT_ATR             3.0   -0.009   -0.016     21%
+  ma_ext          EXT_ATR             4.0   -0.020   -0.037      6%
+  range_compress  COMPRESS_ATR        1.0   -0.028   -0.051     64%
+  range_compress  COMPRESS_ATR        1.5    0.008    0.014    100%
+  range_compress  COMPRESS_ATR        2.0    0.011    0.020    100%
+
+27 grid cells + 10 headline exit rules reported; none used for selection.
+

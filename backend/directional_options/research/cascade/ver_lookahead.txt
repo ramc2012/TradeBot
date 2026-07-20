@@ -1,0 +1,24 @@
+==============================================================================
+VERIFY 1 — end-to-end lookahead: delete the future, rebuild, compare
+==============================================================================
+cut = 2026-01-05   comparable window = entries before 2025-11-15
+truncated: intra 927867->548070  daily 71400->42256  opt 2974449->2131098
+
+episodes in comparable window: full=2612  after-cut=2612
+  episodes only in the FULL run : 0  []
+  episodes only in the CUT run  : 0  []
+  [PASS] s2       mismatches 0 / 2612
+  [PASS] s2_lag   mismatches 0 / 2612
+  [FAIL] large    mismatches 1 / 2612
+  [PASS] con1     mismatches 0 / 2612
+  [PASS] con2     mismatches 0 / 2612
+  [PASS] px1      mismatches 0 / 289
+  [PASS] px2      mismatches 0 / 90
+  [PASS] atr      mismatches 0 / 2612
+
+  episode-set mismatches: 0
+
+DISCRIMINATION CHECK — the same test must FAIL on a deliberately lookahead-contaminated variant:
+  contaminated episode set differs from full by 331 keys (PASS - the test can detect lookahead)
+
+VERDICT: FAIL — 1 mismatches

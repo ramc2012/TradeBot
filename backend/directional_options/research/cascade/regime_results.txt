@@ -1,0 +1,186 @@
+
+==============================================================================
+DATA
+==============================================================================
+           instruments  sessions      first       last
+mclass                                                
+commodity            5      5187 2021-06-21 2026-07-20
+index                6      6404 2021-06-21 2026-07-20
+stock              209     66468 2025-03-28 2026-07-20
+
+sessions per instrument (median by class):
+mclass
+commodity     831.5
+index        1254.0
+stock         320.0
+dtype: float64
+
+suspect sessions |ret|>20%: 6 of 78059 (0.008%) -> {'commodity': 1, 'stock': 5}
+underlying    session   raw_ret
+      IDEA 2025-04-01  0.201471
+       IEX 2025-07-24 -0.278925
+NATURALGAS 2024-10-29  0.248066
+      PGEL 2025-08-08 -0.234759
+   SIEMENS 2025-04-07 -0.422512
+      TMPV 2025-10-14 -0.405120
+
+==============================================================================
+TIME IN EACH REGIME — causal Wilder ADX(14) >= 25
+==============================================================================
+regime     consolidating  trending  pct_trending
+mclass                                          
+commodity           3032      1993     39.661692
+index               4141      2101     33.659084
+stock              39617     21208     34.867242
+
+per-instrument %% trending — distribution within class:
+           count  mean   min   25%   50%   75%   max
+mclass                                              
+commodity    6.0  40.4  34.6  35.7  40.4  43.6  48.0
+index        6.0  31.0  12.3  32.2  34.6  35.9  36.8
+stock      209.0  34.9   2.7  25.3  34.1  43.5  74.1
+
+DECLARED sensitivity grid (ADX threshold), %% of sessions trending:
+  ADX>=20: commodity=58.7%  index=59.6%  stock=55.7%
+  ADX>=25: commodity=39.7%  index=33.7%  stock=34.9%
+  ADX>=30: commodity=26.2%  index=17.0%  stock=19.9%
+
+==============================================================================
+TIME IN EACH REGIME — causal cross-check, efficiency ratio(20) >= 0.5
+==============================================================================
+median ER20 by class: {'commodity': 0.194, 'index': 0.213, 'stock': 0.197}
+  ER>=0.3: commodity=31.2%  index=32.0%  stock=30.0%
+  ER>=0.5: commodity=7.7%  index=9.4%  stock=7.6%
+  ER>=0.7: commodity=1.1%  index=1.9%  stock=1.0%
+
+agreement of the two causal lenses (% of sessions):
+           both_trend  adx_only  er_only  both_chop
+mclass                                             
+commodity         6.1      33.2      1.6       59.1
+index             6.5      26.9      2.9       63.6
+stock             6.1      28.0      1.5       64.5
+
+==============================================================================
+REGIME RUN LENGTHS (sessions) — how long does a move last once started
+==============================================================================
+index      trending       {'n': 131, 'mean': 16.04, 'p25': 5.0, 'median': 12.0, 'p75': 22.5, 'p90': 35.0, 'max': 78.0}
+index      consolidating  {'n': 134, 'mean': 30.9, 'p25': 9.25, 'median': 20.0, 'p75': 39.75, 'p90': 68.2, 'max': 162.0}
+commodity  trending       {'n': 80, 'mean': 24.91, 'p25': 5.0, 'median': 17.5, 'p75': 38.5, 'p90': 55.0, 'max': 132.0}
+commodity  consolidating  {'n': 78, 'mean': 38.87, 'p25': 15.0, 'median': 27.5, 'p75': 55.5, 'p90': 83.6, 'max': 189.0}
+stock      trending       {'n': 1102, 'mean': 19.25, 'p25': 6.0, 'median': 14.0, 'p75': 26.0, 'p90': 41.9, 'max': 142.0}
+stock      consolidating  {'n': 1202, 'mean': 32.96, 'p25': 9.0, 'median': 23.0, 'p75': 47.75, 'p90': 73.0, 'max': 284.0}
+
+share of trending runs lasting >= k sessions:
+  index      >=2: 92%  >=3: 88%  >=5: 78%  >=10: 59%  >=20: 31%
+  commodity  >=2: 92%  >=3: 89%  >=5: 81%  >=10: 64%  >=20: 48%
+  stock      >=2: 94%  >=3: 90%  >=5: 82%  >=10: 65%  >=20: 36%
+
+==============================================================================
+MOVE SIZE — close-to-close % over each causal ADX trending run
+==============================================================================
+index      signed {'n': 131, 'mean': 1.18, 'p25': -0.47, 'median': 0.77, 'p75': 2.35, 'p90': 4.28, 'max': 17.07}
+index      abs    {'n': 131, 'mean': 2.19, 'p25': 0.63, 'median': 1.44, 'p75': 2.82, 'p90': 4.45, 'max': 17.07}
+commodity  signed {'n': 80, 'mean': 5.67, 'p25': -2.13, 'median': 0.87, 'p75': 6.16, 'p90': 15.97, 'max': 260.0}
+commodity  abs    {'n': 80, 'mean': 10.11, 'p25': 1.33, 'median': 4.02, 'p75': 8.8, 'p90': 16.64, 'max': 260.0}
+stock      signed {'n': 1102, 'mean': 1.21, 'p25': -2.37, 'median': 0.0, 'p75': 3.35, 'p90': 8.09, 'max': 62.24}
+stock      abs    {'n': 1102, 'mean': 4.65, 'p25': 1.13, 'median': 2.87, 'p75': 5.61, 'p90': 10.45, 'max': 62.24}
+
+==============================================================================
+SWING DECOMPOSITION — directional change, theta = 3.0 x median daily TR%
+==============================================================================
+theta (%) by class: {'commodity': 4.7, 'index': 3.24, 'stock': 7.01}
+
+index: qualifying moves n=327 (54.5 per instrument)
+   duration (sessions): {'n': 327, 'mean': 18.87, 'p25': 7.0, 'median': 13.0, 'p75': 25.0, 'p90': 42.0, 'max': 115.0}
+   size (%)           : {'n': 327, 'mean': 7.7, 'p25': 4.4, 'median': 6.14, 'p75': 9.06, 'p90': 14.62, 'max': 39.02}
+   up/down            : {-1: 165, 1: 162}
+
+commodity: qualifying moves n=250 (41.7 per instrument)
+   duration (sessions): {'n': 250, 'mean': 20.5, 'p25': 7.0, 'median': 15.5, 'p75': 26.75, 'p90': 42.1, 'max': 152.0}
+   size (%)           : {'n': 250, 'mean': 16.49, 'p25': 6.92, 'median': 10.74, 'p75': 17.68, 'p90': 34.55, 'max': 104.18}
+   up/down            : {-1: 126, 1: 124}
+
+stock: qualifying moves n=2358 (11.3 per instrument)
+   duration (sessions): {'n': 2358, 'mean': 25.09, 'p25': 10.0, 'median': 18.0, 'p75': 32.0, 'p90': 55.0, 'max': 182.0}
+   size (%)           : {'n': 2358, 'mean': 16.59, 'p25': 9.46, 'median': 13.11, 'p75': 19.62, 'p90': 28.77, 'max': 144.4}
+   up/down            : {-1: 1202, 1: 1156}
+
+==============================================================================
+MOVE VELOCITY — net % per session, qualifying swings
+==============================================================================
+index      all        {'n': 327, 'mean': 0.79, 'p25': 0.31, 'median': 0.54, 'p75': 0.81, 'p90': 1.47, 'max': 7.63}
+index      top-quartile size {'n': 82, 'mean': 0.54, 'p25': 0.3, 'median': 0.47, 'p75': 0.71, 'p90': 0.9, 'max': 1.96}   duration median 30
+commodity  all        {'n': 250, 'mean': 1.53, 'p25': 0.46, 'median': 0.77, 'p75': 1.84, 'p90': 4.21, 'max': 9.35}
+commodity  top-quartile size {'n': 63, 'mean': 1.97, 'p25': 0.77, 'median': 1.49, 'p75': 2.78, 'p90': 4.45, 'max': 5.4}   duration median 26
+stock      all        {'n': 2358, 'mean': 1.08, 'p25': 0.48, 'median': 0.78, 'p75': 1.29, 'p90': 2.09, 'max': 13.1}
+stock      top-quartile size {'n': 590, 'mean': 1.02, 'p25': 0.52, 'median': 0.83, 'p75': 1.22, 'p90': 1.88, 'max': 7.06}   duration median 36
+
+==============================================================================
+ARE BIG MOVES FAST OR LONG?  size vs duration
+==============================================================================
+index      spearman(size,duration)=+0.682 (p=3.7e-46)   spearman(size,velocity)=-0.206 (p=1.8e-04)   n=327
+   by size quartile: {'Q1': 'dur=6 vel=0.61', 'Q2': 'dur=9 vel=0.59', 'Q3': 'dur=16 vel=0.42', 'Q4': 'dur=30 vel=0.47'}
+commodity  spearman(size,duration)=+0.470 (p=3.9e-15)   spearman(size,velocity)=+0.238 (p=1.5e-04)   n=250
+   by size quartile: {'Q1': 'dur=9 vel=0.67', 'Q2': 'dur=13 vel=0.64', 'Q3': 'dur=19 vel=0.69', 'Q4': 'dur=26 vel=1.49'}
+stock      spearman(size,duration)=+0.554 (p=1.3e-189)   spearman(size,velocity)=+0.047 (p=2.3e-02)   n=2358
+   by size quartile: {'Q1': 'dur=10 vel=0.71', 'Q2': 'dur=14 vel=0.79', 'Q3': 'dur=20 vel=0.79', 'Q4': 'dur=36 vel=0.83'}
+
+sessions inside a qualifying move / total sessions:
+  index         6171 /    6404 =  96.4%   -> consolidation   3.6%
+  commodity     5124 /    5187 =  98.8%   -> consolidation   1.2%
+  stock        59174 /   66468 =  89.0%   -> consolidation  11.0%
+
+DECLARED sensitivity grid (theta multiplier), % of sessions inside a move:
+  theta=2.0x: index=98.1%  commodity=99.3%  stock=93.6%
+  theta=3.0x: index=96.4%  commodity=98.8%  stock=89.0%
+  theta=4.0x: index=96.9%  commodity=97.1%  stock=84.6%
+
+==============================================================================
+CONCENTRATION — how much of the year's travel comes from the top N moves
+==============================================================================
+instrument-years with >=100 sessions: 468
+
+index  (n=31 instrument-years)
+   top 1: share of ALL daily travel  11.3% | share of net SWING travel  23.3% | sessions occupied  22.0% | travel-per-time ratio 1.06
+   top 3: share of ALL daily travel  26.5% | share of net SWING travel  50.4% | sessions occupied  50.4% | travel-per-time ratio 1.00
+   top 5: share of ALL daily travel  35.5% | share of net SWING travel  69.5% | sessions occupied  69.8% | travel-per-time ratio 1.00
+   top10: share of ALL daily travel  46.3% | share of net SWING travel 100.0% | sessions occupied  91.0% | travel-per-time ratio 1.10
+
+commodity  (n=24 instrument-years)
+   top 1: share of ALL daily travel  10.6% | share of net SWING travel  20.6% | sessions occupied  18.6% | travel-per-time ratio 1.11
+   top 3: share of ALL daily travel  26.4% | share of net SWING travel  51.9% | sessions occupied  53.4% | travel-per-time ratio 0.97
+   top 5: share of ALL daily travel  34.3% | share of net SWING travel  70.3% | sessions occupied  71.9% | travel-per-time ratio 0.98
+   top10: share of ALL daily travel  46.5% | share of net SWING travel 100.0% | sessions occupied  92.7% | travel-per-time ratio 1.08
+
+stock  (n=413 instrument-years)
+   top 1: share of ALL daily travel  12.2% | share of net SWING travel  30.4% | sessions occupied  27.1% | travel-per-time ratio 1.12
+   top 3: share of ALL daily travel  27.5% | share of net SWING travel  69.7% | sessions occupied  62.6% | travel-per-time ratio 1.11
+   top 5: share of ALL daily travel  35.4% | share of net SWING travel  92.6% | sessions occupied  80.7% | travel-per-time ratio 1.15
+   top10: share of ALL daily travel  40.4% | share of net SWING travel 100.0% | sessions occupied  90.4% | travel-per-time ratio 1.11
+
+per-year detail (class medians):
+                top3_travel_share  top3_session_share  ...  n_moves  sessions
+mclass    year                                         ...                   
+commodity 2021               27.7                49.3  ...      7.0     134.0
+          2022               19.0                39.8  ...     14.0     249.0
+          2023               27.0                61.3  ...      9.0     245.0
+          2024               24.2                45.3  ...     13.0     245.0
+          2025               26.8                56.4  ...     11.0     251.0
+          2026               32.7                64.3  ...      6.0     126.0
+index     2021               37.3                81.2  ...      4.5     133.0
+          2022               21.8                41.7  ...     16.0     247.0
+          2023               26.3                62.4  ...      7.0     245.0
+          2024               26.5                52.8  ...     15.0     246.0
+          2025               21.3                38.9  ...      9.0     248.0
+          2026               28.4                49.8  ...     10.0     135.5
+stock     2025               24.2                57.2  ...      6.0     187.0
+          2026               30.9                71.9  ...      6.0     133.0
+
+[14 rows x 6 columns]
+
+==============================================================================
+VERDICT INPUTS
+==============================================================================
+index      ADX-trending  33.7% | inside-move  96.4% | median move  6.1% over 13 sessions | moves/instrument/yr 10.9
+commodity  ADX-trending  39.7% | inside-move  98.8% | median move 10.7% over 16 sessions | moves/instrument/yr 12.5
+stock      ADX-trending  34.9% | inside-move  89.0% | median move 13.1% over 18 sessions | moves/instrument/yr 8.8

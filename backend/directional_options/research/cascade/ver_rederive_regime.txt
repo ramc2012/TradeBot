@@ -1,0 +1,19 @@
+==============================================================================
+[7a] REGIME PREMISE — re-derived with an independently written Wilder ADX
+==============================================================================
+  rows 78059  cols ['underlying', 'mclass', 'session', 'o', 'h', 'l', 'c', 'bars', 'raw_ret', 'is_break', 'seg', 'series_id']
+
+  share of sessions TRENDING (ADX >= threshold), by market:
+thr           20     25     30
+mkt                           
+commodity  0.605  0.403  0.263
+index      0.561  0.311  0.156
+stock      0.557  0.349  0.200
+
+  median run length, sessions (trending / consolidating):
+    ADX>=20: trending 18.0   consolidating 15.5   n_series 221
+    ADX>=25: trending 15.0   consolidating 26.0   n_series 221
+    ADX>=30: trending 12.0   consolidating 48.5   n_series 221
+
+  VERDICT P1 'consolidation dominates': at ADX>=25 mean trending share = 0.350 -> non-trending 0.650. CONFIRMED
+  THRESHOLD FRAGILITY (as the shipped pass reported): at ADX>=20 the trending share is 0.559 -> the premise INVERTS.

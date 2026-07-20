@@ -1,0 +1,36 @@
+==============================================================================
+[7a] REGIME PREMISE — re-derived with an independently written Wilder ADX
+==============================================================================
+  rows 78059  cols ['underlying', 'mclass', 'session', 'o', 'h', 'l', 'c', 'bars', 'raw_ret', 'is_break', 'seg', 'series_id']
+  unexpected schema — skipped
+
+==============================================================================
+[7b] CASCADE LIFT — re-derived from the episode builder, own bootstrap
+==============================================================================
+  episodes 20638  families ['ctrl_long', 'ctrl_random', 'ctrl_short', 's1_primary']
+
+  P(higher timeframe confirms within 3 sessions):
+               mean  size
+family                   
+ctrl_long    0.0983  5972
+ctrl_random  0.0871  2767
+ctrl_short   0.0797  6182
+s1_primary   0.2012  5717
+    signal - control = +0.1126  95% CI [+0.1036,+0.1213]  p=0.0003   ratio 2.27x
+
+  P(sustained large move) — measured FROM THE STAGE-1 BAR (conditions on a LATER event, not decision-time information):
+family             n      all   n_s2     s2=1   n_no     s2=0
+s1_primary      5516   0.2685   1117   0.4781   4399   0.2153
+ctrl_long       5779   0.2814    576   0.4670   5203   0.2608
+ctrl_short      5949   0.2469    474   0.4768   5475   0.2270
+ctrl_random     2647   0.2580    238   0.4580   2409   0.2383
+    cascade vs CONTROL-bars-also-followed-by-a-confirm: +0.0091 [-0.0253,+0.0429] p=0.6035
+    -> if this is ~0, the apparent cascade lift is the confirm being caused by the move, not predicting it.
+
+  P(sustained large move) — measured FROM THE STAGE-2 BAR (the only tradeable moment for the second tranche):
+    s1_primary    n= 1107  P(large)=0.2692 [0.2447,0.2941]
+    ctrl_long     n=  572  P(large)=0.2797 [0.2443,0.3169]
+    ctrl_short    n=  470  P(large)=0.2766 [0.2359,0.3192]
+    ctrl_random   n=  235  P(large)=0.2894 [0.2308,0.3500]
+    unconditional base rate over ALL episodes = 0.2644
+    break-even hit rate at the 2:1 barrier = 0.3333 (before option carry)

@@ -1,0 +1,47 @@
+==============================================================================
+DEFECT 3 — session-index holes: a 'N-session' horizon that spans months
+==============================================================================
+sessions preceded by a >7 calendar-day hole: 14 across 10 underlyings of 225
+underlying    session  sidx   gap
+   ALUMINI 2026-07-16   357  21.0
+    CONCOR 2026-07-14    39 235.0
+    COPPER 2026-07-16   363  21.0
+  CRUDEOIL 2026-07-16    56  21.0
+CUMMINSIND 2026-03-23    40 181.0
+      GOLD 2025-12-03     3  50.0
+      GOLD 2025-12-22     4  19.0
+      GOLD 2026-01-13     9   8.0
+      GOLD 2026-07-16   103  21.0
+NATURALGAS 2026-07-16   364  21.0
+    NICKEL 2026-04-28     2   8.0
+    NICKEL 2026-07-16    33  21.0
+   SILVERM 2026-07-16   364  21.0
+  ZINCMINI 2026-07-16   359  21.0
+
+episode-trades whose 10-session window spans > 25 calendar days: 11 / 9423 (0.117%)
+            size    max
+underlying             
+CONCOR         3  246.0
+CUMMINSIND     8  193.0
+  their mean roc_new -0.3446 vs clean -0.0324
+
+HEADLINE WITH HOLED EPISODES REMOVED (repaired tape, base cost)
+band        arm         family           n       all     clean n_clean
+deep_itm    pyramid     s1_primary     346   -0.0277   -0.0268     345
+deep_itm    pyramid     ctrl_long      291   -0.0089   -0.0074     290
+deep_itm    fixed_t1    s1_primary     430   +0.0036   +0.0042     429
+deep_itm    fixed_t1    ctrl_long      340   -0.0066   -0.0054     339
+deep_itm    fixed_hold  s1_primary     430   -0.0055   -0.0048     429
+deep_itm    fixed_hold  ctrl_long      340   -0.0380   -0.0369     339
+slight_itm  pyramid     s1_primary     624   -0.0308   -0.0308     624
+slight_itm  pyramid     ctrl_long      489   -0.0210   -0.0210     489
+slight_itm  fixed_t1    s1_primary     711   -0.0303   -0.0303     711
+slight_itm  fixed_t1    ctrl_long      534   -0.0051   -0.0051     534
+slight_itm  fixed_hold  s1_primary     711   -0.0221   -0.0221     711
+slight_itm  fixed_hold  ctrl_long      534   -0.0923   -0.0923     534
+
+SIGNAL vs CONTROL on the CLEAN subset (episode-clustered bootstrap)
+  deep_itm    pyramid     signal - ctrl_long -0.0193 [-0.0446,+0.0053] p=0.1400
+  deep_itm    fixed_t1    signal - ctrl_long +0.0097 [-0.0469,+0.0652] p=0.7115
+  slight_itm  pyramid     signal - ctrl_long -0.0098 [-0.0304,+0.0107] p=0.3420
+  slight_itm  fixed_t1    signal - ctrl_long -0.0253 [-0.0823,+0.0350] p=0.3780

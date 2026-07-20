@@ -1,0 +1,230 @@
+====================================================================================
+(4) PYRAMID ECONOMICS — the owner's structure on OPTIONS, net of costs
+====================================================================================
+vehicle: MONTHLY expiry, DTE 8-22 at entry, ITM; unit = Rs 25,000 premium;
+every arm allocates the same maximum Rs 75,000.
+primary maturity rule (pre-registered from the owner's own vocabulary): atr_contract
+rows 56538  primary-rule rows 9423  span 2025-02-06 06:45:00+00:00 .. 2026-07-03 04:45:00+00:00
+
+------------------------------------------------------------------------------------
+HEADLINE — return on ALLOCATED capital (roc_base), primary rule
+band       arm         family            n   mean%    med%   util  ondep%   opt%  pess%  lag1%
+deep_itm   pyramid     s1_primary      346   -4.37   -5.31   0.41  -10.59  -3.95  -5.35  -4.47
+deep_itm   pyramid     ctrl_long       291   -1.94   -2.83   0.39   -5.83  -1.55  -2.87  -2.29
+deep_itm   pyramid     ctrl_short      235   -6.69   -9.67   0.38  -16.60  -6.30  -7.60  -6.98
+deep_itm   pyramid     ctrl_random     104   -3.66   -5.51   0.40   -8.66  -3.27  -4.62  -2.88
+deep_itm   fixed_t1    s1_primary      430   -8.19  -12.20   1.00   -8.19  -7.19 -10.59  -8.33
+deep_itm   fixed_t1    ctrl_long       340   -4.88   -7.84   1.00   -4.88  -3.88  -7.28  -5.95
+deep_itm   fixed_t1    ctrl_short      262  -13.48  -24.84   1.00  -13.48 -12.48 -15.88 -14.57
+deep_itm   fixed_t1    ctrl_random     119   -6.97  -12.63   1.00   -6.97  -5.97  -9.37  -5.68
+deep_itm   fixed_hold  s1_primary      430  -12.55  -20.23   1.00  -12.55 -11.55 -14.95 -13.41
+deep_itm   fixed_hold  ctrl_long       340  -10.78  -20.80   1.00  -10.78  -9.78 -13.18 -12.09
+deep_itm   fixed_hold  ctrl_short      262  -15.20  -31.59   1.00  -15.20 -14.20 -17.60 -16.44
+deep_itm   fixed_hold  ctrl_random     119  -12.83  -26.34   1.00  -12.83 -11.83 -15.23 -12.64
+deep_itm   s2_only     s1_primary      133  -13.11  -23.60   1.00  -13.11 -12.11 -15.51 -13.65
+deep_itm   s2_only     ctrl_long        76  -11.33  -19.88   1.00  -11.33 -10.33 -13.73 -10.92
+deep_itm   s2_only     ctrl_short       49   -8.59  -15.06   1.00   -8.59  -7.59 -10.99  -8.04
+deep_itm   s2_only     ctrl_random      27   -3.97   -8.80   1.00   -3.97  -2.97  -6.37  -3.67
+slight_itm pyramid     s1_primary      624   -3.85   -7.50   0.36  -10.69  -3.49  -4.73  -3.98
+slight_itm pyramid     ctrl_long       489   -2.72   -5.85   0.35   -6.34  -2.36  -3.56  -2.83
+slight_itm pyramid     ctrl_short      463   -3.92  -11.02   0.36  -12.55  -3.56  -4.78  -4.06
+slight_itm pyramid     ctrl_random     204   -2.05   -8.05   0.35   -6.88  -1.71  -2.88  -1.97
+slight_itm fixed_t1    s1_primary      711   -6.77  -19.24   1.00   -6.77  -5.77  -9.17  -7.95
+slight_itm fixed_t1    ctrl_long       534   -3.36  -14.62   1.00   -3.36  -2.36  -5.76  -3.70
+slight_itm fixed_t1    ctrl_short      494  -10.55  -32.39   1.00  -10.55  -9.55 -12.95 -11.35
+slight_itm fixed_t1    ctrl_random     218   -3.11  -17.92   1.00   -3.11  -2.11  -5.51  -2.91
+slight_itm fixed_hold  s1_primary      711   -9.62  -33.02   1.00   -9.62  -8.62 -12.02 -11.25
+slight_itm fixed_hold  ctrl_long       534  -16.08  -35.76   1.00  -16.08 -15.08 -18.48 -15.49
+slight_itm fixed_hold  ctrl_short      494  -10.66  -39.71   1.00  -10.66  -9.66 -13.06 -10.88
+slight_itm fixed_hold  ctrl_random     218   -9.67  -36.59   1.00   -9.67  -8.67 -12.07  -9.85
+slight_itm s2_only     s1_primary       72  -17.40  -33.56   1.00  -17.40 -16.40 -19.80 -17.01
+slight_itm s2_only     ctrl_long        41  -14.54  -31.94   1.00  -14.54 -13.54 -16.94  -7.17
+slight_itm s2_only     ctrl_short       37   -0.34  -20.69   1.00   -0.34   0.66  -2.74  -2.10
+slight_itm s2_only     ctrl_random      16  -21.51  -35.47   1.00  -21.51 -20.51 -23.91 -18.51
+
+NOTE on `util`: the pyramid deploys the full 3 units only when the higher
+timeframe confirms (~1 episode in 5). Its return-on-ALLOCATION is therefore
+mechanically closer to zero than a fixed-size arm's. `ondep%` divides by the
+capital actually deployed and removes that flattery.
+
+------------------------------------------------------------------------------------
+ARM COMPARISONS, episode-clustered bootstrap by underlying (2000 draws)
+(a) the owner's structure vs the alternatives, on the SIGNAL
+  deep_itm   pyramid    vs fixed_t1    diff    3.83pp  [   2.08,   5.67]  p=0.0005
+  deep_itm   pyramid    vs fixed_hold  diff    8.18pp  [   5.57,  10.67]  p=0.0005
+  deep_itm   pyramid    vs s2_only     diff    8.74pp  [   3.32,  13.94]  p=0.0015
+  deep_itm   fixed_t1   vs s2_only     diff    4.92pp  [  -1.05,  10.85]  p=0.1085
+  slight_itm pyramid    vs fixed_t1    diff    2.91pp  [  -0.45,   5.84]  p=0.0665
+  slight_itm pyramid    vs fixed_hold  diff    5.77pp  [   2.05,   9.62]  p=0.0030
+  slight_itm pyramid    vs s2_only     diff   13.55pp  [   2.32,  24.03]  p=0.0140
+  slight_itm fixed_t1   vs s2_only     diff   10.63pp  [  -0.32,  21.73]  p=0.0605
+
+(b) the SAME arm, signal vs matched control (this is the test that matters)
+  deep_itm   pyramid     s1 vs ctrl_long    diff   -2.43pp  [  -4.53,  -0.37]  p=0.0190
+  deep_itm   pyramid     s1 vs ctrl_random  diff   -0.70pp  [  -4.11,   2.91]  p=0.6995
+  deep_itm   pyramid     s1 vs ctrl_short   diff    2.32pp  [   0.36,   4.40]  p=0.0305
+  deep_itm   fixed_t1    s1 vs ctrl_long    diff   -3.31pp  [  -8.02,   1.15]  p=0.1730
+  deep_itm   fixed_t1    s1 vs ctrl_random  diff   -1.22pp  [  -8.77,   6.33]  p=0.7575
+  deep_itm   fixed_t1    s1 vs ctrl_short   diff    5.29pp  [   0.82,   9.99]  p=0.0255
+  deep_itm   fixed_hold  s1 vs ctrl_long    diff   -1.76pp  [  -8.14,   4.00]  p=0.5655
+  deep_itm   fixed_hold  s1 vs ctrl_random  diff    0.28pp  [  -8.23,   8.48]  p=0.9410
+  deep_itm   fixed_hold  s1 vs ctrl_short   diff    2.65pp  [  -4.08,   8.37]  p=0.3955
+  deep_itm   s2_only     s1 vs ctrl_long    diff   -1.78pp  [ -11.93,   8.28]  p=0.7095
+  deep_itm   s2_only     s1 vs ctrl_random  diff   -9.14pp  [ -25.01,   6.61]  p=0.2510
+  deep_itm   s2_only     s1 vs ctrl_short   diff   -4.51pp  [ -17.09,   7.71]  p=0.4715
+  slight_itm pyramid     s1 vs ctrl_long    diff   -1.14pp  [  -3.13,   0.77]  p=0.2350
+  slight_itm pyramid     s1 vs ctrl_random  diff   -1.80pp  [  -5.07,   1.17]  p=0.2560
+  slight_itm pyramid     s1 vs ctrl_short   diff    0.06pp  [  -2.33,   2.41]  p=0.9500
+  slight_itm fixed_t1    s1 vs ctrl_long    diff   -3.41pp  [  -8.33,   1.37]  p=0.1760
+  slight_itm fixed_t1    s1 vs ctrl_random  diff   -3.66pp  [ -11.75,   4.24]  p=0.3680
+  slight_itm fixed_t1    s1 vs ctrl_short   diff    3.78pp  [  -2.22,   9.80]  p=0.2190
+  slight_itm fixed_hold  s1 vs ctrl_long    diff    6.46pp  [   0.48,  12.37]  p=0.0360
+  slight_itm fixed_hold  s1 vs ctrl_random  diff    0.05pp  [  -9.42,   9.42]  p=0.9905
+  slight_itm fixed_hold  s1 vs ctrl_short   diff    1.04pp  [  -5.97,   8.13]  p=0.7765
+  slight_itm s2_only     s1 vs ctrl_long    diff   -2.86pp  [ -16.37,  10.32]  p=0.6815
+  slight_itm s2_only     s1 vs ctrl_random  diff    4.10pp  [ -29.04,  35.43]  p=0.8100
+  slight_itm s2_only     s1 vs ctrl_short   diff  -17.06pp  [ -40.66,   4.26]  p=0.1310
+
+(c) is ANY arm's mean above zero? (one-sample: signal arm vs a zero column)
+  deep_itm   pyramid     mean   -4.37pp  [  -5.69,  -2.88]  p=0.0005
+  deep_itm   fixed_t1    mean   -8.19pp  [ -10.98,  -5.54]  p=0.0005
+  deep_itm   fixed_hold  mean  -12.55pp  [ -15.63,  -9.41]  p=0.0005
+  deep_itm   s2_only     mean  -13.11pp  [ -18.65,  -7.36]  p=0.0005
+  slight_itm pyramid     mean   -3.85pp  [  -5.23,  -2.38]  p=0.0005
+  slight_itm fixed_t1    mean   -6.77pp  [ -10.57,  -2.86]  p=0.0005
+  slight_itm fixed_hold  mean   -9.62pp  [ -14.29,  -5.00]  p=0.0005
+  slight_itm s2_only     mean  -17.40pp  [ -27.99,  -5.98]  p=0.0025
+
+------------------------------------------------------------------------------------
+INSIDE THE PYRAMID — the completed pyramid vs the abandoned first tranche
+(the owner's structure pays for ~4 dead first tranches per completed one;
+ this is where that cost shows up in rupees)
+  band       family       leg                        n    meanRs    medRs   win%  meanRoc%
+  deep_itm   s1_primary   completed (s1+s2, 3u)     40    -8,136  -15,317   25.0    -10.85
+  deep_itm   s1_primary   abandoned (s1 only, 1u)   306    -2,638   -3,697   34.0    -10.55
+    -> completed minus abandoned, on DEPLOYED capital: -0.29pp  [-9.07,9.56]  p=0.9505
+  deep_itm   ctrl_long    completed (s1+s2, 3u)     24        93   -4,869   41.7      0.12
+  deep_itm   ctrl_long    abandoned (s1 only, 1u)   267    -1,591   -2,074   36.7     -6.36
+    -> completed minus abandoned, on DEPLOYED capital: 6.49pp  [-8.91,22.41]  p=0.4050
+  slight_itm s1_primary   completed (s1+s2, 3u)     28    -7,316  -25,797   35.7     -9.75
+  slight_itm s1_primary   abandoned (s1 only, 1u)   596    -2,683   -5,431   34.4    -10.73
+    -> completed minus abandoned, on DEPLOYED capital: 0.98pp  [-19.66,22.07]  p=0.9260
+  slight_itm ctrl_long    completed (s1+s2, 3u)     14   -23,779  -26,999    7.1    -31.71
+  slight_itm ctrl_long    abandoned (s1 only, 1u)   475    -1,397   -3,995   38.5     -5.59
+
+------------------------------------------------------------------------------------
+PER NON-OVERLAPPING QUARTER — mean roc_base %, signal arms (n in brackets)
+  band       arm                   2025Q2          2025Q3          2025Q4          2026Q1          2026Q2
+  deep_itm   pyramid          -5.26( 65)     -3.47(116)     -4.48( 65)     -2.36( 45)     -6.70( 55)
+  deep_itm   fixed_t1        -10.95( 71)     -5.98(144)     -8.68( 88)     -7.37( 60)    -10.11( 67)
+  deep_itm   fixed_hold      -11.97( 71)    -11.39(144)    -10.53( 88)    -12.73( 60)    -18.12( 67)
+  deep_itm   s2_only         -32.64( 20)    -14.93( 41)     -5.69( 35)      3.69( 23)    -26.00( 14)
+  slight_itm pyramid          -5.61(132)     -2.73(195)     -6.15(149)     -3.27( 76)      0.46( 72)
+  slight_itm fixed_t1         -8.42(147)     -4.47(216)    -12.11(171)     -7.24( 88)      1.11( 89)
+  slight_itm fixed_hold      -10.83(147)     -8.53(216)    -11.85(171)     -8.69( 88)     -6.89( 89)
+  slight_itm s2_only         -49.49( 13)    -24.31( 20)     -1.64( 18)     -7.17( 17)               -
+
+------------------------------------------------------------------------------------
+VEHICLE SENSITIVITY — mean roc_base %, signal families only
+  band       mkt    arm              n    mean%     med%   win%  meanMny
+  deep_itm   index  pyramid         16    -3.19    -0.53   37.5    -4.09
+  deep_itm   index  fixed_t1        19    -1.64    -1.60   42.1    -4.12
+  deep_itm   index  fixed_hold      19    -5.16    -5.15   31.6    -4.12
+  deep_itm   index  s2_only          7   -16.27   -15.30   14.3    -4.28
+  deep_itm   stock  pyramid        330    -4.42    -5.60   32.7    -4.18
+  deep_itm   stock  fixed_t1       411    -8.49   -12.79   36.7    -4.23
+  deep_itm   stock  fixed_hold     411   -12.89   -21.52   33.3    -4.23
+  deep_itm   stock  s2_only        126   -12.93   -24.54   31.0    -4.52
+  slight_itm index  pyramid         26    -0.66    -0.53   46.2    -1.78
+  slight_itm index  fixed_t1        32    12.01     0.27   50.0    -1.78
+  slight_itm index  fixed_hold      32    21.70    -2.77   43.8    -1.78
+  slight_itm index  s2_only          7   -15.45   -28.62   14.3    -1.92
+  slight_itm stock  pyramid        598    -3.99    -7.91   33.9    -1.79
+  slight_itm stock  fixed_t1       679    -7.65   -20.95   35.5    -1.79
+  slight_itm stock  fixed_hold     679   -11.10   -33.68   30.0    -1.79
+  slight_itm stock  s2_only         65   -17.61   -35.86   23.1    -2.00
+
+------------------------------------------------------------------------------------
+MATURITY-RULE GRID for the scale-out (reported in full, not selected)
+  band       rule              pyramid%  fixed_t1%  fixed_hold%  s2_only%  ctrlL pyr%
+  deep_itm   adx_roll             -4.38       -8.17      -11.59      -13.30       -1.94
+  deep_itm   atr_contract         -4.37       -8.19      -12.55      -13.11       -1.94
+  deep_itm   ma_ext               -4.43       -8.10      -12.28      -12.33       -1.89
+  deep_itm   macd_fade            -4.58       -7.97      -11.93      -12.69       -1.89
+  deep_itm   range_compress       -3.86       -6.82       -6.93       -9.31       -2.03
+  deep_itm   state_off            -4.49       -8.06      -12.40      -12.58       -1.84
+  slight_itm adx_roll             -3.85       -6.79       -9.20      -17.03       -2.72
+  slight_itm atr_contract         -3.85       -6.77       -9.62      -17.40       -2.72
+  slight_itm ma_ext               -3.73       -6.41       -9.40      -15.19       -2.72
+  slight_itm macd_fade            -4.03       -6.49       -8.96      -18.66       -2.65
+  slight_itm range_compress       -3.45       -5.61       -5.90      -13.54       -2.30
+  slight_itm state_off            -3.85       -6.44       -9.06      -18.44       -2.40
+
+------------------------------------------------------------------------------------
+WINNER-CONCENTRATION PROFILE — the payoff SHAPE of each arm
+(rupees, primary rule, signal family; `carry` = how many of the largest
+ winners account for HALF of all gross gains; `top5%share` = share of gross
+ gains delivered by the best 5% of episodes)
+  band       arm             n     totalRs   meanRs   medRs   win%     top3Rs   exTop3Rs  carry top5%share
+  deep_itm   pyramid       346  -1,132,765   -3,274  -3,985   32.9    129,738 -1,262,503     20       46.4
+  deep_itm   fixed_t1      430  -2,641,841   -6,144  -9,148   37.0    201,534 -2,843,374     38       33.8
+  deep_itm   fixed_hold    430  -4,046,189   -9,410 -15,171   33.3    194,134 -4,240,323     34       35.9
+  deep_itm   s2_only       133  -1,307,486   -9,831 -17,699   30.1    227,861 -1,535,347      9       43.4
+  slight_itm pyramid       624  -1,803,883   -2,891  -5,628   34.5    232,830 -2,036,713     38       44.8
+  slight_itm fixed_t1      711  -3,609,226   -5,076 -14,427   36.1    749,984 -4,359,210     52       40.2
+  slight_itm fixed_hold    711  -5,129,673   -7,215 -24,767   30.7    769,098 -5,898,771     50       40.6
+  slight_itm s2_only        72    -939,672  -13,051 -25,167   22.2    312,521 -1,252,193      5       46.3
+
+  deep_itm/pyramid: best episode Rs 51,503, worst Rs -49,014; total Rs -1,132,765; without the top 3 Rs -1,262,503 (-4.87% of allocation)
+  deep_itm/fixed_t1: best episode Rs 75,717, worst Rs -59,325; total Rs -2,641,841; without the top 3 Rs -2,843,374 (-8.82% of allocation)
+  slight_itm/pyramid: best episode Rs 100,018, worst Rs -57,271; total Rs -1,803,883; without the top 3 Rs -2,036,713 (-4.35% of allocation)
+  slight_itm/fixed_t1: best episode Rs 437,927, worst Rs -63,683; total Rs -3,609,226; without the top 3 Rs -4,359,210 (-8.17% of allocation)
+
+------------------------------------------------------------------------------------
+MULTIPLE TESTING — K = 43 comparisons in this study
+  Bonferroni alpha = 0.00116
+  comparison                                    diff(pp)        p    q(BH)  sig
+  deep_itm|signal|pyramid-vs-fixed_t1               3.83   0.0005   0.0024   **
+  deep_itm|signal|pyramid-vs-fixed_hold             8.18   0.0005   0.0024   **
+  deep_itm|pyramid|vs-zero                         -4.37   0.0005   0.0024   **
+  deep_itm|fixed_t1|vs-zero                        -8.19   0.0005   0.0024   **
+  deep_itm|fixed_hold|vs-zero                     -12.55   0.0005   0.0024   **
+  deep_itm|s2_only|vs-zero                        -13.11   0.0005   0.0024   **
+  slight_itm|pyramid|vs-zero                       -3.85   0.0005   0.0024   **
+  slight_itm|fixed_t1|vs-zero                      -6.77   0.0005   0.0024   **
+  slight_itm|fixed_hold|vs-zero                    -9.62   0.0005   0.0024   **
+  deep_itm|signal|pyramid-vs-s2_only                8.74   0.0015   0.0065   **
+  slight_itm|s2_only|vs-zero                      -17.40   0.0025   0.0098   **
+  slight_itm|signal|pyramid-vs-fixed_hold           5.77   0.0030   0.0108   **
+  slight_itm|signal|pyramid-vs-s2_only             13.55   0.0140   0.0463   **
+  deep_itm|pyramid|s1-vs-ctrl_long                 -2.43   0.0190   0.0584    *
+  deep_itm|fixed_t1|s1-vs-ctrl_short                5.29   0.0255   0.0731    *
+  deep_itm|pyramid|s1-vs-ctrl_short                 2.32   0.0305   0.0820    *
+  slight_itm|fixed_hold|s1-vs-ctrl_long             6.46   0.0360   0.0911    *
+  slight_itm|signal|fixed_t1-vs-s2_only            10.63   0.0605   0.1445     
+  slight_itm|signal|pyramid-vs-fixed_t1             2.91   0.0665   0.1505     
+  deep_itm|signal|fixed_t1-vs-s2_only               4.92   0.1085   0.2333     
+  slight_itm|s2_only|s1-vs-ctrl_short             -17.06   0.1310   0.2682     
+  deep_itm|fixed_t1|s1-vs-ctrl_long                -3.31   0.1730   0.3290     
+  slight_itm|fixed_t1|s1-vs-ctrl_long              -3.41   0.1760   0.3290     
+  slight_itm|fixed_t1|s1-vs-ctrl_short              3.78   0.2190   0.3924     
+  slight_itm|pyramid|s1-vs-ctrl_long               -1.14   0.2350   0.4042     
+  deep_itm|s2_only|s1-vs-ctrl_random               -9.14   0.2510   0.4077     
+  slight_itm|pyramid|s1-vs-ctrl_random             -1.80   0.2560   0.4077     
+  slight_itm|fixed_t1|s1-vs-ctrl_random            -3.66   0.3680   0.5651     
+  deep_itm|fixed_hold|s1-vs-ctrl_short              2.65   0.3955   0.5805     
+  deep_itm|pyr-ctrl_long|completed-vs-abandoned      6.49   0.4050   0.5805     
+  deep_itm|s2_only|s1-vs-ctrl_short                -4.51   0.4715   0.6540     
+  deep_itm|fixed_hold|s1-vs-ctrl_long              -1.76   0.5655   0.7599     
+  deep_itm|pyramid|s1-vs-ctrl_random               -0.70   0.6995   0.8717     
+  deep_itm|s2_only|s1-vs-ctrl_long                 -1.78   0.7095   0.8717     
+  slight_itm|s2_only|s1-vs-ctrl_long               -2.86   0.6815   0.8717     
+  deep_itm|fixed_t1|s1-vs-ctrl_random              -1.22   0.7575   0.9024     
+  slight_itm|fixed_hold|s1-vs-ctrl_short            1.04   0.7765   0.9024     
+  slight_itm|s2_only|s1-vs-ctrl_random              4.10   0.8100   0.9166     
+  deep_itm|fixed_hold|s1-vs-ctrl_random             0.28   0.9410   0.9731     
+  slight_itm|pyramid|s1-vs-ctrl_short               0.06   0.9500   0.9731     
+  deep_itm|pyr-s1_primary|completed-vs-abandoned     -0.29   0.9505   0.9731     
+  slight_itm|pyr-s1_primary|completed-vs-abandoned      0.98   0.9260   0.9731     
+  slight_itm|fixed_hold|s1-vs-ctrl_random           0.05   0.9905   0.9905     
+

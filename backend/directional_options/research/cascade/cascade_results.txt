@@ -1,0 +1,353 @@
+======================================================================================================================
+0. DESIGN (fixed a priori in stages.py -- nothing swept)
+======================================================================================================================
+
+  stage-1 (LOWER timeframe = 30-minute), primary definition:
+      fresh MACD(12,26,9) signal-line cross in the trade direction on the 30m bar
+      AND 30m EMA20/EMA50 already ordered in that direction
+      AND 30m ADX(14) > 20
+      AND the DAILY state is NOT yet confirmed as of the last CLOSED daily bar
+          (session s-1) -- the sequence requires an unconfirmed higher timeframe.
+      Actionable at the OPEN of the next 30m bar, same session (decision bars
+      restricted to <= 14:45 IST).
+
+  stage-2 (HIGHER timeframe = DAILY), primary definition:
+      a False->True transition of the daily state
+          daily MACD histogram sign = side
+          AND close on the correct side of daily SMA20
+          AND daily ADX(14) > 20 and rising vs 3 sessions ago
+      in sessions [s0 .. s0+3] where s0 = the stage-1 entry session.
+      Actionable at the OPEN of the first 30m bar of the session AFTER the
+      confirming daily bar (that daily bar is not closed until 15:30 IST).
+
+  "sustained large move" (label, defined independently of the signal):
+      from the entry bar open, side-signed spot reaches +2.0 x daily ATR14
+      BEFORE it reaches -1.0 x daily ATR14 against, within 10 sessions,
+      monitored on 30m highs/lows; both touched in one bar scores as the STOP.
+
+  episode clustering: stage-1 fires <= 3 sessions apart, same instrument and
+      side, collapse to ONE observation (the first bar). Controls identical.
+
+  alternates: stage-1 in ['primary', 'ma', 'rsi'], stage-2 in ['primary', 'ma', 'di']
+
+======================================================================================================================
+1. DATASET
+======================================================================================================================
+  period 2025-01-27 04:15:00+00:00 -> 2026-07-06 09:45:00+00:00
+  instruments 225
+
+  episodes by family x stage-2 variant:
+s2_variant      di     ma  primary
+family                            
+ctrl_long     4613   4458     5779
+ctrl_random   2202   2118     2647
+ctrl_short    5024   4848     5949
+s1_ma         6579   6344     7735
+s1_primary    4244   3764     5516
+s1_rsi       10443  10576    12282
+
+  primary cell (s2=primary) -- episodes by family x side:
+side           -1     1
+family                 
+ctrl_long       0  5779
+ctrl_random  1346  1301
+ctrl_short   5949     0
+s1_ma        3768  3967
+s1_primary   2514  3002
+s1_rsi       6245  6037
+
+======================================================================================================================
+2. P(stage-2 confirm | stage-1 confirm)  and the LAG distribution
+======================================================================================================================
+                     n    p_s2  lag_mean  lag_med
+family      side                                 
+ctrl_long    1    5779  0.0997    1.4323      1.0
+ctrl_random -1    1346  0.0832    1.3661      1.0
+             1    1301  0.0968    1.3095      1.0
+ctrl_short  -1    5949  0.0797    1.3840      1.0
+s1_ma       -1    3768  0.0820    1.6828      2.0
+             1    3967  0.0895    1.7070      2.0
+s1_primary  -1    2514  0.1870    1.4128      1.0
+             1    3002  0.2155    1.3509      1.0
+s1_rsi      -1    6245  0.0512    1.8312      2.0
+             1    6037  0.0684    1.6513      2.0
+
+  lag distribution in sessions (0 = the stage-1 session's own daily bar confirms):
+s2_lag           0      1      2      3
+family                                 
+ctrl_long    0.276  0.259  0.222  0.243
+ctrl_random  0.286  0.273  0.261  0.181
+ctrl_short   0.306  0.228  0.243  0.224
+s1_ma        0.169  0.233  0.331  0.267
+s1_primary   0.288  0.270  0.218  0.224
+s1_rsi       0.165  0.236  0.303  0.296
+
+  matched-control comparisons (cluster bootstrap by instrument):
+  P(s2|s1) long vs P(s2|ctrl_long)                     A=+0.2155 (n= 3002)  B=+0.0997 (n= 5779)  diff=+0.1159 [+0.1013,+0.1303] p=0.0005
+  P(s2|s1) short vs P(s2|ctrl_short)                   A=+0.1870 (n= 2514)  B=+0.0797 (n= 5949)  diff=+0.1073 [+0.0936,+0.1209] p=0.0005
+  P(s2|s1) pooled vs P(s2|ctrl pooled)                 A=+0.2025 (n= 5516)  B=+0.0895 (n=11728)  diff=+0.1130 [+0.1034,+0.1224] p=0.0005
+
+======================================================================================================================
+3. P(sustained large move) -- cascade vs stage-1 alone vs unconditional
+======================================================================================================================
+                                  arm    n  P(large)  P(stop_first)  mfe_atr  mae_atr  term_atr
+    s1_primary :: all (stage-1 alone) 5516    0.2685         0.6042   1.7856   1.8472   -0.0470
+ s1_primary :: cascade (s2 confirmed) 1117    0.4781         0.4118   2.5071   1.3585    0.5934
+         s1_primary :: failed (no s2) 4399    0.2153         0.6531   1.6024   1.9713   -0.2096
+     ctrl_long :: all (stage-1 alone) 5779    0.2814         0.5781   3.5360   1.6330    0.1609
+  ctrl_long :: cascade (s2 confirmed)  576    0.4670         0.3906   2.5585   1.2316    0.7570
+          ctrl_long :: failed (no s2) 5203    0.2608         0.5989   3.6442   1.6774    0.0949
+    ctrl_short :: all (stage-1 alone) 5949    0.2469         0.6164   1.6733   1.8888   -0.0999
+ ctrl_short :: cascade (s2 confirmed)  474    0.4768         0.3966   2.3559   1.3909    0.5642
+         ctrl_short :: failed (no s2) 5475    0.2270         0.6354   1.6142   1.9319   -0.1574
+   ctrl_random :: all (stage-1 alone) 2647    0.2580         0.6094   1.7639   1.7785    0.0388
+ctrl_random :: cascade (s2 confirmed)  238    0.4580         0.4076   2.4717   1.3182    0.8201
+        ctrl_random :: failed (no s2) 2409    0.2383         0.6293   1.6940   1.8240   -0.0384
+
+  key comparisons (all measured FROM THE STAGE-1 ENTRY BAR):
+  large: s1&s2 vs s1&no-s2                             A=+0.4781 (n= 1117)  B=+0.2153 (n= 4399)  diff=+0.2628 [+0.2333,+0.2915] p=0.0005
+  large: s1&s2 vs s1 all (stage-1 alone)               A=+0.4781 (n= 1117)  B=+0.2685 (n= 5516)  diff=+0.2096 [+0.1863,+0.2336] p=0.0005
+  large: s1&s2 vs CTRL&s2 [MATCHED]                    A=+0.4781 (n= 1117)  B=+0.4714 (n= 1050)  diff=+0.0066 [-0.0270,+0.0396] p=0.7210
+  large: s1 all vs CTRL all [MATCHED]                  A=+0.2685 (n= 5516)  B=+0.2639 (n=11728)  diff=+0.0046 [-0.0075,+0.0164] p=0.4325
+  large: CTRL&s2 vs CTRL&no-s2 (s2 alone)              A=+0.4714 (n= 1050)  B=+0.2435 (n=10678)  diff=+0.2279 [+0.1975,+0.2585] p=0.0005
+  term_atr: s1&s2 vs CTRL&s2 [MATCHED]                 A=+0.5934 (n= 1117)  B=+0.6699 (n= 1050)  diff=-0.0765 [-0.2363,+0.0837] p=0.3325
+
+  by market and side (cascade arm only):
+                        size    mean
+family      mkt   side              
+ctrl_long   index  1      22  0.3636
+            stock  1     554  0.4711
+ctrl_random index -1       3  0.6667
+                   1       1  0.0000
+            stock -1     109  0.4862
+                   1     125  0.4320
+ctrl_short  index -1      18  0.4444
+            stock -1     456  0.4781
+s1_ma       index -1      11  0.5455
+                   1      13  0.2308
+            stock -1     298  0.5067
+                   1     342  0.6433
+s1_primary  index -1      24  0.5417
+                   1      20  0.5000
+            stock -1     446  0.4552
+                   1     627  0.4912
+s1_rsi      index -1      12  0.5833
+                   1      10  0.7000
+            stock -1     308  0.5292
+                   1     403  0.6501
+
+======================================================================================================================
+4. THE SECOND TRANCHE -- outcome measured from the stage-2 entry bar
+======================================================================================================================
+            t2_large         t2_mfe_atr         t2_term_atr        
+                size    mean       size    mean        size    mean
+family                                                             
+ctrl_long        572  0.2797        572  1.7386         572 -0.0950
+ctrl_random      235  0.2894        235  1.7664         235 -0.0026
+ctrl_short       470  0.2766        470  1.6883         470 -0.2621
+s1_ma            657  0.2451        657  1.6650         657 -0.3425
+s1_primary      1107  0.2692       1107  1.7162        1107 -0.2291
+s1_rsi           729  0.2743        729  1.7482         729 -0.1206
+
+  stage-2 confirmations with NO preceding stage-1 (skip-the-early-tranche): n=1501  P(large)=0.2638  term_atr=-0.0790
+  t2_large: cascade vs CTRL-cascade [MATCHED]          A=+0.2692 (n= 1107)  B=+0.2783 (n= 1042)  diff=-0.0091 [-0.0363,+0.0179] p=0.5355
+  large: cascade-t2 vs stage-2-only (no s1)            A=+0.2692 (n= 1107)  B=+0.2638 (n= 1501)  diff=+0.0054 [-0.0287,+0.0370] p=0.7650
+
+======================================================================================================================
+5. THE FAILED FIRST TRANCHE (stage-1 fired, higher timeframe never confirmed)
+======================================================================================================================
+  n=4399  (79.7% of stage-1 episodes)
+  managed exit at the end of the 3-session window (stop at -1 ATR if touched first, else mark-out), in ATR units:
+count    4399.0000
+mean       -0.1334
+std         0.9634
+min        -1.0000
+5%         -1.0000
+25%        -1.0000
+50%        -0.3813
+75%         0.5187
+95%         2.0000
+max         2.0000
+
+  how the failed tranche ends:
+t1_exit_how
+cutoff    0.4990
+stop      0.4269
+target    0.0741
+
+  matched controls that never confirmed: n=10678  mean exit_atr=-0.0540 median=-0.2239
+  failed-tranche exit_atr: s1 vs CTRL [MATCHED]        A=-0.1334 (n= 4399)  B=-0.0540 (n=10678)  diff=-0.0794 [-0.1115,-0.0477] p=0.0005
+
+  if the failed tranche were held the full 10 sessions anyway (unmanaged):
+    stage-1 failed : P(large)=0.2153  term_atr=-0.2096
+    control failed : P(large)=0.2435  term_atr=-0.0345
+
+======================================================================================================================
+6. GRID -- every (stage-1 x stage-2) definition pair, matched-control lift
+======================================================================================================================
+     s1      s2  n_s1  P(s2|s1)  P(s2|ctrl)    d_s2   p_s2  n_casc  P(large|casc)  P(large|ctrl_casc)  d_large  p_large
+primary primary  5516    0.2025      0.0895  0.1130 0.0005    1117         0.4781              0.4714   0.0066   0.7090
+     ma primary  7735    0.0858      0.0895 -0.0037 0.2355     664         0.5723              0.4714   0.1009   0.0005
+    rsi primary 12282    0.0597      0.0895 -0.0298 0.0005     733         0.5989              0.4714   0.1275   0.0005
+primary      ma  3764    0.2101      0.1457  0.0644 0.0005     791         0.3995              0.4506  -0.0511   0.0100
+     ma      ma  6344    0.2492      0.1457  0.1035 0.0005    1581         0.3839              0.4506  -0.0667   0.0005
+    rsi      ma 10576    0.1916      0.1457  0.0459 0.0005    2026         0.4314              0.4506  -0.0192   0.1795
+primary      di  4244    0.2509      0.1257  0.1253 0.0005    1065         0.4460              0.4864  -0.0404   0.0200
+     ma      di  6579    0.1750      0.1257  0.0493 0.0005    1151         0.5030              0.4864   0.0167   0.3175
+    rsi      di 10443    0.1175      0.1257 -0.0082 0.0345    1227         0.5289              0.4864   0.0426   0.0100
+
+======================================================================================================================
+7. ROBUSTNESS -- by non-overlapping quarter
+======================================================================================================================
+                       n   p_s2  p_large
+quarter family                          
+2025Q1  ctrl_long     34  0.147    0.471
+        ctrl_short    35  0.057    0.257
+        s1_primary    20  0.250    0.450
+2025Q2  ctrl_long    864  0.117    0.303
+        ctrl_short   949  0.031    0.123
+        s1_primary   718  0.162    0.241
+2025Q3  ctrl_long   1240  0.097    0.283
+        ctrl_short  1315  0.099    0.290
+        s1_primary  1290  0.207    0.270
+2025Q4  ctrl_long   1169  0.115    0.311
+        ctrl_short  1260  0.069    0.225
+        s1_primary  1144  0.203    0.255
+2026Q1  ctrl_long   1211  0.076    0.192
+        ctrl_short  1071  0.145    0.385
+        s1_primary  1049  0.265    0.326
+2026Q2  ctrl_long   1203  0.098    0.323
+        ctrl_short  1254  0.053    0.199
+        s1_primary  1224  0.169    0.244
+2026Q3  ctrl_long     58  0.086    0.224
+        ctrl_short    65  0.062    0.262
+        s1_primary    71  0.169    0.254
+
+  cascade-arm P(large) by quarter:
+                     size   mean
+quarter family                  
+2025Q1  ctrl_long       5  0.800
+        ctrl_short      2  0.500
+        s1_ma           7  0.429
+        s1_primary      5  1.000
+        s1_rsi          4  0.500
+2025Q2  ctrl_long     101  0.356
+        ctrl_random    13  0.385
+        ctrl_short     29  0.276
+        s1_ma          62  0.645
+        s1_primary    116  0.491
+        s1_rsi         80  0.575
+2025Q3  ctrl_long     120  0.500
+        ctrl_random    51  0.510
+        ctrl_short    130  0.438
+        s1_ma         150  0.567
+        s1_primary    267  0.491
+        s1_rsi        175  0.617
+2025Q4  ctrl_long     135  0.570
+        ctrl_random    63  0.492
+        ctrl_short     87  0.425
+        s1_ma         156  0.590
+        s1_primary    232  0.513
+        s1_rsi        160  0.594
+2026Q1  ctrl_long      92  0.413
+        ctrl_random    63  0.460
+        ctrl_short    155  0.619
+        s1_ma         192  0.547
+        s1_primary    278  0.489
+        s1_rsi        186  0.645
+2026Q2  ctrl_long     118  0.441
+        ctrl_random    43  0.395
+        ctrl_short     67  0.358
+        s1_ma          88  0.545
+        s1_primary    207  0.391
+        s1_rsi        123  0.520
+2026Q3  ctrl_long       5  0.400
+        ctrl_random     5  0.200
+        ctrl_short      4  0.750
+        s1_ma           9  0.778
+        s1_primary     12  0.417
+        s1_rsi          5  0.800
+
+======================================================================================================================
+8. MULTIPLICITY -- every comparison made in this run
+======================================================================================================================
+  K = 30 comparisons
+                                        label      metric   n_a   n_b  mean_a  mean_b    diff      lo      hi      p  p_bonf   q_bh
+             P(s2|s1) long vs P(s2|ctrl_long)          s2  3002  5779  0.2155  0.0997  0.1159  0.1013  0.1303 0.0005   0.015 0.0009
+           P(s2|s1) short vs P(s2|ctrl_short)          s2  2514  5949  0.1870  0.0797  0.1073  0.0936  0.1209 0.0005   0.015 0.0009
+         P(s2|s1) pooled vs P(s2|ctrl pooled)          s2  5516 11728  0.2025  0.0895  0.1130  0.1034  0.1224 0.0005   0.015 0.0009
+                     large: s1&s2 vs s1&no-s2       large  1117  4399  0.4781  0.2153  0.2628  0.2333  0.2915 0.0005   0.015 0.0009
+       large: s1&s2 vs s1 all (stage-1 alone)       large  1117  5516  0.4781  0.2685  0.2096  0.1863  0.2336 0.0005   0.015 0.0009
+            large: s1&s2 vs CTRL&s2 [MATCHED]       large  1117  1050  0.4781  0.4714  0.0066 -0.0270  0.0396 0.7210   1.000 0.7459
+          large: s1 all vs CTRL all [MATCHED]       large  5516 11728  0.2685  0.2639  0.0046 -0.0075  0.0164 0.4325   1.000 0.4990
+      large: CTRL&s2 vs CTRL&no-s2 (s2 alone)       large  1050 10678  0.4714  0.2435  0.2279  0.1975  0.2585 0.0005   0.015 0.0009
+         term_atr: s1&s2 vs CTRL&s2 [MATCHED]    term_atr  1117  1050  0.5934  0.6699 -0.0765 -0.2363  0.0837 0.3325   1.000 0.3990
+  t2_large: cascade vs CTRL-cascade [MATCHED]    t2_large  1107  1042  0.2692  0.2783 -0.0091 -0.0363  0.0179 0.5355   1.000 0.5950
+    large: cascade-t2 vs stage-2-only (no s1)       large  1107  1501  0.2692  0.2638  0.0054 -0.0287  0.0370 0.7650   1.000 0.7650
+failed-tranche exit_atr: s1 vs CTRL [MATCHED] t1_exit_atr  4399 10678 -0.1334 -0.0540 -0.0794 -0.1115 -0.0477 0.0005   0.015 0.0009
+        [grid] P(s2|s1) s1=primary s2=primary          s2  5516 11728  0.2025  0.0895  0.1130  0.1033  0.1226 0.0005   0.015 0.0009
+[grid] P(large|cascade) s1=primary s2=primary       large  1117  1050  0.4781  0.4714  0.0066 -0.0276  0.0414 0.7090   1.000 0.7459
+             [grid] P(s2|s1) s1=ma s2=primary          s2  7735 11728  0.0858  0.0895 -0.0037 -0.0097  0.0024 0.2355   1.000 0.3072
+     [grid] P(large|cascade) s1=ma s2=primary       large   664  1050  0.5723  0.4714  0.1009  0.0571  0.1438 0.0005   0.015 0.0009
+            [grid] P(s2|s1) s1=rsi s2=primary          s2 12282 11728  0.0597  0.0895 -0.0298 -0.0351 -0.0247 0.0005   0.015 0.0009
+    [grid] P(large|cascade) s1=rsi s2=primary       large   733  1050  0.5989  0.4714  0.1275  0.0880  0.1680 0.0005   0.015 0.0009
+             [grid] P(s2|s1) s1=primary s2=ma          s2  3764  9306  0.2101  0.1457  0.0644  0.0516  0.0780 0.0005   0.015 0.0009
+     [grid] P(large|cascade) s1=primary s2=ma       large   791  1356  0.3995  0.4506 -0.0511 -0.0878 -0.0106 0.0100   0.300 0.0158
+                  [grid] P(s2|s1) s1=ma s2=ma          s2  6344  9306  0.2492  0.1457  0.1035  0.0927  0.1137 0.0005   0.015 0.0009
+          [grid] P(large|cascade) s1=ma s2=ma       large  1581  1356  0.3839  0.4506 -0.0667 -0.0998 -0.0356 0.0005   0.015 0.0009
+                 [grid] P(s2|s1) s1=rsi s2=ma          s2 10576  9306  0.1916  0.1457  0.0459  0.0372  0.0541 0.0005   0.015 0.0009
+         [grid] P(large|cascade) s1=rsi s2=ma       large  2026  1356  0.4314  0.4506 -0.0192 -0.0483  0.0097 0.1795   1.000 0.2448
+             [grid] P(s2|s1) s1=primary s2=di          s2  4244  9637  0.2509  0.1257  0.1253  0.1136  0.1369 0.0005   0.015 0.0009
+     [grid] P(large|cascade) s1=primary s2=di       large  1065  1211  0.4460  0.4864 -0.0404 -0.0739 -0.0071 0.0200   0.600 0.0300
+                  [grid] P(s2|s1) s1=ma s2=di          s2  6579  9637  0.1750  0.1257  0.0493  0.0398  0.0592 0.0005   0.015 0.0009
+          [grid] P(large|cascade) s1=ma s2=di       large  1151  1211  0.5030  0.4864  0.0167 -0.0155  0.0492 0.3175   1.000 0.3969
+                 [grid] P(s2|s1) s1=rsi s2=di          s2 10443  9637  0.1175  0.1257 -0.0082 -0.0156 -0.0005 0.0345   1.000 0.0493
+         [grid] P(large|cascade) s1=rsi s2=di       large  1227  1211  0.5289  0.4864  0.0426  0.0123  0.0747 0.0100   0.300 0.0158
+
+  survivors at BH q<0.05:
+                                        label    diff      p   q_bh
+             P(s2|s1) long vs P(s2|ctrl_long)  0.1159 0.0005 0.0009
+           P(s2|s1) short vs P(s2|ctrl_short)  0.1073 0.0005 0.0009
+         P(s2|s1) pooled vs P(s2|ctrl pooled)  0.1130 0.0005 0.0009
+                     large: s1&s2 vs s1&no-s2  0.2628 0.0005 0.0009
+       large: s1&s2 vs s1 all (stage-1 alone)  0.2096 0.0005 0.0009
+      large: CTRL&s2 vs CTRL&no-s2 (s2 alone)  0.2279 0.0005 0.0009
+failed-tranche exit_atr: s1 vs CTRL [MATCHED] -0.0794 0.0005 0.0009
+        [grid] P(s2|s1) s1=primary s2=primary  0.1130 0.0005 0.0009
+     [grid] P(large|cascade) s1=ma s2=primary  0.1009 0.0005 0.0009
+            [grid] P(s2|s1) s1=rsi s2=primary -0.0298 0.0005 0.0009
+    [grid] P(large|cascade) s1=rsi s2=primary  0.1275 0.0005 0.0009
+             [grid] P(s2|s1) s1=primary s2=ma  0.0644 0.0005 0.0009
+     [grid] P(large|cascade) s1=primary s2=ma -0.0511 0.0100 0.0158
+                  [grid] P(s2|s1) s1=ma s2=ma  0.1035 0.0005 0.0009
+          [grid] P(large|cascade) s1=ma s2=ma -0.0667 0.0005 0.0009
+                 [grid] P(s2|s1) s1=rsi s2=ma  0.0459 0.0005 0.0009
+             [grid] P(s2|s1) s1=primary s2=di  0.1253 0.0005 0.0009
+     [grid] P(large|cascade) s1=primary s2=di -0.0404 0.0200 0.0300
+                  [grid] P(s2|s1) s1=ma s2=di  0.0493 0.0005 0.0009
+                 [grid] P(s2|s1) s1=rsi s2=di -0.0082 0.0345 0.0493
+         [grid] P(large|cascade) s1=rsi s2=di  0.0426 0.0100 0.0158
+
+======================================================================================================================
+9. APPENDIX -- second-tranche outcome split by market, and power
+======================================================================================================================
+                  t2_large         t2_term_atr        
+                      size    mean        size    mean
+family      mkt                                       
+ctrl_long   index       22  0.0000          22 -0.6740
+            stock      550  0.2909         550 -0.0718
+ctrl_random index        4  0.2500           4 -0.1725
+            stock      231  0.2900         231  0.0003
+ctrl_short  index       18  0.2778          18 -2.0517
+            stock      452  0.2765         452 -0.1908
+s1_ma       index       24  0.0417          24 -1.2134
+            stock      633  0.2528         633 -0.3095
+s1_primary  index       43  0.1628          43 -0.8312
+            stock     1064  0.2735        1064 -0.2047
+s1_rsi      index       22  0.2273          22 -0.3055
+            stock      707  0.2758         707 -0.1148
+
+  unconditional base rate P(large) over all matched control bars: 0.2639  n= 11728
+  stage-1 episodes per instrument per year: 16.3
+  power on the tradeable (t2) null: naive SE=0.0192; cluster-bootstrap 95% CI on the
+  cascade-vs-control difference was [-0.036,+0.018], i.e. a true lift above ~2pp is excluded.
