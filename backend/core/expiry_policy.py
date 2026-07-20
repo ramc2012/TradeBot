@@ -66,6 +66,45 @@ STOCK_ROLL_TRADING_DAYS = 5
 # Indices are CASH-settled: no delivery risk, so they trade until expiry.
 INDEX_ROLL_TRADING_DAYS = 0
 
+# ── Owner-directed HELD-POSITION rule (2026-07-21), verbatim ──────────────
+#
+#   "in the expiry rollover positions can be held upto 2 trading days till
+#    expiry before compulsory closure, So except for held positions other
+#    instruments to rollover to next expiry"
+#
+# So the 5TD roll SPLITS in two:
+#
+#   1. instrument with NO open position → the WATCHLIST rolls to the next
+#      expiry at the 5TD mark, exactly as shipped.  Unchanged.
+#   2. instrument WITH an open position → the position KEEPS its own expiry
+#      past the 5TD roll (the rest of the universe moves without it) and may
+#      be held until <= 2 TRADING DAYS remain, at which point it is
+#      COMPULSORILY CLOSED.  It must never be allowed to reach expiry.
+#
+# BOUNDARY, stated exactly so it is testable rather than folklore:
+#   closure is FORCED on the first exchange session for which
+#       ``trading_days_until(expiry, today) <= FORCED_CLOSE_TRADING_DAYS``.
+#   ``trading_days_until`` counts sessions AFTER ``today``, up to and
+#   INCLUDING ``expiry``.  So "held up to 2 trading days till expiry" means
+#   two sessions still remain AFTER the closing session.  For the 2026-07-28
+#   (Tue) expiry that lands on Friday 2026-07-24, leaving 07-27 and 07-28.
+#   Holiday-aware by construction — it reuses the same holiday-walked counter
+#   the 5TD roll uses, so a holiday shifts the boundary automatically.
+STOCK_FORCED_CLOSE_TRADING_DAYS = 2
+
+# Indices: CASH settled.  The physical-settlement rationale that motivates the
+# stock rule simply does not exist here, and INDEX_ROLL_TRADING_DAYS = 0
+# deliberately keeps indices trading to expiry.  A SEPARATE constant, defaulted
+# to 0 = DISABLED, so switching indices on (for expiry-day gamma / liquidity
+# reasons, which would be a different argument entirely) is an explicit owner
+# decision and can never be a side effect of tuning the stock number.
+INDEX_FORCED_CLOSE_TRADING_DAYS = 0
+
+# Attribution strings.  These land on the closing trade / watchlist row so the
+# closures are separable in P&L review.
+FORCED_CLOSE_REASON = "forced_expiry_roll_2td"
+HELD_POSITION_ROLL_REASON = "held_position_retains_expiry"
+
 
 def _stock_roll_trading_days() -> int:
     """Owner-tunable roll horizon, defaulting to the module constant.
@@ -90,6 +129,69 @@ def _stock_roll_trading_days() -> int:
     return value
 
 _INDEX_KINDS = {"INDEX", "IDX", "INDICES"}
+
+
+def _forced_close_trading_days(kind: str) -> int:
+    """Owner-tunable compulsory-closure horizon, per instrument class.
+
+    Two independent settings on purpose (see the constants above): the stock
+    number is a physical-settlement safety margin, the index number would be a
+    gamma/liquidity preference.  They must never move together by accident.
+    A nonsense value falls back to the constant LOUDLY.  ``0`` means DISABLED.
+    """
+    is_index = str(kind or "").upper().strip() in _INDEX_KINDS
+    name = (
+        "EXPIRY_POLICY_INDEX_FORCED_CLOSE_TRADING_DAYS"
+        if is_index
+        else "EXPIRY_POLICY_FORCED_CLOSE_TRADING_DAYS"
+    )
+    default = INDEX_FORCED_CLOSE_TRADING_DAYS if is_index else STOCK_FORCED_CLOSE_TRADING_DAYS
+    try:
+        from core.config import settings
+
+        value = int(getattr(settings, name, default))
+    except Exception:  # noqa: BLE001 - settings unavailable in bare unit contexts
+        return default
+    if value < 0 or value > 10:
+        logger.error(
+            "[ExpiryPolicy] %s=%s is out of the sane range [0, 10] — falling back to %s. "
+            "Fix the setting.",
+            name,
+            value,
+            default,
+        )
+        return default
+    return value
+
+
+@dataclass(frozen=True)
+class HoldDecision:
+    """Answer to: may this OPEN position keep riding its own expiry today?"""
+
+    symbol: str
+    kind: str                        # INDEX | STOCK
+    expiry: date
+    trading_days_to_expiry: int
+    boundary_trading_days: int       # 0 ⇒ the rule is disabled for this class
+    must_close: bool
+    reason: Optional[str]            # FORCED_CLOSE_REASON when must_close
+    forced_close_date: Optional[date]
+    evaluated_on: date
+
+    def as_dict(self) -> dict[str, Any]:
+        return {
+            "symbol": self.symbol,
+            "kind": self.kind,
+            "expiry": self.expiry.isoformat(),
+            "trading_days_to_expiry": self.trading_days_to_expiry,
+            "boundary_trading_days": self.boundary_trading_days,
+            "must_close": self.must_close,
+            "reason": self.reason,
+            "forced_close_date": (
+                self.forced_close_date.isoformat() if self.forced_close_date else None
+            ),
+            "evaluated_on": self.evaluated_on.isoformat(),
+        }
 
 
 class ExpiryAnchor(str, Enum):
@@ -236,6 +338,67 @@ class ExpiryPolicy:
             guard += 1
         return count
 
+    # ── held-position rule (compulsory closure at the 2TD boundary) ──────
+    def forced_close_trading_days(self, kind: str) -> int:
+        """The compulsory-closure boundary for this instrument class (0 = off)."""
+        return _forced_close_trading_days(kind)
+
+    def forced_close_date(self, symbol: str, kind: str, expiry: date) -> Optional[date]:
+        """The EARLIEST session on which a position on `expiry` must be closed.
+
+        Walks BACKWARD from expiry over real sessions and keeps the earliest one
+        still inside the boundary — so a holiday inside the final week moves the
+        answer automatically instead of needing a second table.
+        Returns None when the rule is disabled for this class.
+        """
+        boundary = _forced_close_trading_days(kind)
+        if boundary <= 0:
+            return None
+        best: Optional[date] = None
+        cursor = expiry
+        guard = 0
+        while guard < 60:
+            if self._is_trading_day(cursor):
+                if self.trading_days_until(expiry, today=cursor) <= boundary:
+                    best = cursor
+                else:
+                    break
+            cursor -= timedelta(days=1)
+            guard += 1
+        return best
+
+    def must_force_close(
+        self,
+        symbol: str,
+        kind: str,
+        expiry: date,
+        *,
+        today: Optional[date] = None,
+    ) -> HoldDecision:
+        """May this OPEN position keep riding `expiry` today, or is it forced out?
+
+        `must_close` is True once ``trading_days_until(expiry) <= boundary`` —
+        including an expiry that is already in the past, which is the degenerate
+        case the rule exists to make impossible.
+        """
+        symbol_u = str(symbol or "").upper().strip()
+        kind_u = "INDEX" if str(kind or "").upper().strip() in _INDEX_KINDS else "STOCK"
+        today = today or datetime.now(IST).date()
+        boundary = _forced_close_trading_days(kind_u)
+        ttd = self.trading_days_until(expiry, today=today)
+        must = bool(boundary > 0 and ttd <= boundary)
+        return HoldDecision(
+            symbol=symbol_u,
+            kind=kind_u,
+            expiry=expiry,
+            trading_days_to_expiry=ttd,
+            boundary_trading_days=boundary,
+            must_close=must,
+            reason=FORCED_CLOSE_REASON if must else None,
+            forced_close_date=self.forced_close_date(symbol_u, kind_u, expiry),
+            evaluated_on=today,
+        )
+
     # ── the policy ───────────────────────────────────────────────────────
     def decide(
         self,
@@ -243,7 +406,16 @@ class ExpiryPolicy:
         kind: str,
         *,
         today: Optional[date] = None,
+        held_expiry: Optional[date] = None,
     ) -> ExpiryDecision:
+        """Which expiry does `symbol` trade today?
+
+        ``held_expiry`` is the ROLL SPLIT: pass the expiry of an already-open
+        position and the instrument KEEPS that contract (the 5TD stock roll is
+        suppressed for it) while every un-held instrument rolls normally.  The
+        held contract is not held forever — ``must_force_close`` is what ends
+        it, and that is enforced in the EXIT cascade, not here.
+        """
         symbol = str(symbol or "").upper().strip()
         kind_u = str(kind or "").upper().strip()
         kind_u = "INDEX" if kind_u in _INDEX_KINDS else "STOCK"
@@ -252,6 +424,28 @@ class ExpiryPolicy:
         ladder = self.expiry_ladder(symbol, today=today, count=3)
         if not ladder:  # pragma: no cover - guarded by expiry_ladder's loop
             raise RuntimeError(f"[ExpiryPolicy] could not build an expiry ladder for {symbol}")
+
+        if held_expiry is not None:
+            if held_expiry >= today:
+                return ExpiryDecision(
+                    symbol=symbol,
+                    kind=kind_u,
+                    current_expiry=held_expiry,
+                    next_expiry=next((d for d in ladder if d > held_expiry), None),
+                    rolled=False,
+                    roll_reason=HELD_POSITION_ROLL_REASON,
+                    trading_days_to_current=self.trading_days_until(held_expiry, today=today),
+                    anchor=ExpiryAnchor.CALENDAR,
+                    resolved_at=datetime.now(IST),
+                )
+            logger.error(
+                "[ExpiryPolicy] %s carries an OPEN position on an EXPIRED contract (%s < %s). "
+                "The held-expiry override is refused and the normal ladder answers; the "
+                "position must be force-closed by the exit cascade.",
+                symbol,
+                held_expiry.isoformat(),
+                today.isoformat(),
+            )
 
         nearest = ladder[0]
         ttd = self.trading_days_until(nearest, today=today)
@@ -474,20 +668,28 @@ class ExpiryPolicy:
         kind: str,
         *,
         today: Optional[date] = None,
+        held_expiry: Optional[date] = None,
     ) -> ExpiryDecision:
-        """Session-cached decision when validated, otherwise a fresh calendar one."""
+        """Session-cached decision when validated, otherwise a fresh calendar one.
+
+        A ``held_expiry`` always bypasses the session cache: the cache holds the
+        UN-held (rolled) answer for the symbol, and returning it for a held
+        instrument is exactly the orphaning bug this override exists to prevent.
+        """
         today = today or datetime.now(IST).date()
-        if self._session_date == today:
+        if held_expiry is None and self._session_date == today:
             cached = self.validated_decision(symbol)
             if cached is not None:
                 return cached
-        return self.decide(symbol, kind, today=today)
+        return self.decide(symbol, kind, today=today, held_expiry=held_expiry)
 
     def session_cache_state(self) -> dict[str, Any]:
         return {
             "session_date": self._session_date.isoformat() if self._session_date else None,
             "validated_symbols": sorted(self._validated),
             "stock_roll_trading_days": _stock_roll_trading_days(),
+            "stock_forced_close_trading_days": _forced_close_trading_days("STOCK"),
+            "index_forced_close_trading_days": _forced_close_trading_days("INDEX"),
             "last_report": self._last_report.as_dict() if self._last_report else None,
         }
 
@@ -507,3 +709,46 @@ def monthly_expiry(symbol: str, year: int, month: int) -> date:
 
 def is_trading_day(day: date) -> bool:
     return expiry_policy._is_trading_day(day)
+
+
+def instrument_kind(symbol: str) -> str:
+    """INDEX | STOCK for an underlying symbol, from the F&O index list."""
+    try:
+        from analysis.instruments import ALL_FO_INDICES
+
+        return "INDEX" if str(symbol or "").upper().strip() in set(ALL_FO_INDICES) else "STOCK"
+    except Exception:  # noqa: BLE001
+        return "STOCK"
+
+
+def forced_close_check(
+    symbol: str,
+    expiry: Optional[date],
+    *,
+    kind: Optional[str] = None,
+    today: Optional[date] = None,
+) -> Optional[HoldDecision]:
+    """The ONE gate both MACD exit cascades call.
+
+    Returns None when the feature is OFF (either flag) or the expiry is
+    unusable, so a caller's ``if decision and decision.must_close`` is
+    byte-identically inert with the flags down.  Both flags are required:
+    ``EXPIRY_POLICY_ENABLED`` (the whole calendar policy) AND
+    ``EXPIRY_POLICY_FORCED_CLOSE_ENABLED`` (this rule specifically), so the
+    compulsory closure can be reverted on its own without giving up the
+    calendar expiry fix.
+    """
+    if expiry is None:
+        return None
+    try:
+        from core.config import settings
+
+        if not bool(getattr(settings, "EXPIRY_POLICY_ENABLED", False)):
+            return None
+        if not bool(getattr(settings, "EXPIRY_POLICY_FORCED_CLOSE_ENABLED", False)):
+            return None
+    except Exception:  # noqa: BLE001 - settings unavailable ⇒ stay inert
+        return None
+    return expiry_policy.must_force_close(
+        symbol, kind or instrument_kind(symbol), expiry, today=today
+    )

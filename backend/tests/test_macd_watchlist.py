@@ -682,3 +682,279 @@ def test_stock_roll_horizon_is_flag_gated_not_a_restart_side_effect(monkeypatch)
     monkeypatch.setattr(settings, "EXPIRY_POLICY_ENABLED", True, raising=False)
     monkeypatch.setattr(settings, "EXPIRY_POLICY_STOCK_ROLL_TRADING_DAYS", 5, raising=False)
     assert aw._stock_roll_horizon(S1_CONTRACT_PROFILE.stock_rollover_td) == 5
+
+
+# ══════════════════════════════════════════════════════════════════════
+# Held-position roll split (owner rule 2026-07-21)
+#   * un-held instruments roll at 5TD;
+#   * a PINNED instrument keeps its own expiry across that roll;
+#   * the pin RELEASES only after the position actually closes, and the
+#     replacement lands on the NEW (post-roll) expiry;
+#   * an unreadable refined paper book FAILS CLOSED.
+# ══════════════════════════════════════════════════════════════════════
+def _pin_env(monkeypatch, preopen_env, pin):
+    async def _pins():
+        return {(pin.underlying, pin.option_type): pin}
+
+    monkeypatch.setattr(mw, "load_open_position_pins", _pins)
+    return preopen_env
+
+
+def test_sticky_pin_survives_the_5td_roll(monkeypatch, preopen_env) -> None:
+    """On 2026-07-24 the stock universe has rolled to 2026-08-25, but the pinned
+    CE is still open on 2026-07-28 — it keeps ITS contract, and the row says so
+    (rolled=False + the HELD reason) instead of looking like a row the roll
+    forgot. The un-held PE of the SAME underlying rolls: held-ness is per
+    contract, not per symbol."""
+    from core.expiry_policy import HELD_POSITION_ROLL_REASON
+
+    persisted, chain_loader = preopen_env
+    pin = mw.PositionPin(
+        underlying="RELIANCE", option_type="CE", strike=400.0,
+        expiry=date(2026, 7, 28), position_id="pos-1", source="agent_positions",
+    )
+    _pin_env(monkeypatch, preopen_env, pin)
+
+    asyncio.run(
+        mw.build_preopen_watchlist(
+            universe=[("RELIANCE", "STOCK")],
+            chain_loader=chain_loader,
+            session_date=date(2026, 7, 24),
+        )
+    )
+    rows = {row["option_type"]: row for row in persisted}
+    assert rows["CE"]["expiry"] == date(2026, 7, 28)     # held contract kept
+    assert rows["CE"]["expiry_rolled"] is False
+    assert HELD_POSITION_ROLL_REASON in rows["CE"]["notes"]
+    assert rows["CE"]["pinned_position_id"] == "pos-1"
+    # …while the un-held side of the same name rolled to the next monthly.
+    assert rows["PE"]["expiry"] == date(2026, 8, 25)
+    assert rows["PE"]["expiry_rolled"] is True
+
+
+def test_pin_is_not_released_on_the_forced_close_day_itself(monkeypatch, preopen_env) -> None:
+    """2026-07-24 IS the 2TD boundary. The exit cascade closes the position that
+    day, but the watchlist must NOT pre-emptively drop the pin — releasing a pin
+    while the position is still open is exactly how a row gets orphaned."""
+    from core.config import settings
+
+    monkeypatch.setattr(settings, "EXPIRY_POLICY_ENABLED", True, raising=False)
+    monkeypatch.setattr(settings, "EXPIRY_POLICY_FORCED_CLOSE_ENABLED", True, raising=False)
+    persisted, chain_loader = preopen_env
+    pin = mw.PositionPin(
+        underlying="RELIANCE", option_type="CE", strike=400.0,
+        expiry=date(2026, 7, 28), position_id="pos-1", source="agent_positions",
+    )
+    _pin_env(monkeypatch, preopen_env, pin)
+
+    asyncio.run(
+        mw.build_preopen_watchlist(
+            universe=[("RELIANCE", "STOCK")],
+            chain_loader=chain_loader,
+            session_date=date(2026, 7, 24),
+        )
+    )
+    row = {r["option_type"]: r for r in persisted}["CE"]
+    assert row["pinned_position_id"] == "pos-1"
+    assert row["strike"] == 400.0
+    assert row["expiry"] == date(2026, 7, 28)
+    # …but the row is LEGIBLE about what is about to happen to it.
+    assert "forced_expiry_roll_2td_due" in row["notes"]
+
+
+def test_pin_release_after_forced_closure_repicks_on_the_new_expiry(monkeypatch) -> None:
+    """The release. `expiry=None` ⇒ resolve the CURRENT policy expiry, which on
+    2026-07-24 is the post-roll 2026-08-25. Same PK row, pin cleared — the row
+    is overwritten in place, never orphaned or duplicated."""
+    from core.config import settings
+
+    monkeypatch.setattr(settings, "MACD_LIQUID_STRIKE_SELECTION_ENABLED", True, raising=False)
+    monkeypatch.setattr(settings, "MACD_WARMUP_ENABLED", False, raising=False)
+    saved: list[dict] = []
+
+    async def _persist(rows):
+        saved.extend(rows)
+        return len(rows)
+
+    async def _existing(session_date=None):
+        return {("RELIANCE", "CE"): {"repick_seq": 0, "frozen_at": None,
+                                     "pinned_position_id": "pos-1"}}
+
+    async def _prior(**kwargs):
+        return {"CE": {500.0: 900.0, 600.0: 10.0}, "PE": {}}
+
+    monkeypatch.setattr(mw, "persist_rows", _persist)
+    monkeypatch.setattr(mw, "load_session_watchlist", _existing)
+    monkeypatch.setattr(mw, "load_prior_volume", _prior)
+
+    entries = _chain(550.0, {500: (5000, 0), 600: (5000, 0), 700: (5000, 0)})
+    row = asyncio.run(
+        mw.repick_after_close(
+            underlying="RELIANCE", option_type="CE", kind="STOCK",
+            spot_price=550.0, chain_entries=entries,
+            session_date=date(2026, 7, 24),   # expiry deliberately NOT passed
+        )
+    )
+    assert row["expiry"] == date(2026, 8, 25)   # the NEW expiry, post-roll
+    assert row["pinned_position_id"] is None    # the release itself
+    assert row["underlying"] == "RELIANCE" and row["option_type"] == "CE"
+    assert len(saved) == 1                      # ONE row, upserted in place
+
+
+def test_unreadable_refined_paper_book_fails_closed(monkeypatch, tmp_path) -> None:
+    """A book we could not parse is NOT an empty book. Treating it as empty
+    would silently drop every refined pin and drift the ladder off live
+    positions, so the read RAISES and the caller leaves the ladder alone."""
+    paper = tmp_path / "paper"
+    paper.mkdir()
+    (paper / "paper_positions.json").write_text("{ this is not json")
+    monkeypatch.setattr("macd_refined.config.RUNTIME_ROOT", str(tmp_path), raising=False)
+
+    with pytest.raises(mw.RefinedPaperBookUnreadable):
+        mw._load_refined_paper_pins()
+
+
+def test_missing_refined_paper_book_is_genuinely_empty(monkeypatch, tmp_path) -> None:
+    """A book that was never written is a different fact from one we failed to
+    read — only this one is safe to treat as no pins."""
+    monkeypatch.setattr("macd_refined.config.RUNTIME_ROOT", str(tmp_path), raising=False)
+    assert mw._load_refined_paper_pins() == []
+
+
+def test_refined_paper_pins_read_the_key_the_book_actually_writes(monkeypatch, tmp_path) -> None:
+    """macd_refined.paper writes `open_positions`; reading only
+    `positions`/`open` silently returned [] for the real book."""
+    import json
+
+    paper = tmp_path / "paper"
+    paper.mkdir()
+    (paper / "paper_positions.json").write_text(
+        json.dumps(
+            {
+                "open_positions": [
+                    {
+                        "position_id": "ref-1", "status": "open", "underlying": "NBCC",
+                        "option_type": "PE", "strike": 105.0, "expiry": "2026-07-28",
+                    }
+                ]
+            }
+        )
+    )
+    monkeypatch.setattr("macd_refined.config.RUNTIME_ROOT", str(tmp_path), raising=False)
+    pins = mw._load_refined_paper_pins()
+    assert [(p.underlying, p.option_type, p.strike, p.expiry) for p in pins] == [
+        ("NBCC", "PE", 105.0, date(2026, 7, 28))
+    ]
+    assert pins[0].source == "macd_refined_paper"
+
+
+# ══════════════════════════════════════════════════════════════════════
+# Adversarial verification pass (2026-07-21) — two defects the build's own
+# tests could not see, because each test exercised a path production never
+# takes.
+# ══════════════════════════════════════════════════════════════════════
+def test_forced_close_note_is_gated_by_the_same_flag_as_the_closure(
+    monkeypatch, preopen_env
+) -> None:
+    """DISCRIMINATING. The pinned row's note claims "the exit cascade
+    force-closes it today". That is only true when
+    EXPIRY_POLICY_FORCED_CLOSE_ENABLED is up. The build called
+    ``must_force_close`` directly — which reads only the *horizon* setting, not
+    the enable flag — so with the feature OFF the row was still annotated with a
+    closure that would never happen. Asserted OFF first: this fails against the
+    pre-fix code."""
+    from core.config import settings
+
+    persisted, chain_loader = preopen_env
+    pin = mw.PositionPin(
+        underlying="RELIANCE", option_type="CE", strike=400.0,
+        expiry=date(2026, 7, 28), position_id="pos-1", source="agent_positions",
+    )
+    _pin_env(monkeypatch, preopen_env, pin)
+
+    # ── flags DOWN: no claim of a closure that cannot happen ──
+    monkeypatch.setattr(settings, "EXPIRY_POLICY_ENABLED", False, raising=False)
+    monkeypatch.setattr(settings, "EXPIRY_POLICY_FORCED_CLOSE_ENABLED", False, raising=False)
+    asyncio.run(
+        mw.build_preopen_watchlist(
+            universe=[("RELIANCE", "STOCK")],
+            chain_loader=chain_loader,
+            session_date=date(2026, 7, 24),      # the 2TD boundary itself
+        )
+    )
+    row = {r["option_type"]: r for r in persisted}["CE"]
+    assert "forced_expiry_roll_2td_due" not in row["notes"]
+    assert row["pinned_position_id"] == "pos-1"  # the pin itself is untouched
+
+    # ── flags UP: the row says what is about to happen ──
+    persisted.clear()
+    monkeypatch.setattr(settings, "EXPIRY_POLICY_ENABLED", True, raising=False)
+    monkeypatch.setattr(settings, "EXPIRY_POLICY_FORCED_CLOSE_ENABLED", True, raising=False)
+    asyncio.run(
+        mw.build_preopen_watchlist(
+            universe=[("RELIANCE", "STOCK")],
+            chain_loader=chain_loader,
+            session_date=date(2026, 7, 24),
+        )
+    )
+    row = {r["option_type"]: r for r in persisted}["CE"]
+    assert "forced_expiry_roll_2td_due" in row["notes"]
+
+
+def test_release_repicks_on_the_cycle_expiry_not_the_held_one(monkeypatch) -> None:
+    """DISCRIMINATING, through the REAL production caller.
+
+    ``_build_row`` overwrites its cycle expiry with the FROZEN row's expiry, and
+    the frozen row of a pinned position is the pre-roll month. It then handed
+    that overwritten value to ``_release_stale_pin`` → ``repick_after_close``,
+    so a released pin re-picked straight back onto 2026-07-28 — the contract the
+    position had just been closed out of — instead of the post-roll 2026-08-25.
+    The build's own release test never saw this: it called
+    ``repick_after_close`` directly with the expiry omitted, a path the only
+    production caller never takes.
+    """
+    from core.config import settings
+
+    monkeypatch.setattr(settings, "EXPIRY_POLICY_ENABLED", True, raising=False)
+    rows = {
+        # frozen CE still pinned to the HELD, pre-roll July contract
+        ("RELIANCE", "CE"): {"strike": 400.0, "strike_status": "ok",
+                             "pinned_position_id": "pos-1", "expiry": date(2026, 7, 28)},
+    }
+    svc = _svc(monkeypatch, rows, {})       # no open pins ⇒ the position CLOSED
+
+    class _Adapter:
+        async def get_option_chain(self, key, expiry):
+            return FakeChain(
+                entries=_chain(550.0, {500: (5000, 0), 600: (5000, 0)}),
+                spot_price=550.0,
+            )
+
+    async def _contracts(meta, expiry, adapter):
+        return []
+
+    async def _payload(*args, **kwargs):
+        return None
+
+    monkeypatch.setattr(svc, "_get_contracts_for_expiry", _contracts)
+    monkeypatch.setattr(svc, "_build_option_payload", _payload)
+
+    calls: list[dict] = []
+
+    async def _repick(**kwargs):
+        calls.append(kwargs)
+        return {"strike": 500.0, "strike_status": "ok", "pinned_position_id": None,
+                "expiry": kwargs.get("expiry")}
+
+    monkeypatch.setattr("market_data.macd_watchlist.repick_after_close", _repick)
+
+    meta = aw.UnderlyingMeta(
+        symbol="RELIANCE", kind="STOCK", spot_instrument_key="NSE_EQ|X",
+        underlying_key="NSE_EQ|X",
+    )
+    # The cycle resolves the post-roll August contract; the frozen row is July.
+    asyncio.run(
+        svc._build_row(meta, "2026-08-25", date(2026, 8, 25), _Adapter(), None)
+    )
+    assert calls, "the release never ran — the test would prove nothing"
+    assert calls[0]["expiry"] == date(2026, 8, 25)   # NOT the held 2026-07-28

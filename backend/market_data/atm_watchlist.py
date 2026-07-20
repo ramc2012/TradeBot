@@ -2035,6 +2035,30 @@ class ATMWatchlistService:
                 )
                 return None
 
+        # The expiry the UNIVERSE points at this cycle, captured BEFORE the
+        # frozen ladder overrides it below. Past the 5TD stock roll a pinned row
+        # deliberately sits on the OLD month while this stays on the new one, so
+        # the pin RELEASE must re-pick against this value — re-picking against
+        # the overridden `expiry_date` would put the replacement straight back
+        # onto the contract the position was just closed out of.
+        cycle_expiry_date = expiry_date
+
+        # Divergence guard: `_build_row` fetches ONE chain per underlying, so a
+        # CE and PE frozen on DIFFERENT expiries (one side pinned to a held
+        # pre-roll contract, the other rolled) cannot both be priced correctly
+        # here. Say so LOUDLY rather than silently pricing one side off the
+        # wrong chain. See the pre-open builder's per-contract held-ness.
+        _ce_exp = (frozen_ce or {}).get("expiry")
+        _pe_exp = (frozen_pe or {}).get("expiry")
+        if _ce_exp and _pe_exp and _ce_exp != _pe_exp:
+            logger.error(
+                "[ATM watchlist] {} frozen CE/PE expiries DIVERGE (CE={} PE={}). Only one "
+                "chain is fetched per underlying, so the {} side will be priced off the "
+                "other side's expiry this cycle. This happens when one side is pinned to a "
+                "held pre-roll contract — treat the divergent side's premiums as suspect.",
+                meta.symbol, _ce_exp.isoformat(), _pe_exp.isoformat(), "PE",
+            )
+
         frozen_expiry = (frozen_ce or frozen_pe or {}).get("expiry")
         if frozen_expiry and frozen_expiry != expiry_date:
             logger.debug(
@@ -2140,11 +2164,13 @@ class ATMWatchlistService:
         # that has since closed is re-picked here from the LIVE spot at this
         # moment (owner spec), instead of staying frozen on a contract nobody
         # holds for the rest of the session.
+        # `cycle_expiry_date` (NOT the frozen-overridden `expiry_date`) so a
+        # released pin re-picks on the expiry the rest of the universe trades.
         frozen_ce = await self._release_stale_pin(
-            meta, "CE", frozen_ce, chain.entries, spot_price, expiry_date
+            meta, "CE", frozen_ce, chain.entries, spot_price, cycle_expiry_date
         )
         frozen_pe = await self._release_stale_pin(
-            meta, "PE", frozen_pe, chain.entries, spot_price, expiry_date
+            meta, "PE", frozen_pe, chain.entries, spot_price, cycle_expiry_date
         )
         # The frozen ladder WINS over the per-cycle pick. `no_liquid_strike`
         # rows never reach here — they returned None above. A `not_ready` row

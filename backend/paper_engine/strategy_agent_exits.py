@@ -289,6 +289,44 @@ class StrategyExitMixin:
                 await self._close_position(runtime, pos, latest_close, "window_end", qty=pos.qty)
                 continue
 
+            # ── forced_expiry_roll_2td — COMPULSORY closure backstop ──────────
+            # Owner rule (2026-07-21): "positions can be held upto 2 trading
+            # days till expiry before compulsory closure". Indian single-stock
+            # options are PHYSICALLY settled, so a held contract must never
+            # reach expiry — this is the guarantee, holiday-aware in TRADING
+            # days (core.expiry_policy), not calendar days.
+            #
+            # Placed LAST, deliberately, AFTER window_end:
+            #   * window_end (expiry − WINDOW_BUFFER_DAYS = 7 calendar days) is
+            #     STRICTLY EARLIER than the 2TD boundary at today's settings, so
+            #     under normal configuration it fires first and KEEPS its
+            #     attribution. Nothing about existing exits changes.
+            #   * this branch therefore only takes attribution when window_end
+            #     did NOT fire (e.g. a position carrying a later stored
+            #     window_end). The owner's rule is a CEILING on how long a
+            #     position may be held, not a new, earlier exit — so a backstop
+            #     is the correct shape, and the reason code keeps these closures
+            #     separable in P&L review.
+            # Double-close safe: `continue`s immediately, and _close_position
+            # itself returns early when the symbol has already left
+            # runtime.positions (a concurrent/normal exit always wins).
+            if pos_expiry is not None and pos.qty > 0 and pos.phase != self.PHASE_EXITED:
+                from core.expiry_policy import forced_close_check
+
+                hold = forced_close_check(pos.underlying, pos_expiry, today=today_ist)
+                if hold is not None and hold.must_close:
+                    logger.warning(
+                        "[{lane}] {sym} COMPULSORY EXPIRY CLOSURE: expiry={exp} is {ttd} "
+                        "trading day(s) away (boundary {bound}) — closing as {reason}.",
+                        lane=runtime.key, sym=pos.symbol, exp=pos_expiry.isoformat(),
+                        ttd=hold.trading_days_to_expiry, bound=hold.boundary_trading_days,
+                        reason=hold.reason,
+                    )
+                    await self._close_position(
+                        runtime, pos, latest_close, str(hold.reason), qty=pos.qty
+                    )
+                    continue
+
         latest_prices = {sym: position.current_price for sym, position in runtime.positions.items()}
         if latest_prices:
             runtime.portfolio.update_prices(latest_prices)

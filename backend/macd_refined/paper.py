@@ -23,6 +23,7 @@ from typing import Any
 from uuid import uuid4
 
 from core.config import settings
+from core.expiry_policy import FORCED_CLOSE_REASON
 from macd_refined.config import MACD_REFINED_INITIAL_CAPITAL
 from macd_refined.risk import kill_switch_state
 
@@ -433,6 +434,12 @@ class MacdRefinedPaperStore:
             if bool(mark.get("window_end_passed")):
                 gross_delta, net_delta = self._book(p, latest, spot, now, qty, "window_end")
                 return True, gross_delta, net_delta
+            # Compulsory expiry closure is time-based too, so it must survive a
+            # frozen mark exactly as window_end does — a stale feed can never
+            # buy a physically-settled contract another day.
+            if bool(mark.get("forced_close")):
+                gross_delta, net_delta = self._book(p, latest, spot, now, qty, FORCED_CLOSE_REASON)
+                return True, gross_delta, net_delta
             return False, 0.0, 0.0
 
         # (a) HARD STOP — gap-safe: always evaluated on the freshest mark.
@@ -475,6 +482,21 @@ class MacdRefinedPaperStore:
         # (d) WINDOW END — final time-based exit on the remainder.
         if bool(mark.get("window_end_passed")):
             gross_delta, net_delta = self._book(p, latest, spot, now, int(p.get("quantity_units") or 0), "window_end")
+            realized_delta += gross_delta
+            realized_net_delta += net_delta
+            return True, realized_delta, realized_net_delta
+
+        # (e) COMPULSORY EXPIRY CLOSURE — owner rule 2026-07-21, the BACKSTOP.
+        # A held position may ride its own expiry past the watchlist roll, but
+        # only until <= N TRADING days remain (core.expiry_policy computes the
+        # flag; see live._forced_close_flag). Placed AFTER window_end so that
+        # rule keeps its attribution when it fires first — at today's settings
+        # (window end = expiry − 7 calendar days) it always does, and this is
+        # the guarantee behind it. Separately attributed for P&L review.
+        if bool(mark.get("forced_close")):
+            gross_delta, net_delta = self._book(
+                p, latest, spot, now, int(p.get("quantity_units") or 0), FORCED_CLOSE_REASON
+            )
             realized_delta += gross_delta
             realized_net_delta += net_delta
             return True, realized_delta, realized_net_delta

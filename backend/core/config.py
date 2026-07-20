@@ -340,6 +340,24 @@ class Settings(BaseSettings):
     # says five days; the legacy value was 3 (agent/strategy_config
     # MIN_TTE_DAYS_STOCK, which remains the separate ENTRY gate).
     EXPIRY_POLICY_STOCK_ROLL_TRADING_DAYS: int = 5
+    # ── Held-position compulsory closure (owner rule, 2026-07-21) ──────────
+    # The 5TD roll above moves the WATCHLIST. It says nothing about positions
+    # already OPEN on the near expiry — those keep their own contract past the
+    # roll and are COMPULSORILY CLOSED once <= N trading days remain, because
+    # a physically-settled single-stock option must never reach expiry.
+    # Boundary semantics are stated exactly in core/expiry_policy.py: closure
+    # fires on the first session with trading_days_until(expiry) <= N, i.e. N
+    # sessions still remain AFTER the closing session (2026-07-28 ⇒ 2026-07-24).
+    # Requires BOTH EXPIRY_POLICY_ENABLED and this flag; OFF ⇒ the exit cascade
+    # is byte-identical to today (window_end remains the terminal exit).
+    EXPIRY_POLICY_FORCED_CLOSE_ENABLED: bool = False
+    EXPIRY_POLICY_FORCED_CLOSE_TRADING_DAYS: int = 2
+    # Indices are CASH settled — there is no delivery to be compelled into, so
+    # the stock rationale does not carry over and this defaults to 0 = DISABLED.
+    # A SEPARATE knob on purpose: enabling it for indices would be an expiry-day
+    # gamma/liquidity argument, a different decision, and must never happen as a
+    # side effect of tuning the stock number.
+    EXPIRY_POLICY_INDEX_FORCED_CLOSE_TRADING_DAYS: int = 0
     # MACD_PREOPEN_WATCHLIST_ENABLED — build the ATM strike ladder ONCE
     # pre-market from settled/pre-open prices and FREEZE it for the session
     # (no intraday re-racing). Removes the moving-ATM defect class that causes

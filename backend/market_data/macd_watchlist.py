@@ -749,6 +749,15 @@ async def load_open_position_pins() -> dict[tuple[str, str], PositionPin]:
     return pins
 
 
+class RefinedPaperBookUnreadable(RuntimeError):
+    """The macd_refined paper book exists but could not be parsed.
+
+    Raised rather than swallowed: an unreadable book is NOT an empty book, and
+    treating it as empty would silently drop every sticky pin the refined lane
+    owns and let the ladder drift away from live positions.  FAIL CLOSED.
+    """
+
+
 def _load_refined_paper_pins() -> list[PositionPin]:
     import json
     from pathlib import Path
@@ -757,19 +766,32 @@ def _load_refined_paper_pins() -> list[PositionPin]:
         from macd_refined.config import RUNTIME_ROOT
 
         path = Path(RUNTIME_ROOT) / "paper" / "paper_positions.json"
-    except Exception:  # noqa: BLE001
-        return []
+    except Exception as exc:  # noqa: BLE001
+        raise RefinedPaperBookUnreadable(
+            f"cannot locate the macd_refined paper book: {exc!r}"
+        ) from exc
     if not path.exists():
+        # A book that has never been written is genuinely empty — that is a
+        # different fact from a book we failed to read, and only this one is safe.
         return []
     try:
         payload = json.loads(path.read_text() or "{}")
     except Exception as exc:  # noqa: BLE001
-        logger.warning("[MACD watchlist] refined paper book unreadable ({!r})", exc)
-        return []
+        logger.error(
+            "[MACD watchlist] refined paper book at {} is UNREADABLE ({!r}). Sticky pins "
+            "are UNKNOWN — failing closed rather than treating the book as empty and "
+            "drifting the ladder off live positions.",
+            path, exc,
+        )
+        raise RefinedPaperBookUnreadable(str(path)) from exc
 
     raw: Iterable[Any]
     if isinstance(payload, dict):
-        raw = payload.get("positions") or payload.get("open") or []
+        # "open_positions" is the key macd_refined.paper actually writes; the
+        # other two are tolerated shapes. Reading only "positions"/"open" made
+        # this function silently return [] for the real book — every refined pin
+        # was lost.
+        raw = payload.get("open_positions") or payload.get("positions") or payload.get("open") or []
         if isinstance(raw, dict):
             raw = list(raw.values())
     elif isinstance(payload, list):
@@ -1003,7 +1025,7 @@ async def build_preopen_watchlist(
                     series is `not_ready` and EXCLUDED, never padded
     """
     from core.config import settings
-    from core.expiry_policy import expiry_policy
+    from core.expiry_policy import expiry_policy, forced_close_check
     from market_data.atm_watchlist import resolve_row_strikes
 
     session_date = session_date or _now_ist().date()
@@ -1109,18 +1131,56 @@ async def build_preopen_watchlist(
         for side in ("CE", "PE"):
             pin = pins.get((symbol, side))
             if pin is not None:
-                # STICKY DOMINATES. The window is not even computed: no
-                # liquidity move can drift a strike that carries an open
-                # position, and the pin holds the EXPIRY too (a stock position
-                # already open on the near month is NOT rolled by the
-                # watchlist roll — the roll governs only NEW positions).
+                # STICKY DOMINATES, and it now SURVIVES THE ROLL.
+                #
+                # The window is not even computed: no liquidity move can drift a
+                # strike that carries an open position. The pin also holds the
+                # EXPIRY — and past the 5TD stock roll that expiry is no longer
+                # the one the rest of the universe points at, which is exactly
+                # the owner's split ("except for held positions other
+                # instruments to rollover to next expiry"). Resolving the row
+                # through `held_expiry` makes that explicit instead of implicit:
+                # the row records rolled=False with the HELD reason, so a pinned
+                # row on the old month can never be mistaken for a stale row the
+                # roll forgot. The un-held side of the SAME underlying still
+                # rolls (it uses `decision` below), which is the rule read
+                # literally: held-ness is per contract, not per symbol.
+                held_decision = expiry_policy.resolve(
+                    symbol, kind, today=session_date, held_expiry=pin.expiry
+                )
+                pin_expiry = pin.expiry or decision.current_expiry
+                # Through the SHARED gate, not must_force_close directly: the
+                # note below claims "the exit cascade force-closes it today",
+                # and that is only true when the exit cascade's own flags are
+                # up. Calling the raw computation here annotated rows with a
+                # closure that would never happen while
+                # EXPIRY_POLICY_FORCED_CLOSE_ENABLED was down.
+                hold = forced_close_check(
+                    symbol, pin_expiry, kind=kind, today=session_date
+                )
+                note = f"sticky:{pin.source}"
+                if held_decision.roll_reason:
+                    note = f"{note};{held_decision.roll_reason}"
+                if hold is not None and hold.must_close:
+                    # The pin is NOT released here — releasing it while the
+                    # position is still open is precisely how a row gets
+                    # orphaned. It is released by `repick_after_close` once the
+                    # exit cascade has actually closed the position.
+                    note = f"{note};{hold.reason}_due"
+                    logger.warning(
+                        "[MACD watchlist] {} {} is PINNED to {} which is {} trading day(s) "
+                        "from expiry (boundary {}) — the exit cascade force-closes it today; "
+                        "the pin holds until it actually closes.",
+                        symbol, side, pin_expiry.isoformat(),
+                        hold.trading_days_to_expiry, hold.boundary_trading_days,
+                    )
                 rows.append(
                     _row_defaults(
                         session_date=session_date,
                         underlying=symbol,
                         option_type=side,
                         kind=kind,
-                        expiry=pin.expiry or decision.current_expiry,
+                        expiry=pin_expiry,
                         strike=pin.strike,
                         price_anchor=anchor.anchor,
                         anchor_price=anchor.price,
@@ -1128,12 +1188,12 @@ async def build_preopen_watchlist(
                         strike_status=STATUS_OK,
                         pinned_position_id=pin.position_id,
                         frozen_at=now,
-                        expiry_anchor=decision.anchor.value,
-                        expiry_rolled=decision.rolled,
+                        expiry_anchor=held_decision.anchor.value,
+                        expiry_rolled=held_decision.rolled,
                         warmup_status=WARMUP_READY,
                         warmup_path="pinned_open_position",
                         warmup_bars=requirement.min_bars,
-                        notes=f"sticky:{pin.source}",
+                        notes=note,
                     )
                 )
                 report.pinned += 1
@@ -1235,7 +1295,7 @@ async def repick_after_close(
     kind: str,
     spot_price: float,
     chain_entries,
-    expiry: date,
+    expiry: Optional[date] = None,
     session_date: Optional[date] = None,
     warm_up: Optional[bool] = None,
 ) -> Optional[dict[str, Any]]:
@@ -1245,6 +1305,14 @@ async def repick_after_close(
     price at that time" — so the anchor here is the LIVE spot at the moment of
     closure, not the pre-open anchor.
 
+    THE PIN RELEASE. While the position was open the row was pinned to the
+    position's own (possibly pre-roll) expiry. Now that it has closed — whether
+    by a normal exit or by the compulsory `forced_expiry_roll_2td` closure — the
+    instrument re-joins the normal universe, so `expiry=None` resolves the
+    CURRENT policy expiry, which past the 5TD roll is the NEXT month. The written
+    row carries `pinned_position_id=None`, which is the release itself: the row
+    is overwritten in place (same PK), never orphaned or duplicated.
+
     The replacement is warmed under the BULK quota class so it can never starve
     live decision traffic; if the pre-open band warm-up already covered the
     window, this costs ZERO broker calls.  A replacement that is not warm is
@@ -1252,11 +1320,18 @@ async def repick_after_close(
     series.
     """
     from core.config import settings
+    from core.expiry_policy import expiry_policy
     from market_data.atm_watchlist import resolve_row_strikes
 
     session_date = session_date or _now_ist().date()
     side = str(option_type or "").upper()
     underlying = str(underlying or "").upper()
+    if expiry is None:
+        expiry = expiry_policy.resolve(underlying, kind, today=session_date).current_expiry
+        logger.info(
+            "[MACD watchlist] pin RELEASED for {} {} — re-picking on the policy expiry {}",
+            underlying, side, expiry.isoformat(),
+        )
     entries = list(chain_entries or [])
     if side not in {"CE", "PE"} or not entries or spot_price <= 0:
         logger.error(

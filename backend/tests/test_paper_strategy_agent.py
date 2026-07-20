@@ -1878,3 +1878,150 @@ def test_s2_capability_gate_skips_unsupported_symbol(monkeypatch) -> None:
     assert agent._strategy2_unresolved == [{"underlying": "BANKEX", "reason": "unsupported_s2_symbol"}]
     assert all("BANKEX" not in syms for syms in requested)
     assert any("NIFTY" in syms for syms in requested)
+
+
+# ══════════════════════════════════════════════════════════════════════════
+# forced_expiry_roll_2td — compulsory closure of a HELD position (2026-07-21)
+#
+# Owner rule: a position may be held past the 5TD watchlist roll, but only
+# until <= 2 TRADING days remain to expiry. Wired as the LAST rung of the
+# EXISTING cascade, behind window_end, so no existing exit changes attribution.
+# ══════════════════════════════════════════════════════════════════════════
+def _forced_close_fixture(monkeypatch, *, today, window_end):
+    """A flat, un-stale S1 position on the 2026-07-28 expiry."""
+    import paper_engine.strategy_agent_exits as exits_module
+
+    agent = PaperStrategyAgent()
+    runtime = agent._strategy1
+    runtime.positions.clear()
+    position = StrategyPosition(
+        symbol="OPT:RELIANCE:2026-07-28:1400:CE",
+        underlying="RELIANCE",
+        expiry="2026-07-28",
+        strike=1400.0,
+        option_type="CE",
+        instrument_key="NSE_FO|999",
+        trading_symbol="RELIANCE 1400 CE",
+        qty=500,
+        initial_qty=500,
+        entry_price=100.0,
+        current_price=100.0,
+        peak_price=100.0,
+        entry_bar_time="2026-07-06T09:15:00+05:30",
+        entered_at="2026-07-06T09:15:00+05:30",
+        signal_reason="macd_zero_cross",
+        window_end=window_end,
+    )
+    runtime.positions[position.symbol] = position
+
+    start = datetime(2026, 7, 6, 9, 15, tzinfo=UTC)
+    candles = [
+        {"time": (start + timedelta(minutes=30 * index)).isoformat(), "close": 100.0}
+        for index in range(20)
+    ]
+
+    async def fake_load_candles(**_kwargs):
+        return candles
+
+    async def fake_latest_quotes(_positions):
+        return {}
+
+    closed: list[str] = []
+
+    async def fake_close_position(_runtime, _position, _exit_price, reason, **_kwargs):
+        closed.append(reason)
+
+    monkeypatch.setattr(strategy_agent_module.option_history_service, "load_candles", fake_load_candles)
+    monkeypatch.setattr(agent, "_latest_position_quote_map", fake_latest_quotes)
+    monkeypatch.setattr(agent, "_close_position", fake_close_position)
+    monkeypatch.setattr(
+        exits_module, "_now_ist", lambda: datetime.combine(today, datetime.min.time()).replace(
+            hour=10, tzinfo=timezone(timedelta(hours=5, minutes=30))
+        )
+    )
+    return agent, runtime, closed
+
+
+def _set_forced_close_flags(monkeypatch, enabled: bool) -> None:
+    from core.config import settings
+
+    monkeypatch.setattr(settings, "EXPIRY_POLICY_ENABLED", enabled, raising=False)
+    monkeypatch.setattr(settings, "EXPIRY_POLICY_FORCED_CLOSE_ENABLED", enabled, raising=False)
+
+
+def test_forced_expiry_closure_fires_at_the_2td_boundary(monkeypatch) -> None:
+    """2026-07-24 is 2 trading days from the 2026-07-28 expiry. window_end is
+    deliberately set LATER so the new rung is the binding one and can be seen."""
+    _set_forced_close_flags(monkeypatch, True)
+    agent, runtime, closed = _forced_close_fixture(
+        monkeypatch, today=date(2026, 7, 24), window_end="2026-07-27"
+    )
+    asyncio.run(agent._manage_exits(runtime))
+    assert closed == ["forced_expiry_roll_2td"]
+
+
+def test_forced_expiry_closure_does_not_fire_at_3td(monkeypatch) -> None:
+    _set_forced_close_flags(monkeypatch, True)
+    agent, runtime, closed = _forced_close_fixture(
+        monkeypatch, today=date(2026, 7, 23), window_end="2026-07-27"
+    )
+    asyncio.run(agent._manage_exits(runtime))
+    assert closed == []
+
+
+def test_forced_expiry_closure_is_inert_with_the_flags_off(monkeypatch) -> None:
+    """Byte-identical with the flags down: the same position on the same date
+    produces NO exit at all."""
+    _set_forced_close_flags(monkeypatch, False)
+    agent, runtime, closed = _forced_close_fixture(
+        monkeypatch, today=date(2026, 7, 24), window_end="2026-07-27"
+    )
+    asyncio.run(agent._manage_exits(runtime))
+    assert closed == []
+
+
+def test_window_end_keeps_its_attribution_when_both_would_fire(monkeypatch) -> None:
+    """window_end (expiry − 7 calendar days) is STRICTLY EARLIER than the 2TD
+    boundary at today's settings, so it fires first and keeps attribution. The
+    new rung is a BACKSTOP; it must never re-label an existing exit."""
+    _set_forced_close_flags(monkeypatch, True)
+    agent, runtime, closed = _forced_close_fixture(
+        monkeypatch, today=date(2026, 7, 24), window_end="2026-07-21"
+    )
+    asyncio.run(agent._manage_exits(runtime))
+    assert closed == ["window_end"]
+
+
+def test_forced_expiry_closure_cannot_double_close(monkeypatch) -> None:
+    """The real _close_position pops the symbol from runtime.positions and
+    returns early if it is already gone — so a second cycle (or a racing normal
+    exit) cannot book the same position twice."""
+    _set_forced_close_flags(monkeypatch, True)
+    agent, runtime, _closed = _forced_close_fixture(
+        monkeypatch, today=date(2026, 7, 24), window_end="2026-07-27"
+    )
+    booked: list[str] = []
+
+    async def counting_close(rt, position, price, reason, qty=None, partial=False):
+        if position.symbol not in rt.positions:
+            return
+        rt.positions.pop(position.symbol, None)
+        booked.append(reason)
+
+    monkeypatch.setattr(agent, "_close_position", counting_close)
+    asyncio.run(agent._manage_exits(runtime))
+    asyncio.run(agent._manage_exits(runtime))
+    assert booked == ["forced_expiry_roll_2td"]
+    assert runtime.positions == {}
+
+
+def test_index_position_is_not_force_closed_by_the_stock_rule(monkeypatch) -> None:
+    """Cash-settled: no delivery risk, separate knob, default 0 = disabled."""
+    _set_forced_close_flags(monkeypatch, True)
+    agent, runtime, closed = _forced_close_fixture(
+        monkeypatch, today=date(2026, 7, 24), window_end="2026-07-27"
+    )
+    position = next(iter(runtime.positions.values()))
+    position.underlying = "NIFTY"
+    asyncio.run(agent._manage_exits(runtime))
+    assert closed == []

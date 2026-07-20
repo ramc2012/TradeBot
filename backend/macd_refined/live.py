@@ -35,6 +35,27 @@ from core.config import settings
 from macd_refined.indicators import compute_macd, iv_rank, turnover_rupees, zero_cross_up
 from macd_refined.risk import size_position
 
+
+def _forced_close_flag(underlying: str, expiry: str, today: date) -> bool:
+    """Owner rule (2026-07-21): a held position may ride its expiry only until
+    <= N TRADING days remain, then it is compulsorily closed.
+
+    Returns False whenever the policy flags are down, so the mark payload is
+    byte-identical to today with the feature off.  Computed here (next to
+    ``window_end_passed``) rather than inside ``paper.PaperBook`` so the paper
+    book stays a pure state machine over the marks it is handed.
+    """
+    try:
+        from core.expiry_policy import forced_close_check
+
+        decision = forced_close_check(
+            underlying, date.fromisoformat(str(expiry)[:10]), today=today
+        )
+    except Exception:  # noqa: BLE001 - never let the policy break the mark pass
+        return False
+    return bool(decision is not None and decision.must_close)
+
+
 _INDEX_FYERS = {
     "NIFTY": "NSE:NIFTY50-INDEX",
     "BANKNIFTY": "NSE:NIFTYBANK-INDEX",
@@ -871,6 +892,10 @@ class MacdRefinedLiveEngine:
             marks[str(p.get("position_id") or "")] = {
                 "premium": premium, "spot": spot, "window_end_passed": window_passed, "fresh": fresh,
             }
+            # Added ONLY when it is True, so with the policy flags down the mark
+            # payload is byte-identical to before this change.
+            if _forced_close_flag(und, expiry, today):
+                marks[str(p.get("position_id") or "")]["forced_close"] = True
         return marks
 
     # ── Seconds-cadence protective-exit heartbeat ─────────────────────────
@@ -1042,6 +1067,9 @@ class MacdRefinedLiveEngine:
                 "premium": ref_premium, "spot": spot,
                 "window_end_passed": window_passed, "fresh": fresh,
             }
+            # Added ONLY when it is True — see the note in _marks_for_open.
+            if _forced_close_flag(str(p.get("underlying") or ""), expiry, today):
+                marks[pid]["forced_close"] = True
 
         open_before = len(positions)
         summary = self.paper.sync_cycle(
