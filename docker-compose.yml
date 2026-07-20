@@ -23,13 +23,24 @@ services:
       timeout: 5s
       retries: 5
     restart: unless-stopped
-    # OOM containment (2026-07): the Docker VM (7.75GiB) is shared with a second
-    # TimescaleDB + ~24 containers. PG was auto-tuned as if it owned the whole VM
-    # (shared_buffers 1.94GB) → 786 VM-wide OOM signal-9 kills in 7 days. The
-    # postgres memory caps live in ALTER SYSTEM (persisted in the data volume);
-    # this cgroup limit bounds nomadcurie_db's fair share so a query spike is
-    # contained here instead of the VM OOM-killer taking down a random container.
-    mem_limit: 3g
+    # OOM containment (2026-07): the Docker VM was 7.75GiB and shared with a
+    # second TimescaleDB + ~24 containers. PG was auto-tuned as if it owned the
+    # whole VM (shared_buffers 1.94GB) → 786 VM-wide OOM signal-9 kills in 7
+    # days. The postgres memory caps live in ALTER SYSTEM (persisted in the data
+    # volume); this cgroup limit bounds nomadcurie_db's fair share so a query
+    # spike is contained here instead of the VM OOM-killer taking down a random
+    # container.
+    #
+    # 2026-07-20: raised 3g → 6g. The containment premise no longer holds — the
+    # VM is now 9.70GiB and only 5 of 28 containers run (the second TimescaleDB
+    # is stopped), so ~6.8GiB sat idle while PG strangled. At 3g the cgroup read
+    # 2.99/3.22GB (92.8%) while IDLE, with oom_kill=6 and 2,360,715 memory.max
+    # events — i.e. continuous page-cache reclaim taxing every query on the hot
+    # path, not merely a crash risk. 6g leaves ~3.7GiB for the rest of the VM.
+    # If the second TimescaleDB is ever restarted, revisit this number first.
+    # Paired with max_parallel_workers_per_gather 5 → 2 (ALTER SYSTEM) to bound
+    # the worst-case parallel-scan spike that caused the kills.
+    mem_limit: 6g
     shm_size: 512m
 
   redis:
