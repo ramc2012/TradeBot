@@ -537,8 +537,11 @@ class Settings(BaseSettings):
     # then a ROTATING batch of ready stocks under a concurrency semaphore
     # with a per-symbol wait_for. Full NIFTY-50 rotation completes in
     # ceil(ready/batch) cycles (2 cycles at the defaults) — bounded worst
-    # case ≈ 3×75s (indices) + ceil(25/5)×20s (stocks) ≈ 325s < the 600s
+    # case ≈ 3×75s (indices) + ceil(25/5)×30s (stocks) ≈ 375s < the 600s
     # runner timeout, and typically well under one 180s cadence interval.
+    # (2026-07-20: the stock bound moved 20s→30s below; this budget line was
+    # left stale by that change and is corrected here. Re-derive it whenever
+    # DIRECTIONAL_STOCK_SYMBOL_TIMEOUT_SECONDS or the batch size moves.)
     DIRECTIONAL_STOCK_SCAN_CONCURRENCY: int = 5
     # A cold but healthy stock snapshot measured 18-20s under concurrent lane
     # load. Keep a small completion margin; deeper stages retain their own
