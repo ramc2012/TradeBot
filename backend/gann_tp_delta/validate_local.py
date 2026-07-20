@@ -70,6 +70,12 @@ def validate(symbol: str) -> dict | None:
     raw = guard_ohlc(raw, rth=False)  # US RTH already applied; keep dedup + magnitude guard
     cfg = clone_default_config()
     cfg.setdefault("backtest", {})["max_events"] = 1_000_000
+    # `backtest.max_bars` (260) silently tails EVERY bt.run() input to the last
+    # ~260 bars. On the 15-minute frame that is ~10 NSE sessions, so this sweep
+    # was advertising a full-history-window and measuring two weeks of it — and the
+    # conviction floors now shipped in config.py were selected from that. Lift it
+    # (mirrors analysis/gann_cost_honest_eval.py) so the window is the real one.
+    cfg.setdefault("backtest", {})["max_bars"] = 10_000_000
     frame = _build_frame(raw, cfg)
     bt = GannTPDeltaBacktester(cfg)
     span_days = (pd.to_datetime(frame["time"]).max() - pd.to_datetime(frame["time"]).min()).days

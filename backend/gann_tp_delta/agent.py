@@ -5,7 +5,7 @@ import asyncio
 import json
 import math
 import uuid
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
@@ -41,15 +41,79 @@ def _now() -> str:
     return datetime.now(UTC).isoformat()
 
 
+#: Timeframe units that denominate a signal bar in CALENDAR DAYS rather than
+#: in minutes.  These cannot be expressed as a wall-clock bucket: an epoch
+#: aligned 375-minute bucket advances ~3.8 times per 24 h regardless of
+#: whether a session traded.
+_TIMEFRAME_DAY_UNITS: dict[str, int] = {"day": 1, "d": 1, "week": 7, "w": 7}
+_TIMEFRAME_MINUTE_UNITS: dict[str, int] = {"minute": 1, "min": 1, "hour": 60, "hr": 60}
+
+
 def _timeframe_minutes(timeframe: str | None) -> int:
-    """'15minute' -> 15. Falls back to 15 so a bad config can never turn the
-    time stop back into a per-scan counter."""
-    digits = "".join(ch for ch in str(timeframe or "") if ch.isdigit())
+    """'15minute' -> 15, '1hour' -> 60. Returns 0 for day/week timeframes.
+
+    The UNIT matters, not just the digits.  Reading only the digits made
+    ``'1day'`` mean ONE MINUTE, so with ``risk.time_stop_bars`` re-denominated
+    to 10 daily bars the time stop would have fired ten minutes after entry —
+    the exact opposite of "positions elapsing more than a day".  A zero return
+    means "not a minute-denominated bar"; use :func:`_signal_bar_bucket`,
+    which handles both.  Falls back to 15 so a bad config can never turn the
+    time stop back into a per-scan counter.
+    """
+    token = str(timeframe or "").strip().lower()
+    digits = "".join(ch for ch in token if ch.isdigit())
+    letters = "".join(ch for ch in token if ch.isalpha())
+    if letters in _TIMEFRAME_DAY_UNITS:
+        return 0
     try:
-        minutes = int(digits)
+        count = int(digits)
     except ValueError:
         return 15
-    return minutes if minutes > 0 else 15
+    if count <= 0:
+        return 15
+    # Unrecognised unit: assume minutes, which is what every legacy timeframe
+    # in this lane ('5minute'/'15minute') already meant.
+    return max(count * _TIMEFRAME_MINUTE_UNITS.get(letters, 1), 1)
+
+
+def _signal_bar_bucket(timeframe: str | None) -> int:
+    """Monotone id of the CURRENT signal bar for ``timeframe``.
+
+    Minute/hour timeframes bucket wall-clock time.  Day and week timeframes
+    bucket the IST CALENDAR DATE, so ``bars_held`` advances once per date
+    roll — which is what makes ``time_stop_bars = 10`` a two-week stop rather
+    than a ten-minute one, and what guarantees a position cannot reach the
+    time stop in under a day.
+    """
+    token = str(timeframe or "").strip().lower()
+    letters = "".join(ch for ch in token if ch.isalpha())
+    span = _TIMEFRAME_DAY_UNITS.get(letters)
+    if span is None:
+        return _bar_bucket(_timeframe_minutes(timeframe))
+    digits = "".join(ch for ch in token if ch.isdigit())
+    try:
+        count = max(int(digits), 1)
+    except ValueError:
+        count = 1
+    ordinal = (datetime.now(UTC) + timedelta(hours=5, minutes=30)).date().toordinal()
+    return ordinal // max(span * count, 1)
+
+
+#: Hours an exit-pending position may sit unclosable before it is escalated.
+#: One full session plus a margin — long enough that an ordinary stale
+#: quote resolves on its own, short enough that a three-session freeze
+#: cannot pass unnoticed again.
+_EXIT_PENDING_ALARM_HOURS = 8.0
+
+
+def _exit_pending_age_hours(since: Any) -> float | None:
+    try:
+        stamp = datetime.fromisoformat(str(since))
+    except (TypeError, ValueError):
+        return None
+    if stamp.tzinfo is None:
+        stamp = stamp.replace(tzinfo=UTC)
+    return (datetime.now(UTC) - stamp).total_seconds() / 3600.0
 
 
 def _bar_bucket(minutes: int) -> int:
@@ -177,14 +241,26 @@ class GannTPDeltaPaperAgent:
         # the Gann engine still scans them. They execute as FUTURES (commodity
         # options are no longer ingested), priced off the live commodity spot
         # frame the Gann data layer already loads.
+        # SILENT-TRUNCATION FIX. Previously only COMMODITY symbols got a
+        # synthetic row, so an index missing from the NSE ATM watchlist simply
+        # vanished from the scan: on 2026-07-20, 828 of 868 cycles covered 6 of
+        # the 7 configured symbols and SENSEX — the only symbol the lane
+        # actually traded that day — appeared in 40. Index rows without option
+        # legs are fine: `_scan_decision` falls through to `_option_from_store`.
         present = {str(r.get("underlying") or "").upper() for r in rows}
         for sym in sorted(configured_universe):
             if sym in present:
                 continue
-            if _commodity_spec(sym) is not None:
-                rows.append({"underlying": sym, "is_commodity": True})
+            rows.append({"underlying": sym, "is_commodity": _commodity_spec(sym) is not None})
+        universe_size = len(rows)
         if max_underlyings > 0:
             rows = rows[:max_underlyings]
+        # Report coverage as a NUMBER every cycle rather than trusting silence.
+        scan_coverage = {
+            "universe_size": universe_size,
+            "scanned": len(rows),
+            "missing": sorted(configured_universe - {str(r.get("underlying") or "").upper() for r in rows}),
+        }
 
         row_by_underlying = {str(row.get("underlying") or "").upper(): row for row in rows}
         # Per-run snapshot cache. The scan builds a live snapshot for every
@@ -371,6 +447,9 @@ class GannTPDeltaPaperAgent:
             if close_reason:
                 if executable_mark_fresh:
                     position.pop("exit_pending_reason", None)
+                    position.pop("exit_pending_since", None)
+                    position.pop("exit_pending_age_hours", None)
+                    position.pop("exit_pending_stuck", None)
                     closed_position = self._close_position(position, close_reason)
                     state.setdefault("closed_positions", []).append(closed_position)
                     self._journal({"event": "close", "position": closed_position})
@@ -379,12 +458,40 @@ class GannTPDeltaPaperAgent:
                     # Never fabricate a paper fill from an underlying candle or
                     # stale/wrong option leg. Preserve the position until the
                     # exact contract has a fresh executable mark.
+                    first_flagged = position.get("exit_pending_since") or _now()
                     position["exit_pending_reason"] = close_reason
+                    position["exit_pending_since"] = first_flagged
                     position["mark_status"] = "exact_contract_quote_stale"
+                    # The guard is right, but it had no timeout, no escalation
+                    # and no alarm: a GOLD futures position sat flagged
+                    # `gann_stop` for THREE sessions with its P&L unbooked
+                    # because synthetic commodity rows carry no `futures` leg,
+                    # so the mark could never refresh. Refusing to fabricate a
+                    # fill must not mean refusing to say anything.
+                    age_hours = _exit_pending_age_hours(first_flagged)
+                    position["exit_pending_age_hours"] = age_hours
+                    if age_hours is not None and age_hours >= _EXIT_PENDING_ALARM_HOURS:
+                        position["exit_pending_stuck"] = True
+                        logger.error(
+                            f"[GannPaperAgent] exit-pending STUCK: {position.get('underlying')} "
+                            f"{position.get('instrument_type')} reason={close_reason} "
+                            f"age={age_hours:.1f}h — exact-contract mark has not refreshed"
+                        )
+                        self._journal({
+                            "event": "exit_pending_stuck",
+                            "underlying": position.get("underlying"),
+                            "instrument_type": position.get("instrument_type"),
+                            "reason": close_reason,
+                            "age_hours": round(age_hours, 2),
+                            "opened_at": position.get("opened_at"),
+                        })
                     remaining.append(position)
             else:
                 if executable_mark_fresh:
                     position.pop("exit_pending_reason", None)
+                    position.pop("exit_pending_since", None)
+                    position.pop("exit_pending_age_hours", None)
+                    position.pop("exit_pending_stuck", None)
                     position["mark_status"] = "fresh"
                 remaining.append(position)
         state["open_positions"] = remaining
@@ -663,7 +770,7 @@ class GannTPDeltaPaperAgent:
         bars_held advances once per SIGNAL BAR (e.g. 15 minutes), not once per
         scan cycle — the scan runs every ~60s, and counting cycles made the
         26-bar time stop fire in ~26 minutes instead of ~6.5 hours."""
-        bucket = _bar_bucket(_timeframe_minutes(timeframe))
+        bucket = _signal_bar_bucket(timeframe)
         if _safe_int(position.get("last_bar_bucket"), -1) != bucket:
             position["last_bar_bucket"] = bucket
             position["bars_held"] = _safe_int(position.get("bars_held"), 0) + 1

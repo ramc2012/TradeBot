@@ -16,6 +16,7 @@ from typing import Any
 import pandas as pd
 
 from gann_tp_delta.anchors import select_anchor
+from gann_tp_delta.cycles import resolve_price_unit
 from gann_tp_delta.geometry import gann_fan, price_time_square, square_of_nine, time_cycles
 from gann_tp_delta.scaling import harmonic_speed
 from gann_tp_delta.strategy import evaluate_gann_signal
@@ -105,8 +106,19 @@ class GannTPDeltaBacktester:
                 h, _ = harmonic_speed(window, mode=h_mode, anchor_config=cfg["anchors"], scaling_config=cfg["scaling"])
                 angles = gann_fan(anchor=anchor, h=h.value, current_bar_index=end, current_price=close,
                                   ratios=gcfg["gann_ratios"], projection_bars=int(gcfg["projection_bars"]))
+                # `geometry.price_unit` may be the string "auto" (the per
+                # instrument Square-of-Nine chart scale). float("auto") raises,
+                # so resolve it the same way service._snapshot does — otherwise
+                # the backtester, tune_sweep and both validators all die on the
+                # shipped config, and the backtest must stay identical to live.
+                _unit_cfg = gcfg.get("price_unit", 1.0)
+                _price_unit = (
+                    resolve_price_unit(close)
+                    if str(_unit_cfg).lower() == "auto"
+                    else float(_unit_cfg or 1.0)
+                )
                 sq9 = square_of_nine(anchor_price=anchor.price, current_price=close,
-                                     price_unit=float(gcfg["price_unit"]), degrees=gcfg["sq9_degrees"])
+                                     price_unit=_price_unit, degrees=gcfg["sq9_degrees"])
                 cycles = time_cycles(anchor=anchor, current_bar_index=end, cycles=gcfg["bar_cycles"],
                                      window_bars=int(gcfg["cycle_window_bars"]))
                 square = price_time_square(anchor=anchor, current_bar_index=end, current_price=close,

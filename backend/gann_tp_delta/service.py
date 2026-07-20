@@ -14,6 +14,7 @@ from gann_tp_delta.anchors import select_anchor
 from gann_tp_delta.agent import GannTPDeltaPaperAgent
 from gann_tp_delta.backtest import GannTPDeltaBacktester
 from gann_tp_delta.config import clone_default_config
+from gann_tp_delta.cycles import resolve_price_unit
 from gann_tp_delta.data import GannTPDeltaDataStore
 from gann_tp_delta.geometry import gann_fan, nearest_angle, nearest_sq9, price_time_square, square_of_nine, time_cycles
 from gann_tp_delta.paper import GannTPDeltaPaperStore
@@ -97,7 +98,16 @@ class GannTPDeltaService:
         h_mode: str = "median_tpd",
         manual_h: float | None = None,
     ) -> dict[str, Any]:
-        spot, source, history_symbol = await self.store.load_live_spot_frame(underlying, lookback_days=max(int(lookback_sessions), 1))
+        if timeframe in {"1day", "1week"}:
+            # Higher-order path: read the 30-minute store and resample to daily
+            # rather than stretching the intraday loader's lookback_days (which
+            # capped reachable daily history at ~120 bars and pulled a deep
+            # 1-minute frame to produce them).
+            spot, source, history_symbol = await self.store.load_live_daily_frame(
+                underlying, sessions=max(int(lookback_sessions), 1)
+            )
+        else:
+            spot, source, history_symbol = await self.store.load_live_spot_frame(underlying, lookback_days=max(int(lookback_sessions), 1))
         # WS-1.1 bulkhead: the feature-frame build + Gann geometry are CPU-bound and
         # were running inline on the event loop — a fully-inline ~12.8s scan that froze
         # tick ingest / Redis publish / WS push. Offload to a worker thread so the data
@@ -272,7 +282,18 @@ class GannTPDeltaService:
         h, vectors = harmonic_speed(frame, mode=h_mode, anchor_config=self.config["anchors"], scaling_config=self.config["scaling"], manual_h=manual_h)
         geometry_cfg = self.config["geometry"]
         angles = gann_fan(anchor=anchor, h=h.value, current_bar_index=current_index, current_price=current_price, ratios=geometry_cfg["gann_ratios"], projection_bars=int(geometry_cfg["projection_bars"]))
-        sq9 = square_of_nine(anchor_price=anchor.price, current_price=current_price, price_unit=float(geometry_cfg["price_unit"]), degrees=geometry_cfg["sq9_degrees"])
+        # `price_unit` may be "auto" — see gann_tp_delta.cycles.resolve_price_unit.
+        # Pinned at 1.0 the Square-of-Nine step size is a pure function of the
+        # price LEVEL (0.19 % per 45 deg for SENSEX, 3.2 % for NATURALGAS), which
+        # made the cardinal-SQ9 gate a no-op for expensive instruments and
+        # unreachable for cheap ones — a hard blocker for stock coverage.
+        price_unit_cfg = geometry_cfg.get("price_unit", 1.0)
+        price_unit = (
+            resolve_price_unit(current_price)
+            if str(price_unit_cfg).lower() == "auto"
+            else float(price_unit_cfg or 1.0)
+        )
+        sq9 = square_of_nine(anchor_price=anchor.price, current_price=current_price, price_unit=price_unit, degrees=geometry_cfg["sq9_degrees"])
         cycles = time_cycles(anchor=anchor, current_bar_index=current_index, cycles=geometry_cfg["bar_cycles"], window_bars=int(geometry_cfg["cycle_window_bars"]))
         square = price_time_square(anchor=anchor, current_bar_index=current_index, current_price=current_price, h=h.value, tolerance=float(geometry_cfg["squaring_tolerance"]))
         if self.config.get("strategy", {}).get("enabled", True):

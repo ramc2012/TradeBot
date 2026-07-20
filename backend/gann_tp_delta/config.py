@@ -33,8 +33,35 @@ DEFAULT_CONFIG: dict[str, Any] = {
     "description": "Price-time geometry, TP Delta harmonic speed, Square of Nine, cycles, and confluence research.",
     "data_root": DATA_ROOT,
     "runtime_root": RUNTIME_ROOT,
+    # Seed universe. The lane's REAL universe is resolved from the spot store at
+    # runtime when `universe_expansion.enabled` is on (all indices + stock spots +
+    # commodity futures — 225 symbols have 30-minute history today: 6 indices,
+    # 211 stocks, 8 MCX roots). This list is the fallback and the staging default.
     "universe": ["NIFTY", "BANKNIFTY", "SENSEX", "CRUDEOIL", "GOLD", "SILVERM", "NATURALGAS"],
-    "timeframes": ["5minute", "15minute", "1hour", "1day"],
+    # ── Universe expansion (GAP 2) ─────────────────────────────────────────
+    # Measured cost of the 15-minute path: ~1.06 s per live_snapshot at
+    # scan_concurrency=3 ⇒ ~77 s for 217 instruments, i.e. MORE than the 60 s
+    # runner cadence, and ~36x today's DB read load on a Postgres OOM-killed
+    # twice on 2026-07-20. The daily path is what makes the wide universe
+    # affordable (one bounded 30-minute read per instrument per SESSION rather
+    # than a deep intraday read per instrument per MINUTE), so this stays OFF
+    # until the daily horizon has been observed live for a session.
+    # `batch_size` is a round-robin slice per cycle with LOUD accounting
+    # (scanned vs universe_size) — never a silent truncation.
+    # NOT YET WIRED INTO THE LIVE LANE. `agent.run_once` still scans
+    # `universe` only; `universe.resolve_universe` / `universe.SweepCursor` are
+    # consumed by the OFFLINE sidecars (watchlist_runner.py, run_cycle_mapping
+    # .py). Flipping `enabled` to True changes NOTHING until the agent reads
+    # it — saying so here rather than leaving another orphaned knob like
+    # `geometry.calendar_cycles`.
+    "universe_expansion": {
+        "enabled": False,
+        "classes": ["index", "stock", "commodity"],
+        "batch_size": 12,
+        "min_recent_bars": 5,
+        "freshness_days": 7,
+    },
+    "timeframes": ["1day", "15minute", "1hour"],
     "feature_engine": {
         "ema_fast": 8,
         "ema_slow": 21,
@@ -64,11 +91,45 @@ DEFAULT_CONFIG: dict[str, Any] = {
         "sq9_degrees": SQ9_DEGREES,
         "bar_cycles": BAR_CYCLES,
         "calendar_cycles": CALENDAR_CYCLES,
-        "price_unit": 1.0,
+        # "auto" ⇒ gann_tp_delta.cycles.resolve_price_unit picks the power-of-ten
+        # chart scale that puts sqrt(price/unit) in [60, 600]. With the unit
+        # pinned at 1.0 the SQ9 step is a pure function of price LEVEL — 0.19 %
+        # per 45 deg at SENSEX 77k vs 3.2 % at NATURALGAS 275 — so the
+        # `reversal_require_cardinal_sq9` gate was a no-op for the expensive
+        # symbols and unreachable for the cheap ones and for every NSE stock.
+        # Of the seven legacy symbols only NATURALGAS changes (1.0 -> 0.01).
+        "price_unit": "auto",
         "near_pct": 0.003,
-        "cycle_window_bars": 2,
+        # On the daily frame the tolerance window is +/- DAYS, and it is set to
+        # match cycle_prominence.TOLERANCE_SESSIONS so the live gate and the
+        # historical measurement use the same window.
+        "cycle_window_bars": 3,
         "squaring_tolerance": 0.05,
-        "projection_bars": 80,
+        # 60 daily bars ~ one quarter of forward projection (was 80 fifteen-
+        # minute bars ~ 3 sessions).
+        "projection_bars": 60,
+    },
+    # ── Gann TIME cycles (calendar-day, from gann_tp_delta.cycles) ─────────
+    # `geometry.bar_cycles` counts BARS and is what the legacy engine used; on
+    # the 15-minute frame "cycle 90" was 22.5 hours, not Gann's 90 days. The
+    # real families live in gann_tp_delta/cycles.py and are consumed off daily
+    # bars. `gate_on_prominence` makes the lane trade only cycles that are
+    # demonstrably prominent for that instrument — which, on the 2026-07-20
+    # mapping run, is NONE (see docstring in cycle_prominence.py and the
+    # gann_cycle_prominence table). It therefore stays OFF: turning it on with
+    # an empty prominent set would silently stop the lane rather than
+    # improving it.
+    # NOT YET WIRED INTO THE LIVE STRATEGY. `evaluate_gann_signal` still gates
+    # on `geometry.bar_cycles` (bar counts, now DAILY bars ⇒ trading-day counts,
+    # which is closer to Gann than the old 15-minute counts but still not his
+    # CALENDAR counts). The calendar library in gann_tp_delta/cycles.py is
+    # consumed by the watchlist writer and the prominence mapper only.
+    "time_cycles": {
+        "enabled": True,
+        "gate_on_prominence": False,
+        "prominence_run_id": None,
+        "tolerance_sessions": 3,
+        "next_turn_horizon_days": 180,
     },
     "signals": {
         "score_threshold": 3,
@@ -88,7 +149,11 @@ DEFAULT_CONFIG: dict[str, Any] = {
         "adx_trend_min": 18.0,          # ADX >= this ⇒ a real trend is present
         "regime_min_score": 2,          # |EMA+structure+1x1 vote| >= this ⇒ directional
         "structure_lookback": 8,
-        "min_signal_bars": 40,           # completed post-warmup bars required to evaluate
+        # Completed post-warmup bars required to evaluate. On the DAILY frame
+        # this is 60 sessions (~3 months), which is the minimum that gives the
+        # 5-bar pivot engine enough confirmed anchors for a fan plus an ADX
+        # that has left its warm-up. It was 40 fifteen-minute bars (~1 session).
+        "min_signal_bars": 60,
         # Archetype thresholds on the weighted conviction (~0..10 scale).
         # Tuned from a 150-day offline sweep (gann_tp_delta/tune_sweep.py): the
         # conviction floor is the dominant lever — higher = fewer, better trades
@@ -149,13 +214,26 @@ DEFAULT_CONFIG: dict[str, Any] = {
         "breakeven_at_r": 1.0,               # move stop→entry after +1R (on the underlying)
         "trail_start_r": 1.5,                # start trailing after +1.5R
         "trail_atr_mult": 2.0,               # trail this many ATR behind the underlying
-        "time_stop_bars": 26,                # exit if held this long without +0.5R progress
+        # Exit if held this long without +0.5R progress. The unit is SIGNAL
+        # BARS, so the horizon change re-denominates it: 26 fifteen-minute bars
+        # was 6.5 hours (intraday), 10 DAILY bars is two trading weeks. This is
+        # the one risk parameter the horizon change strictly required — leaving
+        # it at 26 would have meant a 26-session (~5 week) time stop, and
+        # leaving it at 2 would have closed every trade inside the week and
+        # defeated the "elapsing more than a day" instruction outright.
+        "time_stop_bars": 10,
         "time_stop_min_r": 0.5,
         "option_premium_hard_stop_pct": 55.0,  # premium backstop vs theta bleed
         "option_expiry_day_exit": True,
     },
     "backtest": {
         "max_events": 120,
+        # WARNING: this tails EVERY bt.run() input. It is an interactive-UI
+        # guard, not a research setting — the tuning/validation sweeps now lift
+        # it explicitly. Every per-underlying conviction floor above was
+        # selected from runs that inherited this cap (~10 sessions on the
+        # 15-minute frame, presented as 150-day results) and must be treated as
+        # UNVALIDATED until those sweeps are re-run.
         "max_bars": 260,
         "risk_reward": 1.6,
     },
@@ -164,13 +242,34 @@ DEFAULT_CONFIG: dict[str, Any] = {
     },
     "paper_agent": {
         "enabled": True,
-        "timeframe": "15minute",
-        "lookback_sessions": 45,
+        # ── HIGHER-ORDER HORIZON (GAP 3) ───────────────────────────────────
+        # The owner's instruction: "it trades only higher order time elapsing
+        # more than a day". This lane was deciding on 15-minute bars while its
+        # Gann time constructs are calendar objects — 45/90/144/180/360 are day
+        # counts tied to degrees of the annual circle, and translating them
+        # into bars of an arbitrary intraday grid makes the numbers a
+        # coincidence. On the daily frame those same integers become the
+        # constructs they are named after, at zero conceptual cost, and the fan
+        # angles get room to separate instead of stacking four "confluences"
+        # into one location a few basis points wide.
+        "timeframe": "1day",
+        # DAILY sessions now, not intraday days. 400 ~ 1.6 years: enough for
+        # the regime engine, the pivot/anchor engine and every cycle this
+        # history can actually test (<= ~92 days), and it is one bounded
+        # 30-minute read per instrument.
+        "lookback_sessions": 400,
         "anchor_mode": "auto_pivot",
         "h_mode": "median_tpd",
         "live_refresh": False,
         "lots": 1,
         "max_positions": 20,
+        # OWNER DECISION PENDING (deliberately left unchanged by the horizon
+        # change): with a 10-session time stop the lane now holds for up to two
+        # trading weeks, and the current expression is an ATM weekly option.
+        # Weekly ATM against a two-week hold is a theta wall — the DTE floor and
+        # the strike (ATM vs slightly-ITM) are an expression choice with real
+        # cost implications, not a mechanical consequence of the horizon, so it
+        # is flagged rather than silently retuned here.
         "max_days_to_expiry": 45,
         "max_entry_quote_age_seconds": 120,
         # Memory guard: each scanned underlying loads a deep 1-min frame (~20-30k

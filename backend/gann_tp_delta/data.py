@@ -55,6 +55,52 @@ class GannTPDeltaDataStore:
                 pass
         return await self.directional_store.load_live_spot_frame(underlying, lookback_days=lookback_days)
 
+    async def load_live_daily_frame(
+        self, underlying: str, sessions: int = 400
+    ) -> tuple[pd.DataFrame, str, str]:
+        """DAILY bars for the higher-order Gann path.
+
+        The intraday loader was being asked for daily data by stretching
+        ``lookback_days``, which capped reachable daily history at ~120 bars
+        (router limit 180 days) and pulled a deep 1-minute frame to produce a
+        handful of rows. This reads the 30-minute store directly — bounded on
+        ``time`` with literal UTC timestamps so chunk exclusion holds — and
+        resamples to IST daily. 400 sessions is a ~1.6 year window, well
+        inside the ~1,250 daily sessions the indices carry.
+        """
+        from sqlalchemy import text
+
+        from db.database import AsyncSessionLocal
+        from gann_tp_delta.daily_data import SOURCE_INTERVAL, resample_to_daily, window_bounds
+
+        start, end = window_bounds(sessions=sessions)
+        symbol = str(underlying).upper()
+        async with AsyncSessionLocal() as session:
+            result = await session.execute(
+                text(
+                    """
+                    SELECT time, open, high, low, close, volume, oi
+                    FROM underlying_spot_candles
+                    WHERE underlying = :underlying
+                      AND interval = :interval
+                      AND time >= :start
+                      AND time <  :end
+                    ORDER BY time
+                    """
+                ),
+                {
+                    "underlying": symbol,
+                    "interval": SOURCE_INTERVAL,
+                    "start": start,
+                    "end": end,
+                },
+            )
+            rows = [dict(row) for row in result.mappings()]
+        frame = resample_to_daily(rows)
+        if len(frame.index) > int(sessions):
+            frame = frame.tail(int(sessions)).reset_index(drop=True)
+        return frame, f"underlying_spot_candles:{SOURCE_INTERVAL}->1day", symbol
+
     def build_feature_frame(
         self,
         spot_frame: pd.DataFrame,
@@ -63,6 +109,13 @@ class GannTPDeltaDataStore:
         lookback_sessions: int | None,
         underlying: str | None = None,
     ) -> pd.DataFrame:
+        if timeframe in {"1day", "1week"}:
+            # Daily bars are stamped at IST midnight, so the intraday
+            # session-window filter below would discard every row. They also
+            # need the OPPOSITE completeness rule: the final bar is the
+            # in-progress session, and a Gann entry requires a closed
+            # confirmation bar, so it is dropped until the date rolls.
+            return self._daily_feature_frame(spot_frame, timeframe, lookback_sessions)
         spot_frame = self._session_frame(spot_frame, underlying)
         source_latest = (
             pd.Timestamp(spot_frame["time"].max())
@@ -97,6 +150,30 @@ class GannTPDeltaDataStore:
         ):
             built = built.loc[built["time"] <= source_latest].reset_index(drop=True)
         return built
+
+    def _daily_feature_frame(
+        self,
+        spot_frame: pd.DataFrame,
+        timeframe: str,
+        lookback_sessions: int | None,
+    ) -> pd.DataFrame:
+        """Feature frame for the higher-order (daily) path.
+
+        Drops the in-progress session so every evaluated bar is closed — the
+        daily analogue of the right-labelled-bucket guard used intraday.
+        """
+        if spot_frame is None or spot_frame.empty:
+            return pd.DataFrame()
+        frame = spot_frame.copy()
+        frame["time"] = pd.to_datetime(frame["time"], errors="coerce")
+        frame = frame.loc[frame["time"].notna()].reset_index(drop=True)
+        if frame.empty:
+            return frame
+        today_ist = (pd.Timestamp.utcnow() + _IST_OFFSET).normalize().tz_localize(None)
+        frame = frame.loc[frame["time"] < today_ist].reset_index(drop=True)
+        if frame.empty:
+            return frame
+        return self.feature_engine.build_frame(frame, timeframe, lookback_sessions=lookback_sessions)
 
     @staticmethod
     def _session_frame(frame: pd.DataFrame, underlying: str | None) -> pd.DataFrame:

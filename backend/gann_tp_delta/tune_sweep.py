@@ -97,6 +97,12 @@ async def _candles(conn: asyncpg.Connection, underlying: str, days: int) -> pd.D
 async def main() -> None:
     cfg = clone_default_config()
     bt = GannTPDeltaBacktester(cfg)
+    # `backtest.max_bars` (260) silently tails EVERY bt.run() input to the last
+    # ~260 bars. On the 15-minute frame that is ~10 NSE sessions, so this sweep
+    # was advertising a 150-day-window and measuring two weeks of it — and the
+    # conviction floors now shipped in config.py were selected from that. Lift it
+    # (mirrors analysis/gann_cost_honest_eval.py) so the window is the real one.
+    cfg.setdefault("backtest", {})["max_bars"] = 10_000_000
     conn = await asyncpg.connect(DSN)
     print(f"=== Gann conviction-floor sweep (lookback {LOOKBACK_DAYS}d) ===", flush=True)
     print("%-11s %-5s | %6s %6s %7s %6s %7s %7s" % ("underlying", "floor", "trades", "win%", "expR", "PF", "totR", "maxDD"), flush=True)
