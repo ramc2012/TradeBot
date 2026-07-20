@@ -119,3 +119,6 @@ build/
 
 # Quarantine backups of provably-corrupt rows (CSV copies of PG side tables)
 data/quarantine/
+
+# Research panels regenerable from PG (hundreds of MB)
+backend/directional_options/research/**/data/
