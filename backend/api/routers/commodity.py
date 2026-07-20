@@ -493,44 +493,68 @@ async def commodity_index_mpof(
 _INDEX_MONITOR_SYMBOLS: tuple[str, ...] = ("NIFTY", "BANKNIFTY")
 
 
+# Recent-window bound used by the index-monitor spot lookups (2026-07-20 perf).
+#
+# ``underlying_spot_candles`` is a ~1,300-chunk hypertable. A predicate-free
+# `ORDER BY time DESC LIMIT 1` forces the PLANNER to open every chunk's
+# catalog entry: measured `Planning Time: 1776 ms` / `Execution Time: 15 ms`
+# on a cold connection (EXPLAIN ANALYZE, 2026-07-20) — i.e. the cost was ~99%
+# planning, and it is paid again by every freshly-pooled connection after a
+# restart. A literal (NOT parameterised — a parameterised interval defeats it)
+# time bound lets TimescaleDB exclude chunks at plan time: same query planned
+# in ~2–5 ms.
+#
+# Semantics are preserved exactly by falling back to the original unbounded
+# query whenever the bounded one finds nothing, so a data gap longer than the
+# window returns what it always returned.
+_INDEX_SPOT_RECENT_DAYS = 30
+
+
 async def _latest_index_spot(symbol: str) -> dict:
     """Latest 1-min close (price) + the prior session's last close, for change."""
     from sqlalchemy import text
     from db.database import AsyncSessionLocal
 
+    d = int(_INDEX_SPOT_RECENT_DAYS)  # int-cast: interpolated as a literal below
+    recent = f"AND time >= NOW() - INTERVAL '{d} days'"
+
+    latest_sql = """
+        SELECT close, time FROM underlying_spot_candles
+        WHERE underlying = :u AND interval = '1minute'
+        {bound}
+        ORDER BY time DESC LIMIT 1
+    """
+    prev_sql = """
+        SELECT close FROM underlying_spot_candles
+        WHERE underlying = :u AND interval = '1minute'
+          {bound}
+          AND time < (
+            SELECT max(time)::date
+            FROM underlying_spot_candles
+            WHERE underlying = :u AND interval = '1minute'
+            {bound}
+          )
+        ORDER BY time DESC LIMIT 1
+    """
+
     price = prev_close = bar_time = None
     try:
         async with AsyncSessionLocal() as session:
-            latest = await session.execute(
-                text(
-                    """
-                    SELECT close, time FROM underlying_spot_candles
-                    WHERE underlying = :u AND interval = '1minute'
-                    ORDER BY time DESC LIMIT 1
-                    """
-                ),
-                {"u": symbol},
-            )
-            lr = latest.fetchone()
+
+            async def _first(sql: str):
+                """Bounded read first; fall back to the unbounded form if empty."""
+                res = await session.execute(text(sql.format(bound=recent)), {"u": symbol})
+                row = res.fetchone()
+                if row is not None:
+                    return row
+                res = await session.execute(text(sql.format(bound="")), {"u": symbol})
+                return res.fetchone()
+
+            lr = await _first(latest_sql)
             if lr is not None:
                 price = float(lr.close) if lr.close is not None else None
                 bar_time = lr.time.isoformat() if hasattr(lr.time, "isoformat") else str(lr.time)
-            prev = await session.execute(
-                text(
-                    """
-                    SELECT close FROM underlying_spot_candles
-                    WHERE underlying = :u AND interval = '1minute'
-                      AND time < (
-                        SELECT max(time)::date
-                        FROM underlying_spot_candles
-                        WHERE underlying = :u AND interval = '1minute'
-                      )
-                    ORDER BY time DESC LIMIT 1
-                    """
-                ),
-                {"u": symbol},
-            )
-            pr = prev.fetchone()
+            pr = await _first(prev_sql)
             if pr is not None and pr.close is not None:
                 prev_close = float(pr.close)
     except Exception:  # noqa: BLE001 — monitor rows are best-effort

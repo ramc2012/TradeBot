@@ -137,19 +137,28 @@ async def load_index_1m_spot(
     float, "low": float, "close": float, "volume": int}``, sorted
     ascending by time so downstream MP/CVD code can scan once.
     """
+    # Perf (2026-07-20): the lookback is interpolated as an int LITERAL, not
+    # bound as a parameter. ``underlying_spot_candles`` is a ~1,300-chunk
+    # hypertable; a parameterised interval hides the bound from TimescaleDB's
+    # plan-time chunk exclusion, so the planner opens every chunk — measured
+    # 1691 ms planning / 50 ms execution for the parameterised form vs 2 ms
+    # planning for the literal form on the same cold connection (EXPLAIN
+    # ANALYZE, 2026-07-20). ``int()`` + ``max(1, ...)`` makes the interpolation
+    # injection-proof; the rows returned are identical.
+    days = max(1, int(lookback_days))
     async with AsyncSessionLocal() as session:
         result = await session.execute(
             text(
-                """
+                f"""
                 SELECT time, open, high, low, close, COALESCE(volume, 0) AS volume
                 FROM underlying_spot_candles
                 WHERE underlying = :underlying
                   AND interval = '1minute'
-                  AND time >= NOW() - (:lookback_days * INTERVAL '1 day')
+                  AND time >= NOW() - INTERVAL '{days} days'
                 ORDER BY time
                 """
             ),
-            {"underlying": underlying, "lookback_days": int(lookback_days)},
+            {"underlying": underlying},
         )
         rows = result.fetchall()
     # F3 (2026-07-20) — read-boundary magnitude guard.
