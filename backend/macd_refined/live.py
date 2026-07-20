@@ -406,7 +406,10 @@ class MacdRefinedLiveEngine:
                 fy = self._underlying_symbol(underlying)
                 persisted_here = 0
                 for kind, exp in zip(("current", "next"), expiries):
-                    chain = await adapter.get_option_chain(fy, exp.isoformat())
+                    chain = await asyncio.wait_for(
+                        adapter.get_option_chain(fy, exp.isoformat()),
+                        timeout=float(self.config["live"].get("broker_timeout_seconds", 12.0)),
+                    )
                     rows, _snaps = self._chain_to_rows(underlying, exp, kind, chain, strikes_side)
                     persisted_here += self._persist_snapshots(underlying, rows)
                 # Generate causal proposals (premium-MACD seeded from broker
@@ -428,9 +431,18 @@ class MacdRefinedLiveEngine:
 
         async def _safe_process(underlying: str) -> dict[str, Any]:
             try:
-                return await _process_underlying(underlying)
+                return await asyncio.wait_for(
+                    _process_underlying(underlying),
+                    timeout=float(self.config["live"].get("name_timeout_seconds", 75.0)),
+                )
+            except asyncio.TimeoutError:
+                timeout_s = float(self.config["live"].get("name_timeout_seconds", 75.0))
+                return {
+                    "underlying": underlying,
+                    "error": f"name scan timed out after {timeout_s:g}s",
+                }
             except Exception as exc:  # noqa: BLE001
-                return {"underlying": underlying, "error": str(exc)}
+                return {"underlying": underlying, "error": str(exc) or type(exc).__name__}
 
         # CLASS_BULK: the full-universe chain sweep is the single biggest bulk
         # consumer of the shared broker budget. Hard-capped at 25% of every
@@ -598,15 +610,18 @@ class MacdRefinedLiveEngine:
             try:
                 from market_data.option_history import option_history_service
 
-                candles = await option_history_service.load_candles(
-                    underlying=str(underlying),
-                    expiry=expiry,
-                    strike=float(strike),
-                    option_type=str(option_type),
-                    instrument_key=instrument_key,
-                    interval="30minute",
-                    limit=120,
-                    allow_broker_refresh=True,
+                candles = await asyncio.wait_for(
+                    option_history_service.load_candles(
+                        underlying=str(underlying),
+                        expiry=expiry,
+                        strike=float(strike),
+                        option_type=str(option_type),
+                        instrument_key=instrument_key,
+                        interval="30minute",
+                        limit=120,
+                        allow_broker_refresh=True,
+                    ),
+                    timeout=float(self.config["live"].get("broker_timeout_seconds", 12.0)),
                 )
                 ser = self._close_series_from_rows(candles)
             except Exception:
@@ -618,7 +633,10 @@ class MacdRefinedLiveEngine:
             rt = now.date().isoformat()
             for _attempt in range(2):
                 try:
-                    rows = await adapter.get_historical_candles(instrument_key, "30", rf, rt)
+                    rows = await asyncio.wait_for(
+                        adapter.get_historical_candles(instrument_key, "30", rf, rt),
+                        timeout=float(self.config["live"].get("broker_timeout_seconds", 12.0)),
+                    )
                 except Exception:
                     rows = None
                 if rows:

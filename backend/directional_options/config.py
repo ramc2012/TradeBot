@@ -204,6 +204,9 @@ DEFAULT_CONFIG: dict[str, Any] = {
         "journal_root": RUNTIME_ROOT / "paper",
         "live_lookback_days": 10,
         "stale_watchlist_seconds": 600,
+        # Retrieved-case context is advisory enrichment. It must never hold a
+        # directional scan open until the per-symbol supervisor timeout.
+        "rag_timeout_seconds": 1.5,
         # Anti-churn: minimum bars a position must be held before
         # honouring a signal-flip or flat-signal close. Stop / target
         # exits still fire immediately.

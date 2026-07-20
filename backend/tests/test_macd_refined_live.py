@@ -157,3 +157,36 @@ def test_live_cycle_commits_completed_name_before_slow_name_finishes(tmp_path: P
     assert syncs == [[{"underlying": "FAST", "option_type": "CE", "quantity_units": 1}]]
     assert engine._signal_state["FAST|signal"] == "2026-07-13T03:30:00+00:00"
     assert "SLOW|signal" not in engine._signal_state
+
+
+def test_live_cycle_times_out_one_name_without_losing_full_universe_cycle(
+    tmp_path: Path, monkeypatch
+) -> None:
+    engine = _engine(tmp_path)
+    engine.config["live"]["name_timeout_seconds"] = 0.03
+
+    class _Adapter:
+        async def get_option_chain(self, symbol: str, _expiry: str):
+            if "SLOW" in symbol:
+                await asyncio.sleep(1.0)
+            return object()
+
+    async def _adapter():
+        return _Adapter()
+
+    async def _universe():
+        return ["FAST", "SLOW"]
+
+    async def _evaluate(_adapter, _underlying, _expiries, _diag, _signal_updates):
+        return []
+
+    monkeypatch.setattr(engine, "_adapter", _adapter)
+    monkeypatch.setattr(engine, "_resolve_universe", _universe)
+    monkeypatch.setattr(engine, "resolve_expiries", lambda *_args, **_kwargs: [date(2026, 7, 28)])
+    monkeypatch.setattr(engine, "_chain_to_rows", lambda *_args, **_kwargs: ([], []))
+    monkeypatch.setattr(engine, "_evaluate", _evaluate)
+
+    result = asyncio.run(engine.run_cycle(allow_entries=False))
+
+    assert list(result["fetched"]) == ["FAST"]
+    assert result["failures"] == {"SLOW": "name scan timed out after 0.03s"}

@@ -540,7 +540,10 @@ class Settings(BaseSettings):
     # case ≈ 3×75s (indices) + ceil(25/5)×20s (stocks) ≈ 325s < the 600s
     # runner timeout, and typically well under one 180s cadence interval.
     DIRECTIONAL_STOCK_SCAN_CONCURRENCY: int = 5
-    DIRECTIONAL_STOCK_SYMBOL_TIMEOUT_SECONDS: float = 20.0
+    # A cold but healthy stock snapshot measured 18-20s under concurrent lane
+    # load. Keep a small completion margin; deeper stages retain their own
+    # fail-closed broker/RAG bounds.
+    DIRECTIONAL_STOCK_SYMBOL_TIMEOUT_SECONDS: float = 30.0
     DIRECTIONAL_STOCK_BATCH_SIZE: int = 25
     DIRECTIONAL_INDEX_SYMBOL_TIMEOUT_SECONDS: float = 75.0
     # Honesty bound for stock option quotes: the stock ATM watchlist rows

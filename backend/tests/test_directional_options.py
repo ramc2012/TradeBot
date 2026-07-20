@@ -3,6 +3,7 @@ from __future__ import annotations
 from pathlib import Path
 import asyncio
 import sys
+import time
 import types
 
 import pandas as pd
@@ -1044,6 +1045,37 @@ async def test_directional_options_live_snapshot_uses_local_market_intelligence(
     assert payload["snapshot"]["data_status"]["watchlist_rows_latest"] == 1
     assert payload["snapshot"]["selected_contract"]["trading_symbol"] == "NIFTY 22500 CE"
     assert payload["snapshot"]["selected_contract"]["price_source"] == "local_watchlist"
+
+
+@pytest.mark.asyncio
+async def test_directional_rag_enrichment_respects_live_timeout(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    config = clone_default_config()
+    config["paper_trading"]["journal_root"] = tmp_path / "directional-paper"
+    config["paper_trading"]["rag_timeout_seconds"] = 0.01
+    service = DirectionalOptionsService(config)
+
+    def slow_context_gate(_request):
+        time.sleep(0.1)
+        raise AssertionError("the late worker result must not reach the live scan")
+
+    monkeypatch.setattr(
+        "directional_options.service.rag_service.context_gate",
+        slow_context_gate,
+    )
+    result = await service._build_rag_context_async(
+        underlying="NIFTY",
+        symbol="NIFTY 22500 CE",
+        signal=types.SimpleNamespace(direction="LONG", sleeve="positional"),
+        regime=types.SimpleNamespace(label="trend"),
+        candidate={"expiry_kind": "monthly", "delta_bucket": "ATM"},
+        risk_payload={"approved": True},
+        data_context={"timeframe": "3minute", "spot_price": 22500.0},
+    )
+
+    assert result["decision"] == "warn"
+    assert result["reason_codes"] == ["rag_unavailable"]
 
 
 def test_live_data_status_uses_loaded_feature_time_when_health_spot_map_lags() -> None:

@@ -720,8 +720,10 @@ class MarketHoursPaperSupervisor:
                         timeout=timeout_s,
                     )
                     results.append(_result_row(underlying, snapshot, kind))
+                except asyncio.TimeoutError:
+                    failures[underlying] = f"{kind} scan timed out after {timeout_s:g}s"
                 except Exception as exc:  # noqa: BLE001 — per-symbol isolation
-                    failures[underlying] = str(exc)
+                    failures[underlying] = str(exc) or type(exc).__name__
 
             universe = await directional_service.resolve_runner_universe()
             indices = list(universe.get("indices") or [])

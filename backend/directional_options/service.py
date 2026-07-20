@@ -1194,7 +1194,13 @@ class DirectionalOptionsService:
                 risk_payload=risk_payload,
                 data_context=data_context,
             )
-            return (await asyncio.to_thread(rag_service.context_gate, request)).model_dump()
+            result = await asyncio.wait_for(
+                asyncio.to_thread(rag_service.context_gate, request),
+                timeout=float(
+                    self.config["paper_trading"].get("rag_timeout_seconds", 1.5)
+                ),
+            )
+            return result.model_dump()
         except Exception as exc:
             return self._rag_unavailable(exc)
 

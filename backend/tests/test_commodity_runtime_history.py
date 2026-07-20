@@ -107,3 +107,61 @@ def test_persist_commodity_spot_rows_repairs_recent_gap_window(monkeypatch) -> N
         "2026-07-17T15:18:00+00:00",
         "2026-07-17T15:21:00+00:00",
     }
+
+
+def test_persist_commodity_spot_rows_accepts_first_rows_without_watermark(monkeypatch) -> None:
+    from market_data import commodity_runtime_history as history
+
+    cache_key = ("MCX:GOLD26AUGFUT", "3minute")
+    history._LATEST_PERSISTED.clear()
+    history._PERSIST_LOCKS.clear()
+
+    class FakeSession:
+        def __init__(self) -> None:
+            self.payload = None
+            self.committed = False
+
+        async def __aenter__(self) -> "FakeSession":
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb) -> bool:
+            return False
+
+        async def scalar(self, _statement, _params):
+            return None
+
+        async def execute(self, _statement, payload):
+            self.payload = payload
+
+        async def commit(self) -> None:
+            self.committed = True
+
+    fake_session = FakeSession()
+    monkeypatch.setattr("db.database.AsyncSessionLocal", lambda: fake_session)
+
+    try:
+        inserted = asyncio.run(
+            history._persist_commodity_spot_rows(
+                underlying="GOLD",
+                instrument_key=cache_key[0],
+                rows=[
+                    {
+                        "time": "2026-07-20T14:45:00+00:00",
+                        "open": 141500,
+                        "high": 141600,
+                        "low": 141450,
+                        "close": 141550,
+                    }
+                ],
+                interval=cache_key[1],
+            )
+        )
+    finally:
+        history._LATEST_PERSISTED.clear()
+        history._PERSIST_LOCKS.clear()
+
+    assert inserted == 1
+    assert fake_session.committed is True
+    assert fake_session.payload[0]["time"] == datetime(
+        2026, 7, 20, 14, 45, tzinfo=timezone.utc
+    )

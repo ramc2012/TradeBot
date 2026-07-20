@@ -102,7 +102,16 @@ async def _persist_commodity_spot_rows(
                 _LATEST_PERSISTED[cache_key] = latest_known or datetime.min.replace(tzinfo=UTC)
                 latest_known = _LATEST_PERSISTED[cache_key]
 
-            repair_cutoff = latest_known - _RECENT_REPAIR_WINDOW
+            # A brand-new contract/interval has no persisted watermark.  The
+            # sentinel above is datetime.min; subtracting the repair window
+            # from it raises ``OverflowError: date value out of range`` and
+            # silently prevents the first bars from ever being stored.
+            min_utc = datetime.min.replace(tzinfo=UTC)
+            repair_cutoff = (
+                latest_known - _RECENT_REPAIR_WINDOW
+                if latest_known > min_utc + _RECENT_REPAIR_WINDOW
+                else min_utc
+            )
             payload: list[dict[str, Any]] = []
             newest_seen = latest_known
             for row in rows:
