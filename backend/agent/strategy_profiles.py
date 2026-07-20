@@ -54,7 +54,21 @@ S1_CONTRACT_PROFILE = StrategyContractProfile(
     index_expiry="monthly",
     stock_expiry="monthly",
     index_allow_t0=False,        # T-1 OK, T-0 skipped (theta annihilation)
-    stock_rollover_td=3,         # roll to next monthly when ≤3 td remain
+    # OWNER-DIRECTED CHANGE 2026-07-20: 3 → 5 trading days. Indian single-stock
+    # options are PHYSICALLY SETTLED; rolling the WATCHLIST five trading days
+    # out means no NEW position is ever opened inside the compulsory-delivery
+    # window. This is instrument SELECTION, not a strategy gate — the entry
+    # gate MIN_TTE_DAYS_STOCK in agent/strategy_config.py is untouched.
+    #
+    # The literal stays at the LEGACY 3 on purpose. The effective horizon is
+    # read at use-time from settings.EXPIRY_POLICY_STOCK_ROLL_TRADING_DAYS
+    # whenever EXPIRY_POLICY_ENABLED (see atm_watchlist._stock_roll_horizon),
+    # so the owner's 5-day roll lands WITH the rest of this pass under one
+    # flag instead of firing silently on the next restart. That matters: on
+    # 2026-07-21 the July monthly is exactly 5 trading days out, so an
+    # unconditional 5 would have rolled the stock watchlist to August on the
+    # very first restart while 75 open July stock positions were still live.
+    stock_rollover_td=3,         # legacy default; 5 arrives via EXPIRY_POLICY_ENABLED
     strike_neighbours=2,
     strike_lift_threshold=1.5,
     strike_asymmetric=True,

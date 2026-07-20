@@ -5,6 +5,7 @@ import asyncio
 import json
 import math
 import re
+import time
 from dataclasses import dataclass
 from datetime import date, datetime, time as dt_time, timedelta, timezone
 from typing import Any, Optional
@@ -42,6 +43,11 @@ from market_data.option_history import option_history_service
 UTC = timezone.utc
 IST = timezone(timedelta(hours=5, minutes=30))
 DEFAULT_WATCHLIST_TTL = 900
+# The frozen MACD ladder is session state, but it is NOT immutable: a position
+# closing mid-session triggers a re-pick that writes a new row. Cache it for a
+# short TTL rather than for the whole day, or the replacement would never be
+# observed by this builder.
+FROZEN_LADDER_TTL_SECONDS = 60.0
 DEFAULT_EXPIRY_TTL = 300
 DEFAULT_PARTIAL_TTL = 900
 DEFAULT_BUILD_LOCK_TTL = 120
@@ -141,6 +147,236 @@ def _nearest_index_expiry(symbol: str) -> date:
         nm = today.replace(day=28) + timedelta(days=4)
         monthly = get_index_monthly_expiry(symbol, nm.year, nm.month)
     return monthly
+
+
+@dataclass(frozen=True)
+class StrikeLiquidity:
+    """Everything the liquidity decision looked at, for one (strike, side).
+
+    Kept as a record rather than a bare float so a `no_liquid_strike` rejection
+    can name the actual numbers it rejected instead of just saying "thin".
+    """
+
+    strike: float
+    side: str
+    oi: float
+    flow: float                    # MEDIAN prior-session traded volume
+    # "prior_session"  — measured from history (the only rankable case)
+    # "unmeasurable"   — the strike has NO historical volume at all ⇒ excluded,
+    #                    NOT "score zero, still eligible". Same population as the
+    #                    warm-up problem: a strike nobody traded also has no
+    #                    premium series to compute MACD on, so the two statuses
+    #                    are kept consistent (no_liquid_strike / not_ready are
+    #                    both terminal exclusions).
+    flow_source: str
+    bid: Optional[float]
+    ask: Optional[float]
+    spread_rel: Optional[float]    # None when the book is untestable
+    spread_untestable: bool
+    liquid: bool
+    reject_reason: Optional[str]
+
+    def as_dict(self) -> dict[str, Any]:
+        return {
+            "strike": self.strike,
+            "side": self.side,
+            "oi": self.oi,
+            "flow": self.flow,
+            "flow_source": self.flow_source,
+            "spread_rel": self.spread_rel,
+            "spread_untestable": self.spread_untestable,
+            "liquid": self.liquid,
+            "reject_reason": self.reject_reason,
+        }
+
+
+def _spot_spanning_window(sorted_strikes: list[float], spot_price: float) -> list[float]:
+    """The small window SPANNING spot: nearest below, nearest at/above, +1 above.
+
+    Owner: "new ATM CE/PE does not mean exact atm strike. it is next or just
+    below spot liquid contract."  So the window is deliberately two-sided — it
+    is NOT the one-sided hunt the legacy selector did (CE only at/above spot,
+    PE only at/below).  The winner MAY be ITM; liquidity decides, not geometry.
+    """
+    if not sorted_strikes:
+        return []
+    i_above = next(
+        (i for i, s in enumerate(sorted_strikes) if s >= spot_price), len(sorted_strikes) - 1
+    )
+    idx = {i_above - 1, i_above, i_above + 1}
+    return [sorted_strikes[i] for i in sorted(idx) if 0 <= i < len(sorted_strikes)]
+
+
+def _score_strike_liquidity(
+    *,
+    strike: float,
+    side: str,
+    oi: float,
+    flow: float,
+    flow_source: str,
+    bid: Optional[float],
+    ask: Optional[float],
+    min_oi: float,
+    min_flow: float,
+    max_rel_spread: float,
+) -> StrikeLiquidity:
+    """Concrete definition of LIQUID, built only from fields that EXIST.
+
+    Available, verified: `oi` and `volume` on every chain entry and in
+    `option_chain_snapshots`; `bid`/`ask` on the in-memory `OptionChainEntry`
+    only (both brokers populate them) — they are NOT persisted.  There is NO L2
+    depth and NO aggressor-tagged print data on this deployment, so no
+    depth-based measure is invented.
+
+        LIQUID  <=>  oi >= min_oi
+                AND  flow >= min_flow
+                AND  spread_ok
+
+    `flow` is ALWAYS the MEDIAN prior-session traded volume, never today's.
+    That is structural, not a preference: at the 09:04-09:14 pre-open build
+    today's traded volume is ~0 for every contract, so a live-volume ranker
+    would score every candidate at zero and silently collapse back to the
+    arithmetic anchor — the liquidity logic would be inert exactly when it is
+    needed.  Carried OI (settled overnight, so historical by construction) plus
+    proven prior flow is the honest pre-open test.
+
+    OI and volume are combined with AND on the floors, then a lexicographic
+    rank, because they measure DIFFERENT things and neither substitutes for the
+    other: volume is turnover (can you get out?), OI is committed positioning
+    (is anyone actually there?).  A high-OI/never-traded strike fails on volume;
+    a high-volume/no-standing-interest strike fails on OI.
+
+    The spread test is a VETO, not a ranker (during a call auction the book is
+    not a continuous two-sided book), and it is SKIPPED — labelled
+    `spread_untestable` — when either side of the book is absent.
+    """
+    spread_untestable = not (bid and ask and bid > 0 and ask > 0)
+    spread_rel: Optional[float] = None
+    if not spread_untestable:
+        mid = (float(ask) + float(bid)) / 2.0
+        spread_rel = (float(ask) - float(bid)) / mid if mid > 0 else None
+
+    reason: Optional[str] = None
+    if flow_source == "unmeasurable":
+        # No historical volume for this contract at all. Excluded, not
+        # score-zero: a strike nobody has traded is untradeable AND has no
+        # premium series for MACD.
+        reason = "no prior-session volume history (unmeasurable)"
+    elif oi < min_oi:
+        reason = f"oi {oi:.0f} < {min_oi:.0f}"
+    elif flow < min_flow:
+        reason = f"{flow_source}_volume {flow:.0f} < {min_flow:.0f}"
+    elif spread_rel is not None and spread_rel > max_rel_spread:
+        reason = f"rel_spread {spread_rel:.3f} > {max_rel_spread:.3f}"
+
+    return StrikeLiquidity(
+        strike=strike,
+        side=side,
+        oi=oi,
+        flow=flow,
+        flow_source=flow_source,
+        bid=bid,
+        ask=ask,
+        spread_rel=spread_rel,
+        spread_untestable=spread_untestable,
+        liquid=reason is None,
+        reject_reason=reason,
+    )
+
+
+def select_liquid_strikes_unbiased(
+    *,
+    strikes: list[float],
+    spot_price: float,
+    chain_entries,
+    min_oi: float,
+    min_flow: float,
+    max_rel_spread: float,
+    prior_volume: dict[str, dict[float, float]],
+) -> tuple[dict[str, Optional[float]], dict[str, list[StrikeLiquidity]]]:
+    """Owner-specified strike pick: free choice by LIQUIDITY, no ITM/OTM bias.
+
+    Returns ``({"CE": strike|None, "PE": strike|None}, diagnostics)``.
+
+    A side returns **None** when nothing in the spot-spanning window is liquid.
+    That is deliberate and is the behaviour change the owner asked for: the
+    legacy selector silently fell back to the arithmetically-nearest strike
+    (``if all(side_liq...) <= 0: return anchor``), which papered over a thin
+    underlying.  A thin underlying with no liquid near-spot contract is a real
+    condition worth surfacing — the caller marks it `no_liquid_strike`, logs it
+    at ERROR naming every candidate it rejected, and EXCLUDES the instrument.
+
+    Ranking among the liquid candidates: MEDIAN prior-session volume desc, then
+    OI desc, then |strike - spot| asc.  Distance is only a tie-break; liquidity
+    decides.
+
+    `prior_volume` is REQUIRED (``{"CE": {strike: median_volume}, "PE": {...}}``,
+    from ``market_data.macd_watchlist.load_prior_volume``).  A strike absent
+    from it is `unmeasurable` and therefore EXCLUDED — it is never scored as
+    zero-but-eligible, and today's live volume is never substituted, because at
+    pre-open that is ~0 for every contract and would make this whole selector
+    inert.
+    """
+    picks: dict[str, Optional[float]] = {"CE": None, "PE": None}
+    diagnostics: dict[str, list[StrikeLiquidity]] = {"CE": [], "PE": []}
+    if not strikes or spot_price <= 0:
+        return picks, diagnostics
+
+    sorted_strikes = sorted(strikes)
+    window = _spot_spanning_window(sorted_strikes, spot_price)
+    if not window:
+        return picks, diagnostics
+
+    by_key: dict[tuple[float, str], Any] = {}
+    for entry in chain_entries or []:
+        try:
+            strike = float(entry.strike)
+        except (TypeError, ValueError):
+            continue
+        side = str(getattr(entry, "option_type", "")).upper()
+        if side in {"CE", "PE"}:
+            by_key[(strike, side)] = entry
+
+    for side in ("CE", "PE"):
+        prior_side = (prior_volume or {}).get(side) or {}
+        scored: list[StrikeLiquidity] = []
+        for strike in window:
+            entry = by_key.get((strike, side))
+            if entry is None:
+                continue
+            oi = float(getattr(entry, "oi", 0) or 0)
+            if strike in prior_side:
+                flow = float(prior_side.get(strike) or 0.0)
+                flow_source = "prior_session"
+            else:
+                # NEVER fall back to today's live volume: at 09:04 it is ~0 for
+                # every contract, so that fallback would silently neuter the
+                # entire liquidity decision. No history ⇒ untradeable.
+                flow = 0.0
+                flow_source = "unmeasurable"
+            scored.append(
+                _score_strike_liquidity(
+                    strike=strike,
+                    side=side,
+                    oi=oi,
+                    flow=flow,
+                    flow_source=flow_source,
+                    bid=getattr(entry, "bid", None),
+                    ask=getattr(entry, "ask", None),
+                    min_oi=min_oi,
+                    min_flow=min_flow,
+                    max_rel_spread=max_rel_spread,
+                )
+            )
+        diagnostics[side] = scored
+        liquid = [s for s in scored if s.liquid]
+        if not liquid:
+            # NO arithmetic fallback. The caller decides how loud to be.
+            continue
+        liquid.sort(key=lambda s: (-s.flow, -s.oi, abs(s.strike - spot_price)))
+        picks[side] = liquid[0].strike
+
+    return picks, diagnostics
 
 
 def _select_liquid_atm_strikes(
@@ -256,6 +492,115 @@ def _select_liquid_atm_strike(
     return picks["CE"]
 
 
+def strike_liquidity_floors(kind: str) -> tuple[float, float, float]:
+    """(min_oi, min_flow, max_rel_spread) for an INDEX vs a single STOCK.
+
+    Indices and single stocks are not comparable, so they do not share a floor.
+    """
+    from core.config import settings
+
+    if str(kind or "").upper() == "INDEX":
+        return (
+            float(settings.MACD_STRIKE_MIN_OI_INDEX),
+            float(settings.MACD_STRIKE_MIN_PRIOR_VOLUME_INDEX),
+            float(settings.MACD_STRIKE_MAX_REL_SPREAD),
+        )
+    return (
+        float(settings.MACD_STRIKE_MIN_OI_STOCK),
+        float(settings.MACD_STRIKE_MIN_PRIOR_VOLUME_STOCK),
+        float(settings.MACD_STRIKE_MAX_REL_SPREAD),
+    )
+
+
+def resolve_row_strikes(
+    *,
+    symbol: str,
+    kind: str,
+    strikes: list[float],
+    spot_price: float,
+    chain_entries,
+    prior_volume: Optional[dict[str, dict[float, float]]] = None,
+) -> tuple[dict[str, Optional[float]], dict[str, Any]]:
+    """Flag-routed strike pick.
+
+    OFF  -> the legacy asymmetric (CE>=spot, PE<=spot) selector, byte-identical
+            to today, never returning None.
+    ON   -> the owner-specified unbiased liquidity pick, which MAY return None
+            for a side, in which case we log at ERROR naming every rejected
+            candidate and its numbers so the exclusion is never silent.
+    """
+    from core.config import settings
+
+    if not getattr(settings, "MACD_LIQUID_STRIKE_SELECTION_ENABLED", False):
+        legacy = _select_liquid_atm_strikes(
+            strikes=strikes, spot_price=spot_price, chain_entries=chain_entries
+        )
+        return {"CE": legacy["CE"], "PE": legacy["PE"]}, {"mode": "legacy_asymmetric"}
+
+    if prior_volume is None:
+        # D1 GUARD. The liquidity rule is defined on HISTORICAL volume; without
+        # it every candidate would be `unmeasurable` and the whole universe
+        # would be excluded at ERROR, 432 times, every pre-open. That is a
+        # caller bug, not a market condition — refuse the pick loudly and let
+        # the legacy selector answer rather than emitting a fake exclusion.
+        logger.error(
+            "[ATM watchlist] {} liquidity pick requested WITHOUT prior-session volume "
+            "history — this is a wiring bug (see macd_watchlist.load_prior_volume). "
+            "Falling back to the legacy selector for this row so the universe is not "
+            "spuriously emptied.",
+            symbol,
+        )
+        legacy = _select_liquid_atm_strikes(
+            strikes=strikes, spot_price=spot_price, chain_entries=chain_entries
+        )
+        return (
+            {"CE": legacy["CE"], "PE": legacy["PE"]},
+            {"mode": "legacy_asymmetric", "reason": "missing_prior_volume"},
+        )
+
+    min_oi, min_flow, max_rel_spread = strike_liquidity_floors(kind)
+    picks, diagnostics = select_liquid_strikes_unbiased(
+        strikes=strikes,
+        spot_price=spot_price,
+        chain_entries=chain_entries,
+        min_oi=min_oi,
+        min_flow=min_flow,
+        max_rel_spread=max_rel_spread,
+        prior_volume=prior_volume,
+    )
+    meta: dict[str, Any] = {
+        "mode": "liquidity_unbiased",
+        "min_oi": min_oi,
+        "min_flow": min_flow,
+        "max_rel_spread": max_rel_spread,
+        "candidates": {
+            side: [item.as_dict() for item in diagnostics.get(side, [])] for side in ("CE", "PE")
+        },
+        "no_liquid_sides": [side for side in ("CE", "PE") if picks.get(side) is None],
+    }
+    for side in meta["no_liquid_sides"]:
+        rejected = diagnostics.get(side) or []
+        logger.error(
+            "[ATM watchlist] NO LIQUID {} STRIKE for {} (spot={:.2f}, floors oi>={:.0f} "
+            "flow>={:.0f} spread<={:.3f}). Rejected: {}. Instrument EXCLUDED — this is a "
+            "real thin-underlying condition, not a fallback.",
+            side,
+            symbol,
+            spot_price,
+            min_oi,
+            min_flow,
+            max_rel_spread,
+            [
+                f"{item.strike:g}(oi={item.oi:.0f},{item.flow_source}_vol={item.flow:.0f},"
+                f"spread={'n/a' if item.spread_rel is None else format(item.spread_rel, '.3f')}"
+                f"{',' + item.reject_reason if item.reject_reason else ''})"
+                for item in rejected
+            ]
+            or "no chain entries in the spot-spanning window",
+        )
+    return picks, meta
+
+
 def _extended_strike_window(
     *,
     sorted_strikes: list[float],
@@ -360,10 +705,27 @@ def _extended_strike_window(
 
 
 def _trading_days_until(target: date, *, today: Optional[date] = None) -> int:
-    """Count Mon–Fri weekdays from today (exclusive) to target (exclusive)."""
+    """Trading days from today (exclusive) to target (inclusive).
+
+    Calendar-driven (holiday-aware) when EXPIRY_POLICY_ENABLED, else the legacy
+    bare Mon–Fri count. The legacy count OVER-counts in a holiday week, which
+    fires the stock delivery-risk roll a day LATE — the exact failure the
+    physically-settled-stock roll exists to prevent.
+    """
     today = today or date.today()
     if target <= today:
         return 0
+    try:
+        from core.config import settings
+
+        if getattr(settings, "EXPIRY_POLICY_ENABLED", False):
+            from core.expiry_policy import expiry_policy
+
+            # Both count `today` exclusive / `target` inclusive — same contract,
+            # the calendar version just also skips exchange holidays.
+            return expiry_policy.trading_days_until(target, today=today)
+    except Exception:  # noqa: BLE001
+        pass
     count = 0
     cur = today
     while cur < target:
@@ -391,6 +753,25 @@ def _next_weekly_expiry(symbol: str, today: Optional[date] = None) -> Optional[d
     return today + timedelta(days=delta if delta > 0 else 7)
 
 
+def _stock_roll_horizon(profile_value: int) -> int:
+    """Effective stock delivery-risk roll horizon, in TRADING days.
+
+    Owner spec 2026-07-20 sets this to 5 (Indian single-stock options are
+    PHYSICALLY SETTLED, so the watchlist leaves the near month before the
+    compulsory-delivery window). It is read from settings under
+    EXPIRY_POLICY_ENABLED rather than hard-coded into the profile so the change
+    is flag-gated and reversible like everything else in this pass.
+    """
+    try:
+        from core.config import settings
+
+        if getattr(settings, "EXPIRY_POLICY_ENABLED", False):
+            return int(settings.EXPIRY_POLICY_STOCK_ROLL_TRADING_DAYS)
+    except Exception:  # noqa: BLE001
+        pass
+    return int(profile_value)
+
+
 def _stock_monthly_for_selected_expiry(
     selected_expiry: date,
     *,
@@ -404,6 +785,20 @@ def _stock_monthly_for_selected_expiry(
     """
     today = today or date.today()
     active = get_monthly_expiry(selected_expiry.year, selected_expiry.month)
+    if rollover_td is None:
+        rollover_td = None
+        try:
+            from core.config import settings
+
+            if getattr(settings, "EXPIRY_POLICY_ENABLED", False):
+                # Owner spec 2026-07-20: stocks roll FIVE trading days out.
+                # Indian single-stock options are PHYSICALLY SETTLED, so the
+                # roll exists to avoid compulsory delivery — it is instrument
+                # SELECTION, deliberately decoupled from the ENTRY gate
+                # MIN_TTE_DAYS_STOCK, which is unchanged.
+                rollover_td = int(settings.EXPIRY_POLICY_STOCK_ROLL_TRADING_DAYS)
+        except Exception:  # noqa: BLE001
+            rollover_td = None
     if rollover_td is None:
         try:
             from agent.strategy_config import MIN_TTE_DAYS_STOCK as _stock_min_tte
@@ -1437,6 +1832,153 @@ class ATMWatchlistService:
         await redis.set(cache_key, json.dumps(payload), ex=DEFAULT_WATCHLIST_TTL)
         return payload
 
+    async def _frozen_session_rows(self) -> dict[tuple[str, str], dict[str, Any]]:
+        """Today's FROZEN MACD ladder, cached for the life of one build pass.
+
+        Empty dict (i.e. "no override, behave exactly as today") whenever
+        MACD_PREOPEN_WATCHLIST_ENABLED is off, the sidecar table is absent, or
+        the read fails — the legacy per-cycle pick then answers, so the flag-off
+        path is byte-identical to today's behaviour.
+
+        Restart-safe by construction: the source is Postgres, never memory.
+        """
+        from core.config import settings
+
+        if not getattr(settings, "MACD_PREOPEN_WATCHLIST_ENABLED", False):
+            return {}
+        today = datetime.now(IST).date()
+        cached = getattr(self, "_frozen_rows_cache", None)
+        if (
+            cached is not None
+            and cached[0] == today
+            and (time.monotonic() - cached[2]) < FROZEN_LADDER_TTL_SECONDS
+        ):
+            # TTL, not "cached for the day": a mid-session re-pick after a
+            # position closes writes a NEW row, and a day-long cache would
+            # never see it.
+            return cached[1]
+        try:
+            from market_data.macd_watchlist import load_session_watchlist
+
+            rows = await load_session_watchlist(today)
+        except Exception as exc:  # noqa: BLE001
+            logger.error(
+                "[ATM watchlist] could not read the frozen MACD ladder for {}: {!r} — "
+                "falling back to the per-cycle pick for this pass.",
+                today.isoformat(), exc,
+            )
+            rows = {}
+        if not rows:
+            logger.warning(
+                "[ATM watchlist] MACD_PREOPEN_WATCHLIST_ENABLED is ON but the frozen ladder "
+                "for {} is EMPTY — the pre-open build did not run (or ran empty). Strikes "
+                "will drift this session.",
+                today.isoformat(),
+            )
+        self._frozen_rows_cache = (today, rows, time.monotonic())
+        return rows
+
+    async def _open_position_pins(self) -> dict[tuple[str, str], Any]:
+        """Currently-OPEN MACD position pins, cached for FROZEN_LADDER_TTL_SECONDS.
+
+        Fails CLOSED: on any read error the caller keeps the existing frozen
+        strike rather than treating "unknown" as "no position open" — a failed
+        read must never drift a strike that carries live risk.
+        """
+        from core.config import settings
+
+        if not getattr(settings, "MACD_STICKY_STRIKES_ENABLED", False):
+            return {}
+        now = time.monotonic()
+        cached = getattr(self, "_open_pins_cache", None)
+        if cached is not None and (now - cached[1]) < FROZEN_LADDER_TTL_SECONDS:
+            return cached[0]
+        from market_data.macd_watchlist import load_open_position_pins
+
+        pins = await load_open_position_pins()
+        self._open_pins_cache = (pins, now)
+        return pins
+
+    async def _release_stale_pin(
+        self,
+        meta: UnderlyingMeta,
+        side: str,
+        row: Optional[dict[str, Any]],
+        chain_entries,
+        spot_price: float,
+        expiry_date: date,
+    ) -> Optional[dict[str, Any]]:
+        """Sticky RELEASE. Owner spec: "once a position is entered on a strike
+        that strike persists till the closure and new strike for that instrument
+        fetched after closure based on spot price at that time."
+
+        A frozen row still carrying ``pinned_position_id`` whose position is no
+        longer open is re-picked HERE, from the live spot at this moment. It is
+        idempotent: ``repick_after_close`` writes the replacement with
+        ``pinned_position_id=None``, so the next cycle short-circuits on the
+        first guard.
+
+        Any failure leaves the existing row untouched (fail closed).
+        """
+        from core.config import settings
+
+        if not row or not row.get("pinned_position_id"):
+            return row
+        if not getattr(settings, "MACD_STICKY_STRIKES_ENABLED", False):
+            # Sticky off ⇒ the pin field is inert; never interpret "no pins" as
+            # "the position closed".
+            return row
+        try:
+            pins = await self._open_position_pins()
+        except Exception as exc:  # noqa: BLE001
+            logger.error(
+                "[ATM watchlist] {} {} open-position read FAILED ({!r}) — keeping the "
+                "pinned strike. A failed read is never treated as 'position closed'.",
+                meta.symbol, side, exc,
+            )
+            return row
+        pin = pins.get((meta.symbol.upper(), side))
+        if pin is not None:
+            # Still open (possibly a different position on the same instrument):
+            # sticky holds to whatever contract actually carries the risk.
+            if float(pin.strike) != float(row.get("strike") or 0.0):
+                updated = dict(row)
+                updated["strike"] = float(pin.strike)
+                updated["expiry"] = pin.expiry or row.get("expiry")
+                updated["pinned_position_id"] = pin.position_id
+                return updated
+            return row
+        logger.info(
+            "[ATM watchlist] {} {} position {} CLOSED — re-picking the strike from the "
+            "live spot ({:.2f}) at this moment, per the owner's sticky rule.",
+            meta.symbol, side, row.get("pinned_position_id"), spot_price,
+        )
+        try:
+            from market_data.macd_watchlist import repick_after_close
+
+            replacement = await repick_after_close(
+                underlying=meta.symbol,
+                option_type=side,
+                kind=meta.kind,
+                spot_price=float(spot_price),
+                chain_entries=chain_entries,
+                expiry=expiry_date,
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.error(
+                "[ATM watchlist] {} {} re-pick after close FAILED ({!r}) — keeping the "
+                "previous strike for this cycle.", meta.symbol, side, exc,
+            )
+            return row
+        if replacement is None:
+            return row
+        # Refresh the pass cache so the rest of this cycle (and the Upstox
+        # fallback path) sees the replacement rather than the released pin.
+        cached = getattr(self, "_frozen_rows_cache", None)
+        if cached is not None:
+            cached[1][(meta.symbol.upper(), side)] = replacement
+        return replacement
+
     async def _build_row(
         self,
         meta: UnderlyingMeta,
@@ -1462,6 +2004,45 @@ class ATMWatchlistService:
                 )
             expiry = native_monthly.isoformat()
             expiry_date = native_monthly
+
+        # ── Frozen pre-open ladder (owner spec 2026-07-20) ─────────────────────
+        # When MACD_PREOPEN_WATCHLIST_ENABLED, the session's expiry and strikes
+        # were fixed ONCE pre-market and must NOT be re-raced intraday. That is
+        # what removes the moving-ATM defect (the documented cause of the
+        # option-premium chart gaps) and what makes a strike carrying an open
+        # position sticky. Reading it here (rather than replacing this builder)
+        # keeps every one of the 17 atm_option_watchlist_snapshots consumers on
+        # identical column semantics — only the strike VALUE stops drifting.
+        frozen_rows = await self._frozen_session_rows()
+        frozen_ce = frozen_rows.get((meta.symbol.upper(), "CE"))
+        frozen_pe = frozen_rows.get((meta.symbol.upper(), "PE"))
+        # A frozen row whose strike_status is `no_liquid_strike` carries NO
+        # strike. That is a TERMINAL exclusion, not a hint: falling through here
+        # would hand the instrument straight back to the legacy arithmetic
+        # picker, i.e. exactly the silent fallback the owner asked us to remove.
+        # A thin underlying with no liquid near-spot contract is excluded for
+        # the session, LOUDLY.
+        for _side, _row in (("CE", frozen_ce), ("PE", frozen_pe)):
+            if _row and str(_row.get("strike_status") or "") == "no_liquid_strike":
+                logger.error(
+                    "[ATM watchlist] {} EXCLUDED for the session: the frozen pre-open "
+                    "ladder found NO liquid {} contract in the spot-spanning window "
+                    "({}). This is a real thin-underlying condition — we do NOT fall "
+                    "back to the arithmetically-nearest strike.",
+                    meta.symbol,
+                    _side,
+                    _row.get("notes") or "see the pre-open ERROR naming every rejected candidate",
+                )
+                return None
+
+        frozen_expiry = (frozen_ce or frozen_pe or {}).get("expiry")
+        if frozen_expiry and frozen_expiry != expiry_date:
+            logger.debug(
+                f"[ATM watchlist] {meta.symbol} using FROZEN session expiry "
+                f"{frozen_expiry.isoformat()} (cycle resolved {expiry})"
+            )
+            expiry_date = frozen_expiry
+            expiry = frozen_expiry.isoformat()
 
         # Contract metadata comes from Upstox when live, but must continue to
         # resolve from the persisted catalog when Upstox is offline.
@@ -1555,6 +2136,25 @@ class ATMWatchlistService:
         )
         atm_ce_strike = atm_picks["CE"]
         atm_pe_strike = atm_picks["PE"]
+        # Sticky RELEASE before the override: a row still pinned to a position
+        # that has since closed is re-picked here from the LIVE spot at this
+        # moment (owner spec), instead of staying frozen on a contract nobody
+        # holds for the rest of the session.
+        frozen_ce = await self._release_stale_pin(
+            meta, "CE", frozen_ce, chain.entries, spot_price, expiry_date
+        )
+        frozen_pe = await self._release_stale_pin(
+            meta, "PE", frozen_pe, chain.entries, spot_price, expiry_date
+        )
+        # The frozen ladder WINS over the per-cycle pick. `no_liquid_strike`
+        # rows never reach here — they returned None above. A `not_ready` row
+        # keeps its strike so history can keep accumulating; the COMPUTE layer
+        # (analytics.technicals.latest_macd_rsi) already refuses to emit a MACD
+        # below MACD_MIN_BARS, so a short series can never produce a signal.
+        if frozen_ce and frozen_ce.get("strike") is not None:
+            atm_ce_strike = float(frozen_ce["strike"])
+        if frozen_pe and frozen_pe.get("strike") is not None:
+            atm_pe_strike = float(frozen_pe["strike"])
         # Downstream payload still carries a single "atm_strike" for
         # legacy callers — set it to the CE pick (the more common
         # default and the one used by long-CE-only paths).
@@ -1598,6 +2198,12 @@ class ATMWatchlistService:
                         )
                         atm_ce_strike = atm_picks["CE"]
                         atm_pe_strike = atm_picks["PE"]
+                        # Frozen ladder wins here too — the Upstox fallback must
+                        # not become a back door that re-races the session strike.
+                        if frozen_ce and frozen_ce.get("strike") is not None:
+                            atm_ce_strike = float(frozen_ce["strike"])
+                        if frozen_pe and frozen_pe.get("strike") is not None:
+                            atm_pe_strike = float(frozen_pe["strike"])
                         atm_strike = atm_ce_strike
                         ce_entry = next(
                             (item for item in chain.entries if item.option_type == "CE" and float(item.strike) == atm_ce_strike),
@@ -3170,8 +3776,9 @@ class ATMWatchlistService:
                     cand = get_index_monthly_expiry(meta.symbol, nxt.year, nxt.month)
                 except Exception:
                     cand = get_monthly_expiry(nxt.year, nxt.month)
-            if kind == "STOCK" and profile.stock_rollover_td > 0:
-                if _trading_days_until(cand, today=today) <= profile.stock_rollover_td:
+            _roll_td = _stock_roll_horizon(profile.stock_rollover_td)
+            if kind == "STOCK" and _roll_td > 0:
+                if _trading_days_until(cand, today=today) <= _roll_td:
                     nxt = (cand + timedelta(days=4)).replace(day=28)
                     cand = get_monthly_expiry(nxt.year, nxt.month)
             return cand
@@ -3197,8 +3804,9 @@ class ATMWatchlistService:
             return candidates[0]
 
         nearest_monthly = monthlies[0]
-        if kind == "STOCK" and profile.stock_rollover_td > 0:
-            if _trading_days_until(nearest_monthly, today=today) <= profile.stock_rollover_td:
+        _roll_td = _stock_roll_horizon(profile.stock_rollover_td)
+        if kind == "STOCK" and _roll_td > 0:
+            if _trading_days_until(nearest_monthly, today=today) <= _roll_td:
                 # Roll to the next monthly if available.
                 for d in monthlies[1:]:
                     return d

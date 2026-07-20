@@ -94,6 +94,7 @@ CORE_SUBSYSTEMS = frozenset(
         "runner:token_readiness",
         "runner:market_intelligence",
         "runner:stock_spot_sweep",
+        "runner:macd_preopen_watchlist",
     }
 )
 

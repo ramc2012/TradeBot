@@ -386,7 +386,7 @@ async def _build_positions_overview_structure() -> dict:
     from api.routers.fractal_market_profile import fractal_market_profile_paper_positions
     from api.routers.gann_tp_delta import paper_agent_status as gann_paper_agent_status
     from api.routers.trading import get_positions, strategy_agent_status
-    from macd_refined.service import macd_refined_service, us_macd_refined_service
+    from macd_refined.service import macd_refined_service
 
     errors: dict[str, str] = {}
 
@@ -405,7 +405,7 @@ async def _build_positions_overview_structure() -> dict:
     (
         manual_positions, nse_status, commodity_status, directional_positions,
         gann_status, auction_positions, fractal_positions, cbe_positions,
-        macd_positions, us_macd_positions,
+        macd_positions,
     ) = await asyncio.gather(
         settle("manual", get_positions()),
         settle("nse", strategy_agent_status()),
@@ -419,17 +419,14 @@ async def _build_positions_overview_structure() -> dict:
             "macd",
             asyncio.to_thread(macd_refined_service.paper_positions, None, "all", 100),
         ),
-        settle(
-            "us_macd",
-            asyncio.to_thread(us_macd_refined_service.paper_positions, None, "all", 100),
-        ),
     )
     return _slim_positions_overview_structure({
         "manual": manual_positions, "nse": nse_status, "commodity": commodity_status,
         "directional": directional_positions, "gann": gann_status,
         "auction": auction_positions, "fractal": fractal_positions,
         "cbe": cbe_positions, "macd": macd_positions,
-        "us_macd": us_macd_positions, "errors": errors,
+        # us_macd RETIRED 2026-07-20 (owner: only MACD + MACD-refined survive).
+        "errors": errors,
     })
 
 
@@ -440,7 +437,7 @@ def _carry_forward_positions_lanes(next_structure: dict, previous_structure: dic
     errors = next_structure.setdefault("errors", {})
     for lane in (
         "manual", "nse", "commodity", "directional", "gann", "auction",
-        "fractal", "cbe", "macd", "us_macd",
+        "fractal", "cbe", "macd",
     ):
         if next_structure.get(lane) is None and previous_structure.get(lane) is not None:
             next_structure[lane] = previous_structure[lane]
@@ -508,7 +505,7 @@ def _slim_positions_overview_structure(structure: dict) -> dict:
             commodity["trade_history"] = _cap_recent(th, _POSITIONS_OVERVIEW_TRADE_TAIL)
         structure["commodity"] = commodity
 
-    for lane in ("directional", "gann", "auction", "fractal", "cbe", "macd", "us_macd"):
+    for lane in ("directional", "gann", "auction", "fractal", "cbe", "macd"):
         payload = structure.get(lane)
         if not isinstance(payload, dict):
             continue
@@ -544,7 +541,7 @@ async def _overlay_positions_overview(structure: dict) -> dict:
     # overlay. Long-premium option lanes are always BUY legs (CE and PE are
     # option types, not sides); CBE carries an explicit LONG/SHORT direction.
     generic_overlays = []
-    for lane in ("directional", "gann", "auction", "fractal", "macd", "us_macd", "cbe"):
+    for lane in ("directional", "gann", "auction", "fractal", "macd", "cbe"):
         payload = structure.get(lane)
         opened = payload.get("open_positions") if isinstance(payload, dict) else None
         if isinstance(opened, list):
@@ -570,7 +567,6 @@ async def _overlay_positions_overview(structure: dict) -> dict:
         "fractal": structure.get("fractal"),
         "cbe": structure.get("cbe"),
         "macd": structure.get("macd"),
-        "us_macd": structure.get("us_macd"),
         "errors": structure.get("errors", {}),
         "fetchedAt": datetime.now(timezone.utc).isoformat(),
     }

@@ -35,7 +35,7 @@ import { useAuctionDetail, useConvergenceDetail } from "./useInstrumentDetail";
 
 /** Lanes this workspace actually draws from, per market. */
 const LANE_KEYS: Record<string, string[]> = {
-  NSE: ["institutional_convergence", "auction_intelligence", "market_intelligence", "s2_index_mp_macd"],
+  NSE: ["institutional_convergence", "auction_intelligence", "market_intelligence"],
   MCX: ["institutional_convergence_commodity", "auction_intelligence_commodity", "commodity_mp_orderflow", "commodity_mp_history"],
 };
 

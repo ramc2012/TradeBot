@@ -44,7 +44,7 @@ class LaneSpec:
     label: str
     kind: LaneKind
     execution_mode: ExecutionMode
-    status_source: str  # supervisor | nse_agent | commodity_agent | us_macd | research_sync | flag_only | always_on
+    status_source: str  # supervisor | nse_agent | commodity_agent | research_sync | flag_only | always_on
     cadence_seconds: float | None = None
     broker_profile: str | None = None  # slow | fast | default | None (no broker REST)
     exchange_session: str | None = None
@@ -142,6 +142,25 @@ def get_registry() -> tuple[LaneSpec, ...]:
             runner_keys=("market_intelligence",),
             status_endpoint="/api/system/automation-status",
             notes="ATM watchlist / premium feed refresh — the data plane S1 scans from.",
+        ),
+        LaneSpec(
+            key="macd_preopen_watchlist",
+            label="MACD Pre-open ATM Watchlist",
+            kind="scheduler-runner",
+            execution_mode="none",
+            status_source="supervisor",
+            cadence_seconds=300.0,
+            broker_profile="default",
+            exchange_session=nse,
+            enabled_flag_name="MACD_PREOPEN_WATCHLIST_ENABLED",
+            runner_keys=("macd_preopen_watchlist",),
+            status_endpoint="/api/system/automation-status",
+            notes=(
+                "Owner spec 2026-07-20. Pre-open only, two phases: expiry validation "
+                "+ history warm-up before 09:00, then the anchor sample / liquid strike "
+                "pick / FREEZE in the 09:04-09:14 window. Shared by s1_atm_30m_macd and "
+                "macd_refined — they have ONE watchlist. Takes no position itself."
+            ),
         ),
         LaneSpec(
             key="auction_intelligence",
@@ -375,25 +394,14 @@ def get_registry() -> tuple[LaneSpec, ...]:
             audit_lane_key="s1",
             notes="Own-loop agent started unconditionally in main.py lifespan (no enable flag).",
         ),
-        LaneSpec(
-            key="s2_index_mp_macd",
-            label="Strategy 2 · 15m Index MACD + MP",
-            kind="strategy-engine",
-            execution_mode="parked",
-            status_source="nse_agent",
-            agent_strategy_key="index_mp_strategy",
-            cadence_seconds=None,
-            broker_profile=None,
-            exchange_session=nse,
-            enabled_flag_name=None,
-            paper_book_source="paper_engine S2 book (frozen state-file back-compat)",
-            status_endpoint="/api/trading/strategy-agent/status",
-            notes=(
-                "DELETED 2026-06-02 (owner instruction): removed from the agent's "
-                "_strategy_agents so it never scans; runtime kept only so persisted "
-                "state files deserialize. Excluded from get_status strategies[]."
-            ),
-        ),
+        # RETIRED 2026-07-20 (owner spec): "For MACD, MACD refined - only these
+        # two lanes for these strategy, other variants to be removed."
+        # s2_index_mp_macd was already exec=parked/enabled=False. Its LaneSpec is
+        # gone; the paper_engine `index_mp_strategy` RUNTIME stays only so
+        # persisted state files still deserialize (it has never scanned since
+        # 2026-06-02), and all historical data is kept.
+        # NOTE: its status_endpoint /api/trading/strategy-agent/status is SHARED
+        # with S1 — the lane entry is removed, the endpoint is NOT.
         LaneSpec(
             key="commodity_mp_orderflow",
             audit_lane_key="commodity_mp_orderflow",
@@ -413,20 +421,10 @@ def get_registry() -> tuple[LaneSpec, ...]:
     ]
 
     product_and_daemons: list[LaneSpec] = [
-        LaneSpec(
-            key="us_macd_refined",
-            label="US MACD Refined (Alpaca)",
-            kind="product-lane",
-            execution_mode="parked",
-            status_source="us_macd",
-            cadence_seconds=None,
-            broker_profile=None,
-            exchange_session="US market (parked)",
-            enabled_flag_name=None,
-            paper_book_source="us_macd_refined paper book (frozen)",
-            status_endpoint="/api/us/macd-refined/summary",
-            notes="Honestly PARKED (audit 2026-07-18): brokers.alpaca does not exist on this deployment; /summary reports status=unavailable.",
-        ),
+        # RETIRED 2026-07-20 (owner spec, same instruction as s2 above).
+        # us_macd_refined was exec=parked and brokers.alpaca does not exist on
+        # this deployment, so it could never run. Registry entry, router,
+        # service clone and UI desk removed; historical data kept.
         LaneSpec(
             key="research_sync",
             label="Upstox Research Sync",
@@ -575,7 +573,14 @@ def supervisor_runner_keys() -> set[str]:
 # the drift guard — adding/removing a LaneSpec must update it (a test asserts it).
 # 2026-07-19: 32 -> 33 with stock_spot_sweep, the post-close F&O stock spot
 # writer (stock 30m previously had no durable live writer at all).
-EXPECTED_LANE_TOTAL = 33
+# 2026-07-20: 33 -> 31, retiring the two PARKED MACD variants s2_index_mp_macd
+# and us_macd_refined (owner: only MACD and MACD-refined survive). The two
+# lanes that KEEP running are s1_atm_30m_macd and macd_refined; macd_refined_marks
+# (exit/marks machinery) and macd_diffusion (a CE/PE breadth indicator) are NOT
+# variants and are untouched.
+# 2026-07-20: 31 -> 32 with macd_preopen_watchlist, the pre-open expiry +
+# frozen-ATM-ladder runner the two surviving MACD lanes share.
+EXPECTED_LANE_TOTAL = 32
 
 
 def registry_counts() -> dict[str, int]:
@@ -710,7 +715,7 @@ def _agent_state(agent: Any, strategy_key: str | None) -> dict[str, Any]:
     else:
         matched = strategies[0] if strategies else None
 
-    # Parked/deleted own-loop lane (e.g. s2_index_mp_macd, removed 2026-06-02 and
+    # Parked/deleted own-loop lane (e.g. the retired index_mp_strategy runtime,
     # excluded from get_status strategies[]): the requested strategy_key is absent.
     # NEVER borrow the LIVE agent's top-level enabled/running/last_error/
     # last_run_at/last_message — a parked lane must not show another lane's live
@@ -777,22 +782,6 @@ async def _commodity_agent_state(spec: LaneSpec) -> dict[str, Any]:
     return _agent_state(commodity_strategy_agent, spec.agent_strategy_key)
 
 
-async def _us_macd_state(spec: LaneSpec) -> dict[str, Any]:
-    from macd_refined.service import us_macd_refined_service
-
-    summary = await asyncio.to_thread(us_macd_refined_service.summary)
-    automation = dict(summary.get("automation") or {})
-    return {
-        "enabled": bool(automation.get("enabled", False)),
-        "running": bool(automation.get("running", False)),
-        "stale": None,
-        "last_error": automation.get("last_error"),
-        "last_success_at": automation.get("last_success_at") or automation.get("last_run_at"),
-        "last_message": "Parked: Alpaca data source not configured on this deployment.",
-        "probed": True,
-    }
-
-
 async def _research_sync_state(spec: LaneSpec) -> dict[str, Any]:
     # Durable runtime marker written by the daemon (shared volume) — works for
     # both the standalone container and the embedded mode.
@@ -847,7 +836,6 @@ _SOURCES = {
     "supervisor": _supervisor_state,
     "nse_agent": _nse_agent_state,
     "commodity_agent": _commodity_agent_state,
-    "us_macd": _us_macd_state,
     "research_sync": _research_sync_state,
     "flag_only": _flag_only_state,
     "always_on": _always_on_state,

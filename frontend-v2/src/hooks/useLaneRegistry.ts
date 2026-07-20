@@ -93,11 +93,11 @@ export type LaneRegistryResponse = {
  */
 export const LANE_ROUTE_BY_KEY: Record<string, string> = {
   // strategy engines / paper cycles with a desk
+  // (s2_index_mp_macd and us_macd_refined RETIRED 2026-07-20 — owner: only
+  //  MACD and MACD-refined survive as MACD-family lanes.)
   s1_atm_30m_macd: "/strategies/nse/live",
-  s2_index_mp_macd: "/strategies/mp",
   macd_refined: "/strategies/macd-refined",
   macd_refined_marks: "/strategies/macd-refined",
-  us_macd_refined: "/strategies/us-macd-refined",
   directional_options: "/strategies/directional",
   directional_positioning: "/strategies/directional",
   auction_intelligence: "/strategies/auction",

@@ -12,8 +12,8 @@ from audits.lanes.s1_atm_30m_macd import S1Auditor
 #
 # s1 keeps its historical short key ("s1"; lane key "s1_atm_30m_macd"). The five
 # execution-capable lanes added below (2026-07-18) close the audit-coverage gate
-# the review flagged before the process split. Parked lanes (s2_index_mp_macd,
-# us_macd_refined, chain_candle_builder) and pure daemons/monitors are
+# the review flagged before the process split. Parked lanes (chain_candle_builder;
+# s2_index_mp_macd and us_macd_refined were RETIRED 2026-07-20) and pure daemons/monitors are
 # intentionally excluded.
 REGISTRY = {
     "s1": S1Auditor,

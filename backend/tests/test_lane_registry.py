@@ -63,10 +63,15 @@ def test_registry_supervisor_entries_have_runner_keys() -> None:
 def test_registry_includes_own_loop_engines_and_parked_lanes() -> None:
     keys = {spec.key for spec in get_registry()}
     # Own-loop strategy engines started in main.py lifespan.
-    assert {"s1_atm_30m_macd", "s2_index_mp_macd", "commodity_mp_orderflow"} <= keys
-    # Parked product lane + separate-container runner must be visible too.
-    assert "us_macd_refined" in keys
+    assert {"s1_atm_30m_macd", "commodity_mp_orderflow"} <= keys
+    # Separate-container runner must be visible too.
     assert "research_sync" in keys
+    # RETIRED 2026-07-20 (owner: only MACD and MACD-refined survive). Both were
+    # already exec=parked/enabled=False; historical data is kept.
+    assert "s2_index_mp_macd" not in keys
+    assert "us_macd_refined" not in keys
+    # The two MACD lanes that SURVIVE, plus the machinery that is NOT a variant.
+    assert {"s1_atm_30m_macd", "macd_refined"} <= keys
 
 
 # ---------------------------------------------------------------------------
@@ -83,8 +88,8 @@ def test_audit_coverage_true_only_for_audited_lanes() -> None:
         if spec.audit_lane_key and spec.audit_lane_key in audit_keys
     }
     # 2026-07-18: the execution-capable lanes now carry registered auditors
-    # (backend/audits/lanes/). Parked lanes (s2_index_mp_macd, us_macd_refined,
-    # chain_candle_builder) and pure daemons/monitors stay uncovered — that
+    # (backend/audits/lanes/). Parked lanes (chain_candle_builder; the two MACD
+    # variants were RETIRED 2026-07-20) and pure daemons/monitors stay uncovered — that
     # visible gap is the point.
     assert covered == {
         "s1_atm_30m_macd",
@@ -107,7 +112,7 @@ def test_audit_coverage_true_only_for_audited_lanes() -> None:
     assert covered_spec["audit_coverage"] is True
     # A parked lane with no auditor stays uncovered — the visible gap.
     uncovered = lane_registry._spec_payload(
-        next(spec for spec in get_registry() if spec.key == "us_macd_refined"),
+        next(spec for spec in get_registry() if spec.key == "chain_candle_builder"),
         audit_keys,
     )
     assert uncovered["audit_coverage"] is False
@@ -216,7 +221,7 @@ def test_registry_count_is_internally_consistent() -> None:
     # Buckets partition the registry → they sum to the total exactly (proves no
     # entry counted twice).
     assert counts["supervisor"] + counts["own_loop"] + counts["product_daemon"] == counts["total"]
-    assert counts["total"] == len(specs) == EXPECTED_LANE_TOTAL == 33
+    assert counts["total"] == len(specs) == EXPECTED_LANE_TOTAL == 32
     # No lane key is ALSO another lane's runner_key (no two-bucket duplicate).
     assert counts["key_runnerkey_collisions"] == 0
 
@@ -247,7 +252,8 @@ def test_no_advertised_status_endpoint_is_a_known_404() -> None:
 def test_corrected_status_endpoints_point_at_served_paths() -> None:
     by_key = {s.key: s for s in get_registry()}
     assert by_key["s1_atm_30m_macd"].status_endpoint == "/api/trading/strategy-agent/status"
-    assert by_key["s2_index_mp_macd"].status_endpoint == "/api/trading/strategy-agent/status"
+    # s2_index_mp_macd RETIRED 2026-07-20 — the LANE is gone, but the endpoint it
+    # shared with S1 is NOT removed (S1 still serves it, asserted above).
     assert by_key["cbe_scanner"].status_endpoint == "/api/cbe/paper-summary"
     assert by_key["cbe_marks"].status_endpoint == "/api/cbe/paper-summary"
     assert by_key["institutional_convergence"].status_endpoint == "/api/institutional-convergence/status"

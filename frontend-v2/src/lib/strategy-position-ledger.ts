@@ -6,7 +6,6 @@ import {
   getAuctionIntelligencePaperPositions,
   getCBEPaperPositions,
   getMacdRefinedPaperPositions,
-  getUsMacdPaperPositions,
   getCommodityStrategyStatus,
   getDirectionalOptionsPaperPositions,
   getFractalMarketProfilePaperPositions,
@@ -139,7 +138,13 @@ async function settle<T>(key: string, task: Promise<T>, errors: Record<string, s
 
 export async function fetchAppStrategyPortfolioSnapshot(): Promise<AppStrategyPortfolioSnapshot> {
   const errors: Record<string, string> = {};
-  const [nse, commodity, directional, gann, auction, fractal, cbe, macd, usMacd] = await Promise.all([
+  // us_macd_refined was RETIRED 2026-07-20 (owner: only MACD + MACD-refined
+  // survive) and its router is gone, so /api/us/macd-refined/* now 404s.
+  // Keeping the fetch here would write a permanent "Not Found" into `errors`
+  // on every portfolio load. The field stays (typed null) so the row builders
+  // below, which iterate `snapshot.usMacd?.*`, need no change.
+  const usMacd: PaperPositionsPayload | null = null;
+  const [nse, commodity, directional, gann, auction, fractal, cbe, macd] = await Promise.all([
     settle("nse", getStrategyAgentStatus().then((response) => response.data as StrategyAgentStatus), errors),
     settle("commodity", getCommodityStrategyStatus().then((response) => response.data as CommodityStrategyStatus), errors),
     settle("directional", getDirectionalOptionsPaperPositions(undefined, "all", 100).then((response) => response.data as PaperPositionsPayload), errors),
@@ -148,7 +153,6 @@ export async function fetchAppStrategyPortfolioSnapshot(): Promise<AppStrategyPo
     settle("fractal", getFractalMarketProfilePaperPositions(undefined, "all", 100).then((response) => response.data as PaperPositionsPayload), errors),
     settle("cbe", getCBEPaperPositions("all", 100).then((response) => response.data as PaperPositionsPayload), errors),
     settle("macd", getMacdRefinedPaperPositions(undefined, "all", 100).then((response) => response.data as PaperPositionsPayload), errors),
-    settle("usMacd", getUsMacdPaperPositions(undefined, "all", 100).then((response) => response.data as PaperPositionsPayload), errors),
   ]);
 
   return {

@@ -42,7 +42,9 @@ def test_registry_contains_execution_capable_keys() -> None:
     assert EXECUTION_CAPABLE_KEYS <= set(REGISTRY)
     # s1 stays registered (unchanged).
     assert "s1" in REGISTRY
-    # Parked lanes must NOT have been added.
+    # Parked lanes must NOT have been added. s2_index_mp_macd / us_macd_refined
+    # were RETIRED from the lane registry entirely on 2026-07-20; they must not
+    # reappear here either.
     for parked in ("s2_index_mp_macd", "us_macd_refined", "chain_candle_builder"):
         assert parked not in REGISTRY
 

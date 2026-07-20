@@ -320,6 +320,83 @@ class Settings(BaseSettings):
     OPTION_FLOW_WATCHDOG_ENABLED: bool = False
     OPTION_FLOW_WATCHDOG_INTERVAL_SECONDS: int = 60
     OPTION_FLOW_WATCHDOG_STALE_SECONDS: int = 300
+    # ── Expiry policy + pre-open MACD ATM watchlist (owner spec 2026-07-20) ──
+    # All FOUR default OFF: staged tonight, flipped one per session so each is
+    # independently provable and independently reversible.
+    #
+    # EXPIRY_POLICY_ENABLED — route analysis.instruments' expiry math through
+    # core.expiry_policy (calendar-driven, ONE holiday table shared with
+    # core/trading_calendar) instead of the private _KNOWN_HOLIDAYS set. OFF ⇒
+    # the legacy table answers, byte-identically to today. NOTE: the legacy
+    # table is WRONG for NSE 2026-03 / 2026-11 and SENSEX 2026-03 / 2026-05, so
+    # OFF is acceptable as a same-day revert, not as a resting state.
+    EXPIRY_POLICY_ENABLED: bool = False
+    # Validate the calendar ladder against the broker ONCE pre-market (and on
+    # demand). Inert while EXPIRY_POLICY_ENABLED is False.
+    EXPIRY_POLICY_VALIDATE_ON_OPEN: bool = True
+    # Stock delivery-risk roll: watchlist moves to the next monthly when <= N
+    # TRADING days remain on the active one. Indian single-stock options are
+    # PHYSICALLY settled — this exists to avoid compulsory delivery. Owner spec
+    # says five days; the legacy value was 3 (agent/strategy_config
+    # MIN_TTE_DAYS_STOCK, which remains the separate ENTRY gate).
+    EXPIRY_POLICY_STOCK_ROLL_TRADING_DAYS: int = 5
+    # MACD_PREOPEN_WATCHLIST_ENABLED — build the ATM strike ladder ONCE
+    # pre-market from settled/pre-open prices and FREEZE it for the session
+    # (no intraday re-racing). Removes the moving-ATM defect class that causes
+    # option-premium chart gaps. OFF ⇒ _build_row re-picks strikes per cycle,
+    # exactly as today.
+    MACD_PREOPEN_WATCHLIST_ENABLED: bool = False
+    # Pre-open sample window (IST). NSE's call auction runs 09:00-09:08; we
+    # sample at 09:04+ so the book has actually built (sampling at 09:00 mostly
+    # returns a carried previous close).
+    MACD_PREOPEN_WINDOW_START: str = "09:04"
+    MACD_PREOPEN_WINDOW_END: str = "09:14"
+    # MACD_STICKY_STRIKES_ENABLED — once a position is open on a strike, that
+    # strike PERSISTS in the watchlist until the position closes, regardless of
+    # spot drift; after closure the next strike is re-picked from the spot AT
+    # THAT TIME. Restart-safe (open positions live in Postgres agent_positions
+    # and the macd_refined paper JSON, never in memory).
+    MACD_STICKY_STRIKES_ENABLED: bool = False
+    # MACD_LIQUID_STRIKE_SELECTION_ENABLED — owner-directed removal of the
+    # ITM/OTM bias in _select_liquid_atm_strikes. Today CE is hard-anchored at
+    # or ABOVE spot and PE at or BELOW spot ("natural directional convexity").
+    # Owner: "new ATM CE/PE does not mean exact atm strike. it is next or just
+    # below spot liquid contract" — free pick by LIQUIDITY, no ITM/OTM bias.
+    # ON  ⇒ each side ranks a 3-wide window SPANNING spot and may land ITM.
+    # OFF ⇒ the legacy asymmetric anchor answers, byte-identically to today.
+    MACD_LIQUID_STRIKE_SELECTION_ENABLED: bool = False
+    # Liquidity floors. Precedent: market_data/option_subscription_manager.py
+    # (MIN_OI_LOTS=1000, MIN_PRIOR_VOLUME_LOTS=100). Single stocks are not
+    # comparable to indices, so they get their own (lower) floors.
+    MACD_STRIKE_MIN_OI_INDEX: float = 1000.0
+    MACD_STRIKE_MIN_PRIOR_VOLUME_INDEX: float = 100.0
+    MACD_STRIKE_MIN_OI_STOCK: float = 200.0
+    MACD_STRIKE_MIN_PRIOR_VOLUME_STOCK: float = 25.0
+    # Relative bid/ask spread veto. bid/ask exist on the in-memory chain object
+    # (brokers/base.py OptionChainEntry) but are NOT persisted in
+    # option_chain_snapshots, so this is a VETO applied when both sides of the
+    # book are populated and skipped (labelled "spread_untestable") when they
+    # are not. We have NO L2 depth and NO aggressor tags — no depth-based
+    # liquidity measure is invented here.
+    MACD_STRIKE_MAX_REL_SPREAD: float = 0.05
+    # History warm-up. Bar counts are DERIVED from the MACD params, not guessed
+    # (see market_data/macd_watchlist.py::warmup_requirement).
+    MACD_WARMUP_ENABLED: bool = False
+    # Half-width of the strike band pre-warmed pre-open so a mid-session re-pick
+    # after a position closes is already warm (0 broker calls, 0 latency).
+    #
+    # SET TO 1, NOT 2, and the numbers are the reason. The selector picks from a
+    # THREE-strike window spanning spot (_spot_spanning_window), so:
+    #   band=1 → 3 strikes x 2 sides x 216 underlyings = 1,296 fetches ≈ 7.6 min
+    #            at 0.35s pacing — fits the pre-09:00 dead zone, and covers every
+    #            strike the selector can ever choose.
+    #   band=2 → 5 strikes x 2 sides                   = 2,160 fetches ≈ 12.6 min,
+    #            of which 864 are for strikes OUTSIDE the selection window and
+    #            therefore unreachable. Pure waste of broker budget.
+    # Neither width fits the ten-minute 09:04-09:14 pre-open window, which is
+    # why warm-up is phase 1 and the strike pick is phase 2.
+    MACD_WARMUP_BAND_STRIKES: int = 1
+    MACD_WARMUP_PACING_SECONDS: float = 0.35
     # Post-close F&O stock spot sweep. The only LIVE writer of stock 30m spot is
     # data/upstox_research_sync.py with spot_limit=25, so it reaches 25 of ~211
     # names per pass (07-16: 124 names, 07-17: 20). Every full-coverage day so

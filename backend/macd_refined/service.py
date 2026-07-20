@@ -195,6 +195,7 @@ class MacdRefinedService:
 
 macd_refined_service = MacdRefinedService()
 
-# US market profile — same engine/exits/sizing, Alpaca data, US tickers.
-from macd_refined.config import clone_us_config  # noqa: E402
-us_macd_refined_service = MacdRefinedService(config=clone_us_config())
+# The US clone (us_macd_refined_service) was RETIRED 2026-07-20 on the owner's
+# instruction that only MACD and MACD-refined survive. It was exec=parked and
+# brokers.alpaca does not exist on this deployment, so it could never run.
+# Historical data under backend/runtime/us_macd_refined/ is KEPT.

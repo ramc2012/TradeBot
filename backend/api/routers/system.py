@@ -1103,37 +1103,7 @@ async def signal_validation() -> dict[str, Any]:
         label="Commodity MP + Order Flow",
         strategy_key="commodity_futures",
     )
-    try:
-        from macd_refined.service import us_macd_refined_service
-
-        us_summary, us_signals = await asyncio.gather(
-            asyncio.to_thread(us_macd_refined_service.summary),
-            asyncio.to_thread(us_macd_refined_service.signals, limit=100),
-        )
-        automation = dict(us_summary.get("automation") or {})
-        rows = list(us_signals.get("signals") or [])
-        rejection_counts: dict[str, int] = {}
-        for row in rows:
-            if row.get("accepted") is False:
-                reason = str(row.get("gate_reason") or row.get("reason") or "rejected")
-                rejection_counts[reason] = rejection_counts.get(reason, 0) + 1
-        runners["us_macd_refined"] = {
-            **automation,
-            "key": "us_macd_refined",
-            "label": us_summary.get("label") or "US MACD Refined",
-            "interval_seconds": automation.get("interval_seconds"),
-            "last_result_meta": {
-                "result_count": int(us_signals.get("count") or len(rows)),
-                "actionable_count": int(us_signals.get("accepted") or 0),
-                "failure_count": int(bool(automation.get("last_error"))),
-                "rejection_counts": rejection_counts,
-                "symbols_requested": list(us_summary.get("live_universe") or []),
-                "symbols_completed": list(us_summary.get("live_universe") or []) if rows else [],
-            },
-            "cycle_stats": automation.get("cycle_stats") or {},
-        }
-    except Exception as exc:
-        logger.debug(f"[System] US MACD validation status unavailable: {exc}")
+    # us_macd_refined RETIRED 2026-07-20 (owner: only MACD + MACD-refined survive).
     supervisor_status = {**supervisor_status, "runners": runners}
     return build_signal_validation_payload(
         supervisor_status,

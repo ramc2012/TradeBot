@@ -183,12 +183,15 @@ const INTRADAY_DESKS: NavDesk[] = [
     label: "MP + OF · index",
     policy: "mpof",
     policyScope: "index long premium",
-    laneKeys: ["s2_index_mp_macd"],
+    // s2_index_mp_macd RETIRED from the lane registry 2026-07-20 (owner: only
+    // MACD and MACD-refined survive). The desk stays as a read-only board; it
+    // simply no longer claims a registry lane.
+    laneKeys: [],
     status: "active",
-    note: "Index market-profile + order-flow desk. Its lane is parked in the registry, so it is a read-only board today.",
+    note: "Index market-profile + order-flow board. Read-only: it has no registry lane and no paper book.",
     book: null,
     noBookReason:
-      "s2_index_mp_macd is execution_mode=\"parked\" and the backend serves no paper-book endpoint for the index MP lane. The previous card polled /api/mp-intelligence/paper-summary, which 404s.",
+      "The s2_index_mp_macd lane was retired 2026-07-20; the backend serves no paper-book endpoint for the index MP lane (/api/mp-intelligence/paper-summary 404s).",
   },
   {
     href: "/strategies/commodity",
@@ -284,18 +287,7 @@ const POSITIONAL_DESKS: NavDesk[] = [
 ];
 
 const PARKED_DESKS: NavDesk[] = [
-  {
-    href: "/strategies/us-macd-refined",
-    label: "US MACD Refined",
-    policy: null,
-    laneKeys: ["us_macd_refined"],
-    status: "parked",
-    parkedReason:
-      "PARKED, not idle: the registry reports kind=\"product-lane\", execution_mode=\"parked\". It will not trade on the next session however healthy it looks.",
-    note: "Kept linked so the parked book stays inspectable instead of being an unreachable page on disk.",
-    // USD book (Alpaca-backed US equities/ETFs). Excluded from the INR roll-up.
-    book: { endpoint: "/api/us/macd-refined/paper-summary", path: [], currency: "USD" },
-  },
+  // US MACD Refined desk REMOVED 2026-07-20 with the us_macd_refined lane.
   {
     href: "/strategies/fractal",
     label: "Fractal MP",

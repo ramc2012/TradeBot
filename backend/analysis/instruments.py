@@ -114,9 +114,24 @@ BREEZE_INDEX_CODES: dict[str, dict] = {
 # For stocks, the Breeze stock_code is usually the same as the trading symbol
 BREEZE_RIGHT_MAP = {"CE": "call", "PE": "put"}
 
-# ── Known NSE market holidays (simplified list — expand as needed) ─────────────
-# Add known market holidays here. If expiry Thursday falls on one of these,
-# the expiry moves to Wednesday.
+# ── LEGACY holiday table — superseded by core/trading_calendar ────────────────
+# HISTORICAL NOTE (2026-07-20): this private set was hand-maintained and had
+# DIVERGED from core/trading_calendar.py's NSE exception list, which is the
+# table the ops surface actually edits. 2026 here carries 7 dates against the
+# calendar's 15, and 2026-03-20 "Holi (estimated)" is simply wrong (the real
+# NSE holiday is 2026-03-03). The divergence produced wrong monthly expiries:
+#
+#   board                      month     legacy       calendar (correct)
+#   NSE Tuesday (idx + stocks) 2026-03   03-31        2026-03-30
+#   NSE Tuesday                2026-11   11-24        2026-11-23
+#   SENSEX Thursday            2026-03   03-26        2026-03-25
+#   SENSEX Thursday            2026-05   05-28        2026-05-27
+#
+# 2026-11 is in the FUTURE. core.expiry_policy derives expiries from
+# trading_calendar instead, so there is exactly ONE holiday table. This set is
+# retained ONLY as the fallback while settings.EXPIRY_POLICY_ENABLED is False
+# (same-day revert path); it is not a resting state. Do not add dates here —
+# add them to core/trading_calendar.py / runtime/trading_calendar.json.
 _KNOWN_HOLIDAYS: set[date] = {
     # 2024 holidays
     date(2024, 1, 22),   # Ram Navami (special)
@@ -160,8 +175,34 @@ _KNOWN_HOLIDAYS: set[date] = {
 }
 
 
+def _expiry_policy_enabled() -> bool:
+    """Whether expiry math routes through the calendar-driven policy.
+
+    Read at CALL time (not import time) so the suite and the ops surface can
+    flip it without a reimport, and so an unavailable settings module degrades
+    to the legacy path rather than raising inside date math.
+    """
+    try:
+        from core.config import settings
+
+        return bool(getattr(settings, "EXPIRY_POLICY_ENABLED", False))
+    except Exception:  # noqa: BLE001
+        return False
+
+
 def _is_trading_day(d: date) -> bool:
-    """Return True if date is a weekday and not a known market holiday."""
+    """Return True if `d` is an NSE trading day.
+
+    Calendar-driven when EXPIRY_POLICY_ENABLED (core/trading_calendar holiday
+    exceptions); otherwise the legacy weekday + _KNOWN_HOLIDAYS check.
+    """
+    if _expiry_policy_enabled():
+        try:
+            from core.expiry_policy import expiry_policy
+
+            return expiry_policy._is_trading_day(d)
+        except Exception:  # noqa: BLE001
+            pass
     # Monday=0 ... Friday=4, Saturday=5, Sunday=6
     if d.weekday() >= 5:
         return False

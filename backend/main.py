@@ -35,7 +35,6 @@ from api.routers import data_quality as data_quality_router
 from api.routers import lane_health as lane_health_router
 from api.routers import notifications as notifications_router
 from api.routers import macd_refined as macd_refined_router
-from api.routers import us_macd as us_macd_router
 from directional_options import mount_directional_options_dashboard
 from directional_options.service import directional_options_service
 from api.websockets.ticks import (
@@ -547,7 +546,6 @@ app.include_router(data_quality_router.router)
 app.include_router(lane_health_router.router)
 app.include_router(notifications_router.router)
 app.include_router(macd_refined_router.router)
-app.include_router(us_macd_router.router)
 
 
 # ── WebSocket Endpoints ───────────────────────────────────────────────────────

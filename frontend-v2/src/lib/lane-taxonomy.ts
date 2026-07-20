@@ -134,10 +134,7 @@ export const LANE_HORIZON: Record<string, LaneHorizonEntry> = {
     horizon: "intraday",
     evidence: "decides on the 30-minute ATM premium bar; squares off within the session (audit_lane_key \"s1\")",
   },
-  s2_index_mp_macd: {
-    horizon: "intraday",
-    evidence: "15-minute index MACD + market profile; lane is execution_mode=\"parked\"",
-  },
+  // s2_index_mp_macd RETIRED 2026-07-20 (owner: MACD + MACD-refined only).
   commodity_mp_orderflow: {
     horizon: "intraday",
     evidence: "3-minute signal bars (commodity_mp_signal.bar_minutes) inside the MCX session",
@@ -193,10 +190,7 @@ export const LANE_HORIZON: Record<string, LaneHorizonEntry> = {
     horizon: "intraday",
     evidence: "session profile lane; execution_mode=\"parked\"",
   },
-  us_macd_refined: {
-    horizon: "swing",
-    evidence: "US weekly-expiry variant of the refined lane; parked",
-  },
+  // us_macd_refined RETIRED 2026-07-20 (owner: MACD + MACD-refined only).
   // ── everything that never takes a position ──
   market_intelligence: {
     horizon: "not_a_trading_lane",

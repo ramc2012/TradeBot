@@ -547,6 +547,16 @@ class MarketHoursPaperSupervisor:
             from api.routers.auth import morning_token_readiness
             return await morning_token_readiness()
 
+        async def _macd_preopen_watchlist_runner() -> dict[str, Any]:
+            # Owner spec 2026-07-20: fix the expiries pre-market, then build the
+            # MACD ATM ladder ONCE from settled/pre-open prices and FREEZE it.
+            # Two phases inside one runner (see run_preopen_phase): expiry
+            # validation + history warm-up in the 07:00-09:00 dead zone, then the
+            # anchor sample + strike pick in the 09:04-09:14 window. Flag-gated
+            # OFF (MACD_PREOPEN_WATCHLIST_ENABLED) — a no-op until flipped.
+            from market_data.macd_watchlist import run_preopen_phase
+            return await run_preopen_phase()
+
         async def _option_flow_watchdog_runner() -> dict[str, Any]:
             # Detection/telemetry only (default OFF): flags a frozen REST premium
             # feed once the FAST lanes lean on the Fyers tick path. See
@@ -1218,6 +1228,27 @@ class MarketHoursPaperSupervisor:
                 # broker slowness. The sweep also self-limits via deadline_seconds.
                 timeout_seconds=1200.0,
                 # Spot ingestion belongs to the core data plane.
+                plane="core",
+            ),
+            RunnerConfig(
+                key="macd_preopen_watchlist",
+                label="MACD Pre-open ATM Watchlist (expiry + freeze)",
+                # 5-minute cadence: fine enough to land inside the ten-minute
+                # 09:04-09:14 pre-open window, cheap enough that the pre-09:00
+                # validation phase is not chatty. The build is idempotent — a
+                # second pass inside the window sees the frozen ladder and
+                # returns "already_frozen" rather than re-racing it.
+                interval_seconds=300,
+                callback=_macd_preopen_watchlist_runner,
+                enabled=getattr(settings, "MACD_PREOPEN_WATCHLIST_ENABLED", False),
+                # Pre-open only. There is no meaningful post-close "catch-up"
+                # for a pre-open ladder: a 15:35 build would freeze a ladder for
+                # a session that is already over.
+                market_hours_fn=_in_token_readiness_window,
+                next_open_fn=_next_token_readiness_open,
+                post_close_catchup=False,
+                # Phase 1 can walk the whole universe's warm-up under BULK.
+                timeout_seconds=1200.0,
                 plane="core",
             ),
             RunnerConfig(

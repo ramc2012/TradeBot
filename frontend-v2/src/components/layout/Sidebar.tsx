@@ -95,7 +95,6 @@ const DESK_ICON: Record<string, typeof Target> = {
   "/strategies/gann": Compass,
   "/strategies/cbe": Radar,
   "/strategies/overview": LayoutDashboard,
-  "/strategies/us-macd-refined": Globe,
   "/strategies/fractal": Fingerprint,
   "/strategies/sniper": Crosshair,
 };
