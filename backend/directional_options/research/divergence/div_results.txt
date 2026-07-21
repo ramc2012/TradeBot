@@ -1,0 +1,333 @@
+==============================================================================
+1. SETUP INVENTORY (stocks + indices, 2025-03-28 .. 2026-07-20)
+==============================================================================
+                            n  names  p_large    term   ret10    mfe    mae  trunc
+arm                                                                               
+ctrl_unconditional      66339    217   0.2995  0.1793  0.0050 2.1974 2.0378 0.0491
+ctrl_matched_cross_div   2811     97   0.2689 -0.0843 -0.0019 1.9868 2.1222 0.0502
+cross                    2305    216   0.2954  0.1217  0.0043 2.1796 2.0996 0.0456
+ctrl_random              1447    216   0.2875  0.1630  0.0029 2.1902 2.1098 0.0435
+abl_no_div                863    215   0.2746 -0.3226 -0.0005 2.0305 2.2956 0.0904
+ctrl_matched_full         658     31   0.2584 -0.0171  0.0027 2.0955 2.1509 0.0426
+cross_divany              441    172   0.2902  0.2294  0.0047 2.1792 2.0584 0.0431
+cross_divany_hl           295    164   0.3119  0.0462  0.0043 2.2789 2.1204 0.0915
+cross_div                 143     97   0.3287  0.3074  0.0082 2.2312 1.9582 0.0490
+full_any                  140    104   0.3214 -0.3030  0.0039 2.2965 2.3142 0.0857
+abl_no_cross              114     90   0.2982 -0.2779 -0.0016 1.9900 2.2762 0.0965
+abl_no_tl                 102     78   0.2745  0.3490  0.0002 2.3145 2.0286 0.0490
+cross_div_hl              102     78   0.2745  0.3490  0.0002 2.3145 2.0286 0.0490
+abl_no_hl                  48     42   0.3333 -0.0270  0.0119 2.0658 2.0416 0.0833
+cross_div_tl               48     42   0.3333 -0.0270  0.0119 2.0658 2.0416 0.0833
+full                       33     31   0.2727 -0.1301 -0.0053 2.1260 2.3945 0.0303
+
+stocks only:
+                            n  names  p_large    term   ret10
+arm                                                          
+abl_no_cross              109     86   0.2936 -0.2739 -0.0019
+abl_no_div                835    209   0.2754 -0.3178 -0.0007
+abl_no_hl                  47     41   0.3404 -0.0128  0.0118
+abl_no_tl                  98     75   0.2755  0.2754 -0.0013
+cross                    2222    210   0.2952  0.1108  0.0041
+cross_div                 138     93   0.3188  0.2601  0.0077
+cross_div_hl               98     75   0.2755  0.2754 -0.0013
+cross_div_tl               47     41   0.3404 -0.0128  0.0118
+cross_divany              427    167   0.2881  0.1886  0.0046
+cross_divany_hl           285    159   0.3053 -0.0195  0.0035
+ctrl_matched_cross_div   2711     93   0.2656 -0.1315 -0.0026
+ctrl_matched_full         638     30   0.2492 -0.0816  0.0023
+ctrl_random              1408    210   0.2905  0.1619  0.0030
+ctrl_unconditional      64186    211   0.3000  0.1755  0.0050
+full                       32     30   0.2500 -0.2398 -0.0063
+full_any                  137    101   0.3066 -0.3690  0.0033
+
+==============================================================================
+2. SETUP vs CONTROLS  (cluster bootstrap by underlying, 2000 draws)
+==============================================================================
+
+==============================================================================
+3. ELEMENT ABLATIONS  (each element removed from the full setup)
+==============================================================================
+                                label   metric  n_a   n_b  mean_a  mean_b    diff      lo      hi      p  p_bonf   q_bh
+          cross vs ctrl_unconditional    large 2305 66339  0.2954  0.2995 -0.0041 -0.0206  0.0125 0.6030  1.0000 0.8724
+          cross vs ctrl_unconditional term_atr 2305 66339  0.1217  0.1793 -0.0576 -0.1321  0.0175 0.1390  1.0000 0.8724
+                 cross vs ctrl_random    large 2305  1447  0.2954  0.2875  0.0080 -0.0192  0.0362 0.5530  1.0000 0.8724
+                 cross vs ctrl_random term_atr 2305  1447  0.1217  0.1630 -0.0413 -0.2056  0.1259 0.6260  1.0000 0.8724
+      cross_div vs ctrl_unconditional    large  143 66339  0.3287  0.2995  0.0291 -0.0463  0.1122 0.4735  1.0000 0.8724
+      cross_div vs ctrl_unconditional term_atr  143 66339  0.3074  0.1793  0.1281 -0.2690  0.5387 0.5430  1.0000 0.8724
+             cross_div vs ctrl_random    large  143  1447  0.3287  0.2875  0.0412 -0.0444  0.1288 0.3480  1.0000 0.8724
+             cross_div vs ctrl_random term_atr  143  1447  0.3074  0.1630  0.1444 -0.2797  0.5693 0.5095  1.0000 0.8724
+   cross_div_tl vs ctrl_unconditional    large   48 66339  0.3333  0.2995  0.0338 -0.0999  0.1783 0.6400  1.0000 0.8724
+   cross_div_tl vs ctrl_unconditional term_atr   48 66339 -0.0270  0.1793 -0.2063 -0.9136  0.4473 0.5595  1.0000 0.8724
+          cross_div_tl vs ctrl_random    large   48  1447  0.3333  0.2875  0.0458 -0.0833  0.1904 0.4985  1.0000 0.8724
+          cross_div_tl vs ctrl_random term_atr   48  1447 -0.0270  0.1630 -0.1900 -0.8907  0.5491 0.5745  1.0000 0.8724
+   cross_div_hl vs ctrl_unconditional    large  102 66339  0.2745  0.2995 -0.0250 -0.1066  0.0585 0.5825  1.0000 0.8724
+   cross_div_hl vs ctrl_unconditional term_atr  102 66339  0.3490  0.1793  0.1697 -0.3643  0.7499 0.5395  1.0000 0.8724
+          cross_div_hl vs ctrl_random    large  102  1447  0.2745  0.2875 -0.0130 -0.1010  0.0726 0.7840  1.0000 0.9001
+          cross_div_hl vs ctrl_random term_atr  102  1447  0.3490  0.1630  0.1860 -0.3677  0.7704 0.5175  1.0000 0.8724
+           full vs ctrl_unconditional    large   33 66339  0.2727  0.2995 -0.0268 -0.1834  0.1453 0.7430  1.0000 0.9001
+           full vs ctrl_unconditional term_atr   33 66339 -0.1301  0.1793 -0.3094 -1.3092  0.7092 0.5380  1.0000 0.8724
+                  full vs ctrl_random    large   33  1447  0.2727  0.2875 -0.0148 -0.1723  0.1579 0.8565  1.0000 0.9147
+                  full vs ctrl_random term_atr   33  1447 -0.1301  0.1630 -0.2931 -1.3364  0.7469 0.5815  1.0000 0.8724
+     abl_no_div vs ctrl_unconditional    large  863 66339  0.2746  0.2995 -0.0249 -0.0518  0.0035 0.0815  1.0000 0.8577
+     abl_no_div vs ctrl_unconditional term_atr  863 66339 -0.3226  0.1793 -0.5019 -0.6767 -0.3258 0.0005  0.0465 0.0232
+            abl_no_div vs ctrl_random    large  863  1447  0.2746  0.2875 -0.0129 -0.0483  0.0208 0.4570  1.0000 0.8724
+            abl_no_div vs ctrl_random term_atr  863  1447 -0.3226  0.1630 -0.4856 -0.6984 -0.2719 0.0005  0.0465 0.0232
+      abl_no_tl vs ctrl_unconditional    large  102 66339  0.2745  0.2995 -0.0250 -0.1067  0.0647 0.5515  1.0000 0.8724
+      abl_no_tl vs ctrl_unconditional term_atr  102 66339  0.3490  0.1793  0.1697 -0.3604  0.7163 0.5510  1.0000 0.8724
+             abl_no_tl vs ctrl_random    large  102  1447  0.2745  0.2875 -0.0130 -0.0943  0.0794 0.7765  1.0000 0.9001
+             abl_no_tl vs ctrl_random term_atr  102  1447  0.3490  0.1630  0.1860 -0.3862  0.7850 0.5380  1.0000 0.8724
+      abl_no_hl vs ctrl_unconditional    large   48 66339  0.3333  0.2995  0.0338 -0.0960  0.1761 0.6375  1.0000 0.8724
+      abl_no_hl vs ctrl_unconditional term_atr   48 66339 -0.0270  0.1793 -0.2063 -0.8951  0.4978 0.5520  1.0000 0.8724
+             abl_no_hl vs ctrl_random    large   48  1447  0.3333  0.2875  0.0458 -0.0922  0.1910 0.5100  1.0000 0.8724
+             abl_no_hl vs ctrl_random term_atr   48  1447 -0.0270  0.1630 -0.1900 -0.8852  0.4997 0.5815  1.0000 0.8724
+   abl_no_cross vs ctrl_unconditional    large  114 66339  0.2982  0.2995 -0.0013 -0.0893  0.0843 0.9830  1.0000 0.9830
+   abl_no_cross vs ctrl_unconditional term_atr  114 66339 -0.2779  0.1793 -0.4572 -0.9923  0.1077 0.1060  1.0000 0.8724
+          abl_no_cross vs ctrl_random    large  114  1447  0.2982  0.2875  0.0108 -0.0786  0.1005 0.8325  1.0000 0.9147
+          abl_no_cross vs ctrl_random term_atr  114  1447 -0.2779  0.1630 -0.4409 -1.0522  0.1661 0.1560  1.0000 0.8724
+   cross_divany vs ctrl_unconditional    large  441 66339  0.2902  0.2995 -0.0093 -0.0492  0.0312 0.6520  1.0000 0.8724
+   cross_divany vs ctrl_unconditional term_atr  441 66339  0.2294  0.1793  0.0501 -0.2019  0.2901 0.6945  1.0000 0.8971
+          cross_divany vs ctrl_random    large  441  1447  0.2902  0.2875  0.0028 -0.0411  0.0493 0.9035  1.0000 0.9419
+          cross_divany vs ctrl_random term_atr  441  1447  0.2294  0.1630  0.0664 -0.2070  0.3606 0.6495  1.0000 0.8724
+cross_divany_hl vs ctrl_unconditional    large  295 66339  0.3119  0.2995  0.0123 -0.0370  0.0686 0.6660  1.0000 0.8724
+cross_divany_hl vs ctrl_unconditional term_atr  295 66339  0.0462  0.1793 -0.1331 -0.4511  0.1972 0.4310  1.0000 0.8724
+       cross_divany_hl vs ctrl_random    large  295  1447  0.3119  0.2875  0.0244 -0.0349  0.0839 0.4150  1.0000 0.8724
+       cross_divany_hl vs ctrl_random term_atr  295  1447  0.0462  0.1630 -0.1168 -0.4757  0.2468 0.5110  1.0000 0.8724
+       full_any vs ctrl_unconditional    large  140 66339  0.3214  0.2995  0.0219 -0.0518  0.0968 0.5690  1.0000 0.8724
+       full_any vs ctrl_unconditional term_atr  140 66339 -0.3030  0.1793 -0.4823 -0.9624  0.0138 0.0540  1.0000 0.8370
+              full_any vs ctrl_random    large  140  1447  0.3214  0.2875  0.0339 -0.0457  0.1158 0.4180  1.0000 0.8724
+              full_any vs ctrl_random term_atr  140  1447 -0.3030  0.1630 -0.4660 -0.9736  0.0365 0.0685  1.0000 0.8577
+  cross_div vs ctrl_matched_cross_div    large  143  2811  0.3287  0.2689  0.0597 -0.0029  0.1310 0.0830  1.0000 0.8577
+  cross_div vs ctrl_matched_cross_div term_atr  143  2811  0.3074 -0.0843  0.3917  0.0035  0.7663 0.0450  1.0000 0.8370
+            full vs ctrl_matched_full    large   33   658  0.2727  0.2584  0.0144 -0.1321  0.1615 0.8655  1.0000 0.9147
+            full vs ctrl_matched_full term_atr   33   658 -0.1301 -0.0171 -0.1130 -0.8270  0.6223 0.7815  1.0000 0.9001
+                   full vs abl_no_div    large   33   863  0.2727  0.2746 -0.0019 -0.1553  0.1622 0.9830  1.0000 0.9830
+                   full vs abl_no_div term_atr   33   863 -0.1301 -0.3226  0.1924 -0.8294  1.2327 0.7155  1.0000 0.8992
+                    full vs abl_no_tl    large   33   102  0.2727  0.2745 -0.0018 -0.1387  0.1490 0.9810  1.0000 0.9830
+                    full vs abl_no_tl term_atr   33   102 -0.1301  0.3490 -0.4791 -1.3746  0.3701 0.2940  1.0000 0.8724
+                    full vs abl_no_hl    large   33    48  0.2727  0.3333 -0.0606 -0.2349  0.1354 0.5115  1.0000 0.8724
+                    full vs abl_no_hl term_atr   33    48 -0.1301 -0.0270 -0.1031 -1.2245  1.1031 0.8605  1.0000 0.9147
+                 full vs abl_no_cross    large   33   114  0.2727  0.2982 -0.0255 -0.1927  0.1363 0.7590  1.0000 0.9001
+                 full vs abl_no_cross term_atr   33   114 -0.1301 -0.2779  0.1477 -0.8055  1.2491 0.7825  1.0000 0.9001
+cross_div vs cross (divergence alone)    large  143  2305  0.3287  0.2954  0.0332 -0.0401  0.1155 0.4070  1.0000 0.8724
+cross_div vs cross (divergence alone) term_atr  143  2305  0.3074  0.1217  0.1857 -0.2108  0.5991 0.3715  1.0000 0.8724
+
+comparisons registered: 93  (Bonferroni factor 93)
+survive q_BH<0.10: 2   survive p_bonf<0.05: 2
+
+==============================================================================
+4. CROSSOVER STRENGTH CONDITIONING  (monotone across deciles?)
+==============================================================================
+
+str_hist  n=2305  spearman(x,P(large))=-0.011  spearman(x,term_atr)=+0.018  decile-monotonicity=-0.139
+       n      p    term    val
+dec                           
+0    231 0.2857  0.1346 0.0022
+1    230 0.3174  0.1249 0.0073
+2    231 0.2987  0.0060 0.0131
+3    230 0.3435  0.1545 0.0190
+4    231 0.2900 -0.0338 0.0261
+5    230 0.2609  0.0572 0.0344
+6    230 0.2348 -0.0130 0.0435
+7    231 0.3333  0.4396 0.0556
+8    230 0.2826  0.1506 0.0713
+9    231 0.3074  0.1957 0.1068
+
+str_slope  n=2305  spearman(x,P(large))=+0.006  spearman(x,term_atr)=+0.056  decile-monotonicity=+0.055
+       n      p    term    val
+dec                           
+0    231 0.2987 -0.0632 0.0191
+1    230 0.2957  0.0477 0.0352
+2    231 0.2468 -0.0347 0.0460
+3    230 0.3391  0.0568 0.0554
+4    231 0.2771  0.0437 0.0655
+5    230 0.3130 -0.1327 0.0744
+6    230 0.2783  0.3454 0.0857
+7    231 0.3117 -0.0346 0.0999
+8    230 0.3217  0.4746 0.1196
+9    231 0.2727  0.5149 0.1541
+
+str_below0  n=2305  spearman(x,P(large))=+0.066  spearman(x,term_atr)=+0.090  decile-monotonicity=+0.839
+       n      p    term     val
+dec                            
+0    231 0.2857  0.0629 -0.0245
+1    230 0.2696 -0.0480 -0.0130
+2    231 0.2165 -0.0753 -0.0071
+3    230 0.2652 -0.3554 -0.0025
+4    231 0.2944 -0.1442  0.0013
+5    230 0.3217 -0.0720  0.0052
+6    230 0.3043  0.2100  0.0093
+7    231 0.3074  0.3241  0.0142
+8    230 0.3217  0.3290  0.0221
+9    231 0.3680  0.9835  0.0358
+
+str_thrust  n=2305  spearman(x,P(large))=+0.026  spearman(x,term_atr)=+0.035  decile-monotonicity=+0.509
+       n      p    term     val
+dec                            
+0    231 0.2814  0.2467 -0.2408
+1    230 0.2783  0.1327  0.0258
+2    231 0.3074  0.0129  0.1910
+3    230 0.2870 -0.2586  0.3571
+4    231 0.2857  0.0487  0.5014
+5    230 0.2870  0.2704  0.6713
+6    230 0.2652 -0.1179  0.8459
+7    231 0.3333  0.0064  1.0598
+8    230 0.2870  0.2365  1.3474
+9    231 0.3420  0.6378  1.8910
+
+str_volz  n=2223  spearman(x,P(large))=+0.013  spearman(x,term_atr)=+0.026  decile-monotonicity=+0.377
+       n      p    term     val
+dec                            
+0    223 0.2870 -0.0292 -1.0109
+1    222 0.2748  0.3142 -0.6590
+2    222 0.2703 -0.2477 -0.4562
+3    222 0.2793  0.1063 -0.2731
+4    223 0.3543  0.0838 -0.0716
+5    222 0.3153  0.2378  0.1907
+6    222 0.2568 -0.0557  0.5751
+7    222 0.3108  0.0392  1.1393
+8    222 0.3153  0.3224  1.9044
+9    223 0.2915  0.3379  3.3098
+
+str_div_macd  n=139  spearman(x,P(large))=+0.014  spearman(x,term_atr)=+0.014  decile-monotonicity=-0.282
+      n      p    term    val
+dec                          
+0    14 0.3571  0.2972 0.0100
+1    14 0.3571  0.7976 0.0238
+2    14 0.3571  1.0794 0.0505
+3    14 0.2857  0.2663 0.0743
+4    14 0.3571 -0.6973 0.1050
+5    13 0.3077  0.6931 0.1305
+6    14 0.2143 -0.9963 0.1635
+7    14 0.1429 -0.6597 0.2419
+8    14 0.2857 -0.3240 0.3353
+9    14 0.5714  1.8924 0.6594
+
+==============================================================================
+5. PER NON-OVERLAPPING QUARTER  (primary + full arm)
+==============================================================================
+
+--- cross_div
+          n  p_large    term
+quarter                     
+2025Q2   12   0.4167  0.7242
+2025Q3   25   0.3600  0.3311
+2025Q4   41   0.3659  0.5531
+2026Q1   30   0.1667 -0.0115
+2026Q2   28   0.4643  0.0921
+2026Q3    7   0.0000  0.2973
+
+--- cross_divany
+           n  p_large    term
+quarter                      
+2025Q2    15   0.3333  0.5793
+2025Q3    55   0.3455 -0.1468
+2025Q4   124   0.3065  0.3478
+2026Q1   101   0.2079 -0.1130
+2026Q2   127   0.3228  0.4204
+2026Q3    19   0.2105  0.8122
+
+--- full
+          n  p_large    term
+quarter                     
+2025Q3    4   0.0000 -0.9582
+2025Q4    7   0.4286 -0.2743
+2026Q1   11   0.2727  0.4547
+2026Q2   10   0.3000 -0.2994
+2026Q3    1   0.0000 -0.5493
+
+--- full_any
+          n  p_large    term
+quarter                     
+2025Q3   10   0.1000 -0.5472
+2025Q4   38   0.2632 -0.8995
+2026Q1   31   0.1935 -1.4023
+2026Q2   51   0.4902  0.7077
+2026Q3   10   0.3000  0.4617
+
+--- cross
+           n  p_large    term
+quarter                      
+2025Q1     6   0.6667  2.5145
+2025Q2   239   0.3013  0.5144
+2025Q3   489   0.2331 -0.1088
+2025Q4   543   0.2928  0.0745
+2026Q1   430   0.2302 -0.6495
+2026Q2   498   0.4317  0.8186
+2026Q3   100   0.1800  0.2686
+
+--- ctrl_unconditional
+             n  p_large    term
+quarter                        
+2025Q1     240   0.3583  0.7235
+2025Q2   10385   0.3554  0.9208
+2025Q3   13786   0.2817  0.0242
+2025Q4   13140   0.3293  0.1047
+2026Q1   12905   0.2074 -0.5216
+2026Q2   12970   0.3630  0.4973
+2026Q3    2913   0.1716  0.2508
+
+==============================================================================
+6. CONCENTRATION: ex-top-3 winners, and how much rests on PNB
+==============================================================================
+
+--- cross_div  n=143
+  top-3 by term_atr: CANBK@2025-09-09 +7.16, NTPC@2025-12-15 +6.23, BHARTIARTL@2025-10-10 +5.82
+  term_atr  all=+0.3074  ex-top3=+0.1768  median=+0.1172
+  P(large)  all=0.3287  ex-top3=0.3214
+  PNB episodes in this arm: 0 (0.0% of n)  term_atr []
+  top-5 names by summed term_atr: CANBK +7.2, NTPC +6.2, TMPV +5.7, ADANIENSOL +5.5, SBIN +5.1
+  share of total positive term_atr from the top 5 names: 21.2%
+
+--- cross_divany  n=441
+  top-3 by term_atr: FEDERALBNK@2025-10-08 +10.87, BHEL@2026-04-09 +10.73, IDFCFIRSTB@2025-10-08 +7.43
+  term_atr  all=+0.2294  ex-top3=+0.1647  median=-0.0576
+  P(large)  all=0.2902  ex-top3=0.2854
+  PNB episodes in this arm: 2 (0.5% of n)  term_atr [1.57, 0.99]
+  top-5 names by summed term_atr: BHEL +15.0, IDFCFIRSTB +12.2, BANDHANBNK +11.3, OBEROIRLTY +10.5, FEDERALBNK +10.3
+  share of total positive term_atr from the top 5 names: 18.0%
+
+--- full  n=33
+  top-3 by term_atr: BHEL@2026-03-20 +5.86, BANDHANBNK@2026-02-06 +5.78, JSWENERGY@2026-03-30 +4.85
+  term_atr  all=-0.1301  ex-top3=-0.6930  median=-0.6795
+  P(large)  all=0.2727  ex-top3=0.2333
+  PNB episodes in this arm: 0 (0.0% of n)  term_atr []
+  top-5 names by summed term_atr: BHEL +5.9, BANDHANBNK +5.8, JSWENERGY +4.8, MIDCPNIFTY +3.4, LODHA +3.4
+  share of total positive term_atr from the top 5 names: 60.1%
+
+--- full_any  n=140
+  top-3 by term_atr: PNBHOUSING@2026-04-07 +7.42, ZYDUSLIFE@2026-05-07 +6.06, BHEL@2026-03-20 +5.86
+  term_atr  all=-0.3030  ex-top3=-0.4508  median=-0.3475
+  P(large)  all=0.3214  ex-top3=0.3139
+  PNB episodes in this arm: 1 (0.7% of n)  term_atr [0.45]
+  top-5 names by summed term_atr: NAUKRI +11.7, PNBHOUSING +7.4, JSWENERGY +6.5, ZYDUSLIFE +6.1, BHEL +5.9
+  share of total positive term_atr from the top 5 names: 32.1%
+
+--- cross_divany_hl  n=295
+  top-3 by term_atr: FEDERALBNK@2025-10-06 +13.37, BIOCON@2025-10-20 +7.46, PNBHOUSING@2026-04-07 +7.42
+  term_atr  all=+0.0462  ex-top3=-0.0501  median=+0.0000
+  P(large)  all=0.3119  ex-top3=0.3048
+  PNB episodes in this arm: 1 (0.3% of n)  term_atr [0.45]
+  top-5 names by summed term_atr: FEDERALBNK +19.4, NAUKRI +10.9, HCLTECH +8.6, BIOCON +7.5, PNBHOUSING +7.4
+  share of total positive term_atr from the top 5 names: 21.2%
+
+==============================================================================
+7. INDEX vs STOCK split (primary arm)
+==============================================================================
+
+--- cross_div
+         n  p_large   term
+mkt                       
+index    5   0.6000 1.6121
+stock  138   0.3188 0.2601
+
+--- cross_divany
+         n  p_large   term
+mkt                       
+index   14   0.3571 1.4731
+stock  427   0.2881 0.1886
+
+--- cross
+          n  p_large   term
+mkt                        
+index    83   0.3012 0.4131
+stock  2222   0.2952 0.1108

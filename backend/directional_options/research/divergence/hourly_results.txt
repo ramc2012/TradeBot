@@ -1,0 +1,16 @@
+hourly MACD bull crosses: 18062 over 69377 underlying-sessions = one every 3.84 sessions per name
+daily  MACD bull crosses: 2472 = one every 28.07 sessions per name
+
+ORACLE lead to the daily cross (n=143): median 1.0 mean 1.65 p25 0 p75 3 same-session 29.4%
+
+ARM                 n     P(large)   term_atr   mfe_atr   mae_atr
+daily cross_div      143      0.329      0.307     2.231     1.958
+hourly_tradeable     269      0.283      0.296     2.126     1.969
+hourly_oracle        143      0.510      1.050     2.894     1.358
+
+PAIRED (oracle hourly vs its own daily entry, n=143):
+  large     hourly +0.5105 daily +0.3287 diff +0.1818 (se 0.0380, t +4.79)
+  term_atr  hourly +1.0500 daily +0.3074 diff +0.7426 (se 0.1224, t +6.07)
+  entry advantage of hourly: median +1.222% mean +1.815% (positive = entered cheaper)
+
+wrote hourly_arms.parquet 412

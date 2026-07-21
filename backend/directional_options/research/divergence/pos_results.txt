@@ -1,0 +1,83 @@
+/Users/ramachandran/CLAUDE PROJECTS/Nomad Curie/TradeBot/backend/directional_options/research/divergence/div_positioning.py:120: FutureWarning: The default fill_method='ffill' in SeriesGroupBy.pct_change is deprecated and will be removed in a future version. Either fill in any non-leading NA values prior to calling pct_change or specify 'fill_method=None' to not fill NA values.
+  piv["d5_" + c] = piv.groupby("underlying")[c].pct_change(5)
+/Users/ramachandran/CLAUDE PROJECTS/Nomad Curie/TradeBot/backend/directional_options/research/divergence/div_positioning.py:120: FutureWarning: The default fill_method='ffill' in SeriesGroupBy.pct_change is deprecated and will be removed in a future version. Either fill in any non-leading NA values prior to calling pct_change or specify 'fill_method=None' to not fill NA values.
+  piv["d5_" + c] = piv.groupby("underlying")[c].pct_change(5)
+==============================================================================
+DATA AVAILABILITY (15:15 IST snapshots, whole extraction)
+==============================================================================
+stocks   rows=  225822  oi non-null 100.0%  oi>0 96.8%  iv non-null 92.7%  delta non-null 92.7%  volume>0 80.3%
+indices  rows=   44290  oi non-null 100.0%  oi>0 79.3%  iv non-null 91.4%  delta non-null 91.4%  volume>0 86.9%
+
+distinct stock strikes per underlying-session: median 2  p10 2  p90 4
+moneyness span held per underlying-session: median low -1.5%  median high +1.7%
+
+==============================================================================
+STRIKE-BAND COVERAGE  (share of episodes each band could be filled)
+==============================================================================
+cross            episodes= 2305  ITM6 16%  ITM3 42%  ATM 43%  OTM3 18%  OTM6 5%
+cross_div        episodes=  143  ITM6 17%  ITM3 44%  ATM 55%  OTM3 27%  OTM6 3%
+cross_divany     episodes=  441  ITM6 14%  ITM3 41%  ATM 50%  OTM3 24%  OTM6 5%
+cross_divany_hl  episodes=  295  ITM6 7%  ITM3 31%  ATM 46%  OTM3 22%  OTM6 4%
+ctrl_random      episodes= 1447  ITM6 8%  ITM3 25%  ATM 40%  OTM3 27%  OTM6 9%
+
+A band below ~40% coverage is a SELECTED subsample of names whose 
+strike ladder happens to be wide in our ATM-tracker store; treat any 
+ITM6/OTM6 result as conditional on that selection.
+
+==============================================================================
+POSITIONING FEATURES AT THE SELECTION SNAPSHOT
+==============================================================================
+
+coverage of the positioning features on setup episodes:
+  cross          n= 2305  oi_CE 63%  d5_oi_CE 63%  d5_oi_PE 63%  pcr_oi 59%  vol_oi_ce 62%
+  cross_divany   n=  441  oi_CE 65%  d5_oi_CE 66%  d5_oi_PE 66%  pcr_oi 59%  vol_oi_ce 65%
+  cross_div      n=  143  oi_CE 69%  d5_oi_CE 71%  d5_oi_PE 71%  pcr_oi 60%  vol_oi_ce 69%
+
+CONDITIONING TEST (widest arm = `cross`, quintiles of each feature)
+
+  d5_oi_CE  n=1447  spearman(x, term_atr)=-0.003
+     n      p    term     val
+q                            
+0  290 0.2862  0.1632 -0.7476
+1  289 0.2664  0.0357 -0.2527
+2  289 0.2699 -0.3605  0.0323
+3  289 0.2872  0.0668  0.4508
+4  290 0.2621  0.1524  3.4765
+   top-vs-bottom quintile term_atr diff -0.0108 [-0.414,+0.405] p=0.9570
+
+  d5_oi_PE  n=1444  spearman(x, term_atr)=-0.003
+     n      p    term     val
+q                            
+0  289 0.3149  0.0642 -0.6449
+1  289 0.2561  0.0049 -0.0862
+2  288 0.2604 -0.1592  0.1657
+3  289 0.3149 -0.0565  0.5630
+4  289 0.2249  0.1883  3.3846
+   top-vs-bottom quintile term_atr diff +0.1241 [-0.286,+0.525] p=0.5565
+
+  pcr_oi  n=1368  spearman(x, term_atr)=-0.015
+     n      p    term    val
+q                           
+0  274 0.2920  0.0080 0.3035
+1  273 0.2271  0.0446 0.5643
+2  274 0.2591 -0.1096 0.8404
+3  273 0.2747 -0.1817 1.1878
+4  274 0.2810  0.1111 1.8756
+   top-vs-bottom quintile term_atr diff +0.1030 [-0.339,+0.556] p=0.6460
+
+  vol_oi_ce  n=1440  spearman(x, term_atr)=+0.049
+     n      p    term    val
+q                           
+0  288 0.2639  0.0781 0.0161
+1  288 0.2465 -0.2373 0.0472
+2  288 0.2743 -0.0100 0.0800
+3  288 0.2917 -0.0925 0.1386
+4  288 0.2847  0.3164 0.3178
+   top-vs-bottom quintile term_atr diff +0.2383 [-0.223,+0.694] p=0.3065
+
+BH across the positioning grid:
+  feature  n_a  n_b  mean_a  mean_b    diff      p   q_bh
+ d5_oi_CE  290  290  0.1524  0.1632 -0.0108 0.9570 0.9570
+ d5_oi_PE  289  289  0.1883  0.0642  0.1241 0.5565 0.8613
+   pcr_oi  274  274  0.1111  0.0080  0.1030 0.6460 0.8613
+vol_oi_ce  288  288  0.3164  0.0781  0.2383 0.3065 0.8613

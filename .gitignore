@@ -124,3 +124,4 @@ data/quarantine/
 backend/directional_options/research/**/data/
 
 backend/directional_options/research/**/data_rs/
+backend/directional_options/research/divergence/data/
