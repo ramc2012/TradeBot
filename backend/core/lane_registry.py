@@ -349,7 +349,7 @@ def get_registry() -> tuple[LaneSpec, ...]:
             key="gann_tp_delta",
             label="Gann TP Delta Paper Cycle",
             kind="scheduler-runner",
-            execution_mode="paper",
+            execution_mode="parked",
             status_source="supervisor",
             cadence_seconds=float(settings.GANN_TP_DELTA_AUTO_INTERVAL_SECONDS),
             broker_profile="slow",
@@ -358,6 +358,12 @@ def get_registry() -> tuple[LaneSpec, ...]:
             runner_keys=("gann_tp_delta",),
             paper_book_source="gann_tp_delta paper book",
             status_endpoint="/api/gann-tp-delta/summary",
+            notes=(
+                "Parked 2026-07-21 (owner call): lane stops running, ALL code/tables/"
+                "tests/research kept. Flag default False; offline watchlist sidecar "
+                "(gann_tp_delta/watchlist_runner.py) is manual-invoke only, never wired "
+                "into the app. Same precedent as fractal_market_profile."
+            ),
         ),
         LaneSpec(
             key="lane_audit",

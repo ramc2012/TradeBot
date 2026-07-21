@@ -689,7 +689,11 @@ class Settings(BaseSettings):
     # overrides for knobs read only via getattr). cbe_marks refreshes paper
     # marks; gann runs its own 60s paper cycle on 15-min signal bars.
     CBE_MARKS_REFRESH_INTERVAL_SECONDS: int = 300
-    GANN_TP_DELTA_AUTO_ENABLED: bool = True
+    # PARKED 2026-07-21 (owner call): default False stops the supervisor runner
+    # from ever cycling the Gann lane. Code, tables, tests and research stay in
+    # the repo untouched; flip this to re-activate (registry execution_mode in
+    # core/lane_registry.py should be flipped back to "paper" at the same time).
+    GANN_TP_DELTA_AUTO_ENABLED: bool = False
     GANN_TP_DELTA_AUTO_INTERVAL_SECONDS: int = 60
     # S1: a held option mark older than this during NSE hours is stale (contract
     # fell off the ATM rotation / broker refresh not landing) → skip price-based
