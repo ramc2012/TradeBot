@@ -482,6 +482,23 @@ async def load_prior_volume(
 
     is_index = str(kind or "").upper() == "INDEX"
     if is_index:
+        # ``option_chain_snapshots.symbol`` stores the APP/Fyers-format index
+        # symbol (``NSE:NIFTY50-INDEX``, ``BSE:SENSEX-INDEX``, ...) — NOT the
+        # catalog display name (``NIFTY``) this function is called with.
+        # Querying with the raw catalog symbol matched ZERO rows for every
+        # index at every expiry, so every index side scored no history and was
+        # excluded. Reuse the canonical map in market_data.symbols rather than
+        # hardcoding a second one here.
+        from market_data.symbols import DISPLAY_TO_APP_SYMBOL
+
+        snapshot_symbol = DISPLAY_TO_APP_SYMBOL.get(str(underlying).upper(), underlying)
+        if snapshot_symbol == underlying:
+            logger.warning(
+                "[MACD watchlist] INDEX {} has no DISPLAY_TO_APP_SYMBOL mapping — "
+                "querying option_chain_snapshots with the raw catalog symbol, which "
+                "is very likely to match zero rows.",
+                underlying,
+            )
         # Bound `time` DIRECTLY with literals (chunk exclusion) + symbol +
         # expiry. date_trunc appears only in GROUP BY, never in WHERE.
         query = """
@@ -499,21 +516,34 @@ async def load_prior_volume(
         params = {
             "start_utc": start_utc,
             "end_utc": end_utc,
-            "symbol": underlying,
+            "symbol": snapshot_symbol,
             "expiry": expiry.isoformat(),
         }
     else:
+        # ``option_premium_candles``' PK is (instrument_key, interval, time), so
+        # the SAME contract-bar exists under BOTH a Fyers and an Upstox
+        # instrument_key (measured 20-24% of bars duplicated). Dedup to ONE
+        # value per (option_type, strike, bar-time) with MAX(volume) across
+        # sources BEFORE the per-session SUM — summing across brokers inflates
+        # the median ~1.2x on duplicated names. MAX, never SUM, across brokers.
         query = """
             SELECT option_type,
                    strike,
-                   date_trunc('day', time AT TIME ZONE 'Asia/Kolkata') AS session_key,
-                   SUM(volume) AS session_volume
-              FROM option_premium_candles
-             WHERE time >= :start_utc
-               AND time <  :end_utc
-               AND underlying = :symbol
-               AND expiry = :expiry
-               AND interval = '30minute'
+                   date_trunc('day', bar_time AT TIME ZONE 'Asia/Kolkata') AS session_key,
+                   SUM(bar_volume) AS session_volume
+              FROM (
+                    SELECT option_type,
+                           strike,
+                           time AS bar_time,
+                           MAX(volume) AS bar_volume
+                      FROM option_premium_candles
+                     WHERE time >= :start_utc
+                       AND time <  :end_utc
+                       AND underlying = :symbol
+                       AND expiry = :expiry
+                       AND interval = '30minute'
+                     GROUP BY option_type, strike, time
+                   ) AS deduped_bars
              GROUP BY option_type, strike, session_key
         """
         params = {
@@ -536,6 +566,19 @@ async def load_prior_volume(
             underlying, expiry.isoformat(), len(days), exc,
         )
         return {"CE": {}, "PE": {}}
+
+    if is_index and not rows:
+        # This class of failure was SILENT once: a symbol-format mismatch
+        # (catalog "NIFTY" vs snapshot "NSE:NIFTY50-INDEX") made every index
+        # score zero history and be excluded at every expiry. Never again
+        # without a loud trace.
+        logger.error(
+            "[MACD watchlist] INDEX prior-volume lookup for {} (snapshot symbol {!r}, "
+            "expiry {}) matched ZERO rows in option_chain_snapshots over {} sessions — "
+            "every candidate strike will be 'unmeasurable' and the index EXCLUDED. "
+            "If snapshots exist for this window, suspect a symbol-format mismatch.",
+            underlying, params.get("symbol"), expiry.isoformat(), len(days),
+        )
 
     for row in rows:
         side = str(row.option_type or "").upper()
@@ -691,7 +734,10 @@ class PositionPin:
         }
 
 
-MACD_STRATEGY_KEYS = ("macd_strategy", "strategy1")
+# "strategy1" was a retired strategy_key: its 61 zombie rows were closed on
+# 2026-07-21 (0 open rows remain), so keeping it here only made the pin query
+# claim a book that no longer exists. One live PG key now.
+MACD_STRATEGY_KEYS = ("macd_strategy",)
 
 
 async def load_open_position_pins() -> dict[tuple[str, str], PositionPin]:
@@ -745,7 +791,34 @@ async def load_open_position_pins() -> dict[tuple[str, str], PositionPin]:
         raise
 
     for pin in _load_refined_paper_pins():
-        pins.setdefault((pin.underlying, pin.option_type), pin)
+        key = (pin.underlying, pin.option_type)
+        existing = pins.get(key)
+        if existing is None:
+            pins[key] = pin
+            continue
+        # TWO lanes (S1 live book + refined paper book) hold the same
+        # underlying+side. The ladder has ONE row per (underlying, side), so
+        # only one contract can be pinned — the LIVE book wins over paper —
+        # but a silent collapse hid the conflict entirely. Same contract is
+        # fine; a DIVERGENT contract means the un-pinned lane's position sits
+        # on a strike/expiry the frozen ladder no longer tracks: say so.
+        if (
+            float(existing.strike) != float(pin.strike)
+            or existing.expiry != pin.expiry
+        ):
+            logger.error(
+                "[MACD watchlist] PIN CONFLICT on {} {}: {} holds strike {} exp {} "
+                "while {} holds strike {} exp {}. The ladder carries ONE row per "
+                "side, so the {} pin wins and the other lane's contract is NOT "
+                "sticky-tracked this cycle — its marks/exits still run off its own "
+                "book, but re-picks will not respect it.",
+                key[0], key[1],
+                existing.source, f"{existing.strike:g}",
+                existing.expiry.isoformat() if existing.expiry else None,
+                pin.source, f"{pin.strike:g}",
+                pin.expiry.isoformat() if pin.expiry else None,
+                existing.source,
+            )
     return pins
 
 

@@ -958,3 +958,234 @@ def test_release_repicks_on_the_cycle_expiry_not_the_held_one(monkeypatch) -> No
     )
     assert calls, "the release never ran — the test would prove nothing"
     assert calls[0]["expiry"] == date(2026, 8, 25)   # NOT the held 2026-07-28
+
+
+# ══════════════════════════════════════════════════════════════════════
+# 2026-07-22: prior-volume history — symbol-format fix + cross-broker dedup
+# ══════════════════════════════════════════════════════════════════════
+from types import SimpleNamespace as _NS
+
+
+class _PriorVolumeFakeDB:
+    """Minimal AsyncSessionLocal stand-in for load_prior_volume.
+
+    Emulates the ONE fact that matters for the symbol-format defect: the real
+    ``option_chain_snapshots`` table stores Fyers/app-format index symbols
+    (``NSE:NIFTY50-INDEX``), never the catalog display name (``NIFTY``).  Rows
+    come back only when the query's :symbol parameter matches the stored key —
+    exactly like the real table.  Against the PRE-FIX code (which bound the raw
+    catalog symbol) this returns ZERO rows and the assertions below fail.
+    """
+
+    def __init__(self, table: dict[str, list]):
+        self.table = table
+        self.captured: dict = {}
+
+    def __call__(self):
+        return self
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, *args):
+        return False
+
+    async def execute(self, clause, params):
+        self.captured["sql"] = str(clause)
+        self.captured["params"] = dict(params)
+        rows = self.table.get(params.get("symbol"), [])
+        return _NS(fetchall=lambda: rows)
+
+
+def test_index_prior_volume_uses_the_snapshot_symbol_format_not_the_catalog_name(
+    monkeypatch,
+) -> None:
+    """P0 enable blocker: catalog 'NIFTY' matched ZERO snapshot rows.
+
+    DISCRIMINATING: pre-fix code queried option_chain_snapshots with
+    symbol='NIFTY'; the table stores 'NSE:NIFTY50-INDEX', so every index side
+    scored no history and was excluded at every expiry.  This fake mirrors the
+    real table's keying, so the pre-fix code gets an empty result here too and
+    both assertions fail against it.
+    """
+    fake = _PriorVolumeFakeDB(
+        {
+            "NSE:NIFTY50-INDEX": [
+                _NS(option_type="CE", strike=23800.0, session_volume=100.0),
+                _NS(option_type="CE", strike=23800.0, session_volume=300.0),
+                _NS(option_type="CE", strike=23800.0, session_volume=200.0),
+                _NS(option_type="PE", strike=23800.0, session_volume=50.0),
+            ]
+        }
+    )
+    monkeypatch.setattr(mw, "AsyncSessionLocal", fake)
+    out = asyncio.run(
+        mw.load_prior_volume(
+            underlying="NIFTY", kind="INDEX",
+            expiry=date(2026, 7, 28), today=date(2026, 7, 22),
+        )
+    )
+    assert fake.captured["params"]["symbol"] == "NSE:NIFTY50-INDEX"
+    assert out["CE"] == {23800.0: 200.0}   # median of the three sessions
+    assert out["PE"] == {23800.0: 50.0}
+
+
+def test_every_traded_index_maps_to_a_snapshot_symbol(monkeypatch) -> None:
+    """All five index catalog names must resolve to app-format snapshot keys."""
+    expected = {
+        "NIFTY": "NSE:NIFTY50-INDEX",
+        "BANKNIFTY": "NSE:BANKNIFTY-INDEX",
+        "FINNIFTY": "NSE:FINNIFTY-INDEX",
+        "MIDCPNIFTY": "NSE:MIDCPNIFTY-INDEX",
+        "SENSEX": "BSE:SENSEX-INDEX",
+    }
+    fake = _PriorVolumeFakeDB({})
+    monkeypatch.setattr(mw, "AsyncSessionLocal", fake)
+    for catalog, snapshot_symbol in expected.items():
+        asyncio.run(
+            mw.load_prior_volume(
+                underlying=catalog, kind="INDEX",
+                expiry=date(2026, 7, 28), today=date(2026, 7, 22),
+            )
+        )
+        assert fake.captured["params"]["symbol"] == snapshot_symbol, catalog
+
+
+def test_stock_prior_volume_dedups_cross_broker_bars_before_the_session_sum(
+    monkeypatch,
+) -> None:
+    """option_premium_candles keys bars by instrument_key, so the SAME
+    contract-bar exists under BOTH a Fyers and an Upstox key (measured 20-24%
+    of bars).  The session aggregate must collapse to ONE value per bar-time
+    with MAX(volume) across sources BEFORE summing a session — summing the raw
+    rows counts the same traded volume twice (measured 1.67-1.86x inflation on
+    AXISBANK/HCLTECH/MARUTI for the 2026-08-25 expiry).
+
+    DISCRIMINATING: the pre-fix SQL summed raw rows (SUM(volume), no per-bar
+    dedup grain), so every assertion below fails against it.
+    """
+    fake = _PriorVolumeFakeDB({})
+    monkeypatch.setattr(mw, "AsyncSessionLocal", fake)
+    asyncio.run(
+        mw.load_prior_volume(
+            underlying="AXISBANK", kind="STOCK",
+            expiry=date(2026, 8, 25), today=date(2026, 7, 22),
+        )
+    )
+    sql = " ".join(str(fake.captured["sql"]).split()).lower()
+    # one value per (option_type, strike, bar-time) across brokers: MAX, not SUM
+    assert "max(volume)" in sql
+    assert "group by option_type, strike, time" in sql
+    # the session total sums the DEDUPED bars…
+    assert "sum(bar_volume)" in sql
+    # …never the raw cross-broker rows
+    assert "sum(volume)" not in sql
+
+
+# ══════════════════════════════════════════════════════════════════════
+# 2026-07-22: pin-keying hygiene — dead strategy key + loud lane collision
+# ══════════════════════════════════════════════════════════════════════
+class _PinFakeDB:
+    """AsyncSessionLocal stand-in returning fixed agent_positions rows."""
+
+    def __init__(self, rows: list):
+        self.rows = rows
+        self.captured: dict = {}
+
+    def __call__(self):
+        return self
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, *args):
+        return False
+
+    async def execute(self, clause, params):
+        self.captured["params"] = dict(params)
+        rows = self.rows
+        return _NS(fetchall=lambda: rows)
+
+
+def test_retired_strategy1_key_is_no_longer_queried(monkeypatch) -> None:
+    """DISCRIMINATING: 'strategy1' is a retired strategy_key (its 61 zombie
+    rows were closed 2026-07-21; 0 open remain). Pre-fix code still shipped it
+    to Postgres in the pin query."""
+    assert "strategy1" not in mw.MACD_STRATEGY_KEYS
+    assert "macd_strategy" in mw.MACD_STRATEGY_KEYS
+
+    fake = _PinFakeDB([])
+    monkeypatch.setattr(mw, "AsyncSessionLocal", fake)
+    monkeypatch.setattr(mw, "_load_refined_paper_pins", lambda: [])
+    asyncio.run(mw.load_open_position_pins())
+    assert "strategy1" not in fake.captured["params"]["keys"]
+
+
+def test_divergent_two_lane_pin_collapse_is_loud_and_live_book_wins(
+    monkeypatch,
+) -> None:
+    """DISCRIMINATING: S1 (agent_positions) and refined (paper) holding the
+    SAME underlying+side on DIFFERENT contracts collapsed silently via
+    setdefault — the refined contract simply vanished from sticky tracking.
+    The ladder still carries one row per side (live book wins), but the
+    collapse must be an ERROR naming both contracts, not a silence."""
+    from loguru import logger as _loguru_logger
+
+    agent_row = _NS(
+        id="pos-1", underlying="RELIANCE", option_type="CE",
+        strike=1400.0, expiry=date(2026, 7, 28),
+    )
+    refined_pin = mw.PositionPin(
+        underlying="RELIANCE", option_type="CE", strike=1450.0,
+        expiry=date(2026, 8, 25), position_id="ref-9", source="macd_refined_paper",
+    )
+    fake = _PinFakeDB([agent_row])
+    monkeypatch.setattr(mw, "AsyncSessionLocal", fake)
+    monkeypatch.setattr(mw, "_load_refined_paper_pins", lambda: [refined_pin])
+
+    records: list[str] = []
+    sink_id = _loguru_logger.add(
+        lambda msg: records.append(msg.record["message"]),
+        level="ERROR",
+    )
+    try:
+        pins = asyncio.run(mw.load_open_position_pins())
+    finally:
+        _loguru_logger.remove(sink_id)
+
+    # live book wins the single ladder slot (pre-existing, preserved)
+    assert pins[("RELIANCE", "CE")].source == "agent_positions"
+    assert pins[("RELIANCE", "CE")].strike == 1400.0
+    # …but the collapse is LOUD, naming both contracts
+    conflict = [m for m in records if "PIN CONFLICT" in m]
+    assert conflict, "divergent two-lane pin collapse logged nothing"
+    assert "1400" in conflict[0] and "1450" in conflict[0]
+
+
+def test_same_contract_across_both_lanes_is_not_a_conflict(monkeypatch) -> None:
+    """Both lanes on the IDENTICAL contract is consistent state — no noise."""
+    from loguru import logger as _loguru_logger
+
+    agent_row = _NS(
+        id="pos-1", underlying="RELIANCE", option_type="CE",
+        strike=1400.0, expiry=date(2026, 7, 28),
+    )
+    refined_pin = mw.PositionPin(
+        underlying="RELIANCE", option_type="CE", strike=1400.0,
+        expiry=date(2026, 7, 28), position_id="ref-9", source="macd_refined_paper",
+    )
+    fake = _PinFakeDB([agent_row])
+    monkeypatch.setattr(mw, "AsyncSessionLocal", fake)
+    monkeypatch.setattr(mw, "_load_refined_paper_pins", lambda: [refined_pin])
+
+    records: list[str] = []
+    sink_id = _loguru_logger.add(
+        lambda msg: records.append(msg.record["message"]), level="ERROR"
+    )
+    try:
+        pins = asyncio.run(mw.load_open_position_pins())
+    finally:
+        _loguru_logger.remove(sink_id)
+
+    assert pins[("RELIANCE", "CE")].strike == 1400.0
+    assert not [m for m in records if "PIN CONFLICT" in m]
