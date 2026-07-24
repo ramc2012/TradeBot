@@ -4925,9 +4925,98 @@ class PaperStrategyAgent(StrategyExitMixin, StrategyEntryMixin, BaseStrategyAgen
         except Exception as exc:
             logger.warning(f"[Strategy] Failed to persist agent risk state: {exc}")
 
+    async def _reconcile_agent_positions_journal(self) -> None:
+        """Self-heal the ``agent_positions`` journal against the authoritative
+        in-memory book so it can never again drift into "zombie" open rows.
+
+        ``agent_positions`` is upserted ``ON CONFLICT (symbol)`` — a single row
+        per option symbol whose status reflects only the *last* write. A
+        position can leave the live book WITHOUT the close-side persist ever
+        running: an entry is journaled but the portfolio rejects the fill, an
+        expiry roll drops the position, or a post-restart reconcile prunes it.
+        Those rows stay ``status='open'`` forever and pollute every consumer —
+        the sticky-strike pin map (``macd_watchlist``), the lane-auditor
+        open-count, and ``strategy_learning``. They are also the recurring
+        source of the owner's "~100 open positions" impression versus a real
+        book of a handful.
+
+        The authoritative open set is ``runtime.positions`` (the exact book the
+        engine trades from). Any journal row still marked open/partial whose
+        symbol is no longer in that book is stale and is closed here.
+
+        Safety guards, so a real open position is NEVER mis-closed:
+          * skip a runtime until it has scanned at least once (a pre-restore
+            empty book must not wipe the journal);
+          * only touch rows older than a 10-minute staleness cutoff, so a
+            freshly-entered position that is momentarily mid-wiring is immune;
+          * partial-exit positions remain in the book (qty > 0) so they are in
+            the live set and are never swept.
+        """
+        try:
+            cutoff = _now_ist() - timedelta(minutes=10)
+            now_ist = _now_ist()
+            async with AsyncSessionLocal() as session:
+                total_closed = 0
+                for runtime in self._runtimes():
+                    if not getattr(runtime, "last_scan_at", None):
+                        continue
+                    live_symbols = [
+                        pos.symbol
+                        for pos in runtime.positions.values()
+                        if getattr(pos, "symbol", None)
+                    ]
+                    result = await session.execute(
+                        text(
+                            """
+                            UPDATE agent_positions
+                               SET status = 'closed',
+                                   qty = 0,
+                                   phase = :exited_phase,
+                                   closed_at = COALESCE(closed_at, :now_ist),
+                                   metadata = COALESCE(metadata, '{}'::jsonb)
+                                              || jsonb_build_object(
+                                                     'reconciled', 'book_absent',
+                                                     'reconciled_at', CAST(:now_ist_text AS text)
+                                                 ),
+                                   updated_at = NOW()
+                             WHERE market = 'NSE'
+                               AND strategy_key = :strategy_key
+                               AND status IN ('open', 'partial_exit')
+                               AND updated_at < :cutoff
+                               AND symbol <> ALL(CAST(:live_symbols AS text[]))
+                            """
+                        ),
+                        {
+                            "exited_phase": PHASE_EXITED,
+                            "now_ist": now_ist,
+                            "now_ist_text": now_ist.isoformat(),
+                            "strategy_key": runtime.key,
+                            "cutoff": cutoff,
+                            "live_symbols": live_symbols,
+                        },
+                    )
+                    closed = result.rowcount or 0
+                    if closed:
+                        total_closed += closed
+                        logger.info(
+                            "[Strategy] Reconciled %d stale agent_positions "
+                            "journal row(s) for %s -> closed (absent from live "
+                            "book of %d).",
+                            closed,
+                            runtime.key,
+                            len(live_symbols),
+                        )
+                if total_closed:
+                    await session.commit()
+        except Exception as exc:
+            logger.warning(
+                f"[Strategy] agent_positions journal reconcile failed: {exc}"
+            )
+
     async def _status_with_risk_snapshot(self) -> dict[str, Any]:
         status = self.get_status()
         await self._persist_agent_risk_state(status)
+        await self._reconcile_agent_positions_journal()
         return status
 
     def _append_event(self, runtime: StrategyRuntime, event: StrategyEvent) -> None:
