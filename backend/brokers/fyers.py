@@ -526,6 +526,7 @@ class FyersAdapter(BrokerAdapter):
         on_tick_callback: Callable[[Tick], None],
         on_depth_callback: Optional[Callable[[dict], None]] = None,
         on_reconnect_callback: Optional[Callable[[], None]] = None,
+        on_ws_lost: Optional[Callable[[], None]] = None,
     ) -> Any:
         """Open Fyers WebSocket for real-time data.
 
@@ -540,12 +541,41 @@ class FyersAdapter(BrokerAdapter):
         4h16m because the router's dedupe gate skipped resubscribing. The router
         uses this hook to invalidate its subscription state so the next periodic
         subscribe() re-sends the full set. Called from the SDK's WS thread.
+
+        ``on_ws_lost`` (optional) fires from the SDK's WS thread whenever the
+        socket closes or errors. Because reconnect=False (the router owns
+        reconnection), the SDK does NOT re-open on its own — before 2026-07-24
+        the close/error callbacks ONLY logged, so a broker-side drop during
+        MCX-evening hours (outside the required-feed watchdog's NSE-only
+        09:15-15:30 force-reconnect window) had NO recovery trigger and the
+        feed stayed dark for hours (Tue 2026-07-21: WS lost 16:22 IST, silent
+        7h14m; the auction lane squared off on stale marks). This hook gives a
+        drop in ANY session a recovery trigger. The router side is
+        generation-fenced and thread-safe; the reconnect it schedules is
+        backoff- and warm-up-throttled, so repeated errors cannot storm.
         """
         self._on_depth_callback = on_depth_callback
         try:
             from fyers_apiv3.FyersWebsocket import data_ws
 
             state = {"connected_once": False}
+
+            def _notify_ws_lost() -> None:
+                # The WS thread must never die: swallow any hook failure.
+                if on_ws_lost is None:
+                    return
+                try:
+                    on_ws_lost()
+                except Exception as exc:  # noqa: BLE001
+                    logger.error(f"Fyers WS loss hook failed: {exc}")
+
+            def _on_close(*_a) -> None:
+                logger.warning("Fyers WS closed")
+                _notify_ws_lost()
+
+            def _on_error(*_a) -> None:
+                logger.error(f"Fyers WS error: {_a[0] if _a else ''}")
+                _notify_ws_lost()
 
             def _on_connect(*_a) -> None:
                 # SDK calls with inconsistent arity across versions — accept *args.
@@ -592,8 +622,8 @@ class FyersAdapter(BrokerAdapter):
                 # interval of reconnect latency, acceptable for a paper system.
                 reconnect=False,
                 on_connect=_on_connect,
-                on_close=lambda *_a: logger.warning("Fyers WS closed"),
-                on_error=lambda *_a: logger.error(f"Fyers WS error: {_a[0] if _a else ''}"),
+                on_close=_on_close,
+                on_error=_on_error,
                 on_message=lambda msg, *_a: self._handle_message(msg, on_tick_callback),
             )
             client.connect()

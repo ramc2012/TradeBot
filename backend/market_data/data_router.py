@@ -125,6 +125,21 @@ class DataRouter:
         self._watchdog_task: Optional[asyncio.Task] = None
         self._watchdog_interval_seconds = 30.0
         self._required_tick_stale_seconds = 45.0  # WS-1.3a: was 90s — faster dead-feed detection (RTH indices tick sub-second)
+        # WS-1.4 (2026-07-24): post-resubscribe warm-up gate. A reconnect tears
+        # the socket down, CLEARS _tick_buffer, then re-subscribes the FULL set
+        # (~169 symbols live). A Fyers connect + that many subscriptions + first
+        # frames can exceed the 30s watchdog interval, so _stale_required_symbols
+        # reads the still-empty buffer of the BRAND-NEW socket as (N/N) stale and
+        # the watchdog force-reconnects AGAIN before it can warm up — the
+        # self-perpetuating storm (Thu 2026-07-23: 231 reconnects, feed dark
+        # ~1h53m across the storm, ticks resumed the instant it stopped). This
+        # gate makes _schedule_reconnect give a fresh resubscribe time to warm
+        # its tick buffer before ANY trigger (watchdog / status poll / the new
+        # socket-loss hook) can tear it down again — paced to at most one
+        # reconnect per warm-up window during a sustained outage. Chosen > the
+        # worst-case observed warm-up and > the 30s watchdog interval.
+        self._last_resubscribe_at: Optional[datetime] = None
+        self._post_resubscribe_warmup_seconds = 75.0
 
     def set_broker(self, broker: BrokerAdapter):
         self._broker = broker
@@ -241,6 +256,25 @@ class DataRouter:
                 return
             self._on_ws_reconnected()
 
+        def _on_ws_lost_if_current() -> None:
+            # Fires from the Fyers SDK's WS thread on a socket close/error.
+            # This is the ONLY feed-recovery trigger during MCX-evening hours:
+            # the required-feed watchdog's force-reconnect branch is gated to
+            # NSE regular hours (09:15-15:30 IST) only, so a broker drop after
+            # 15:30 previously had no recovery path and the feed went dark for
+            # hours (Tue 2026-07-21, 7h14m silent). Fence to the socket
+            # generation — a retired socket's late close must not reconnect the
+            # live one — then hop to the loop thread to schedule the
+            # router-owned reconnect (create_task is not thread-safe). The
+            # scheduled reconnect is backoff- + warm-up-throttled, so repeated
+            # close/error frames cannot storm.
+            if generation != self._ws_generation:
+                return
+            loop = self._loop
+            if loop is None or not loop.is_running():
+                return
+            loop.call_soon_threadsafe(self._schedule_reconnect)
+
         broker_name = getattr(self._broker, "broker_name", "")
         if broker_name == "fyers":
             broker_symbols = [to_fyers_symbol(symbol) for symbol in full_set]
@@ -255,6 +289,7 @@ class DataRouter:
                 _on_tick_if_current,
                 on_depth_callback=_on_depth_if_current,
                 on_reconnect_callback=_on_reconnect_if_current,
+                on_ws_lost=_on_ws_lost_if_current,
             )
         else:
             self._ws_client = await self._broker.subscribe_websocket(
@@ -268,6 +303,10 @@ class DataRouter:
                     self._ws_client.subscribe(symbols=[dsym], data_type="DepthUpdate")
                 except Exception as exc:  # noqa: BLE001
                     logger.debug(f"[DataRouter] depth re-arm failed for {dsym}: {exc}")
+        # WS-1.4: mark when this (re)subscribe completed so _schedule_reconnect
+        # can grant the fresh socket a warm-up window before it may be torn down
+        # again — breaks the self-perpetuating reconnect storm.
+        self._last_resubscribe_at = datetime.now(timezone.utc)
         logger.info(
             f"[DataRouter] Subscribed to {len(full_set)} symbols "
             f"(primary={len(symbols)} required={len(self._required_symbols)} sticky={len(sticky_extras)})"
@@ -913,6 +952,19 @@ class DataRouter:
         if self._reconnect_task and not self._reconnect_task.done():
             return
         now = datetime.now(timezone.utc)
+        # WS-1.4: don't tear a freshly-resubscribed socket down before it has had
+        # time to warm its tick buffer — otherwise the staleness check reads the
+        # (still-empty) new buffer as stale and the reconnect self-perpetuates
+        # into a storm (Thu 2026-07-23, 231 reconnects). During a genuine
+        # sustained outage each attempt refreshes _last_resubscribe_at, so this
+        # paces reconnects to one per warm-up window rather than one per watchdog
+        # tick — it de-storms without ever permanently blocking recovery.
+        if (
+            self._last_resubscribe_at is not None
+            and (now - self._last_resubscribe_at).total_seconds()
+            < self._post_resubscribe_warmup_seconds
+        ):
+            return
         if (
             self._last_reconnect_attempt_at is not None
             and now - self._last_reconnect_attempt_at < self._current_reconnect_backoff()
