@@ -522,7 +522,10 @@ export default function StrategiesOverviewDesk() {
           <MetricTile
             label="Open positions"
             value={String(totalOpen)}
-            detail="canonical · all 9 books"
+            // Derived, not hardcoded: the book count moved from 9 to 12 when the
+            // MCX auction book and both convergence books were added to the
+            // ledger, and a stale caption is its own small lie.
+            detail={`canonical · all ${bookSummaries.length} books`}
           />
           <MetricTile
             label="Open P&L"

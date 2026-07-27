@@ -5,6 +5,8 @@ type StrategyAgentStatus = { strategies?: any[]; [k: string]: any };
 import {
   getAuctionIntelligencePaperPositions,
   getCBEPaperPositions,
+  getCommodityAuctionIntelligencePaper,
+  getInstitutionalConvergencePaper,
   getMacdRefinedPaperPositions,
   getCommodityStrategyStatus,
   getDirectionalOptionsPaperPositions,
@@ -90,6 +92,23 @@ type GannAgentStatus = PaperPositionsPayload & {
   last_scan_at?: string | null;
 };
 
+/**
+ * The MCX / convergence futures books. Their rows are a DIFFERENT shape from
+ * the option books above (entry_price / lots / lot_size / futures_contract, no
+ * premium and no expiry), which is exactly why they were never adapted — and
+ * why the CRUDEOIL trade that made +198,700 on 2026-07-23 was invisible in this
+ * roll-up while sitting in plain sight in its own book.
+ */
+type FuturesBookPayload = {
+  initial_capital?: number | null;
+  equity?: number | null;
+  realized_pnl?: number | null;
+  open_count?: number | null;
+  closed_count?: number | null;
+  open_positions?: Array<Record<string, any>>;
+  closed_positions?: Array<Record<string, any>>;
+};
+
 export type AppStrategyPortfolioSnapshot = {
   nse: StrategyAgentStatus | null;
   commodity: CommodityStrategyStatus | null;
@@ -100,6 +119,10 @@ export type AppStrategyPortfolioSnapshot = {
   cbe: PaperPositionsPayload | null;
   macd: PaperPositionsPayload | null;
   usMacd: PaperPositionsPayload | null;
+  /** Books that were MISSING from this roll-up until 2026-07-27. */
+  auctionMcx: FuturesBookPayload | null;
+  convergenceNse: FuturesBookPayload | null;
+  convergenceMcx: FuturesBookPayload | null;
   errors: Record<string, string>;
   fetchedAt: string;
 };
@@ -144,7 +167,19 @@ export async function fetchAppStrategyPortfolioSnapshot(): Promise<AppStrategyPo
   // on every portfolio load. The field stays (typed null) so the row builders
   // below, which iterate `snapshot.usMacd?.*`, need no change.
   const usMacd: PaperPositionsPayload | null = null;
-  const [nse, commodity, directional, gann, auction, fractal, cbe, macd] = await Promise.all([
+  const [
+    nse,
+    commodity,
+    directional,
+    gann,
+    auction,
+    fractal,
+    cbe,
+    macd,
+    auctionMcx,
+    convergenceNse,
+    convergenceMcx,
+  ] = await Promise.all([
     settle("nse", getStrategyAgentStatus().then((response) => response.data as StrategyAgentStatus), errors),
     settle("commodity", getCommodityStrategyStatus().then((response) => response.data as CommodityStrategyStatus), errors),
     settle("directional", getDirectionalOptionsPaperPositions(undefined, "all", 100).then((response) => response.data as PaperPositionsPayload), errors),
@@ -153,6 +188,11 @@ export async function fetchAppStrategyPortfolioSnapshot(): Promise<AppStrategyPo
     settle("fractal", getFractalMarketProfilePaperPositions(undefined, "all", 100).then((response) => response.data as PaperPositionsPayload), errors),
     settle("cbe", getCBEPaperPositions("all", 100).then((response) => response.data as PaperPositionsPayload), errors),
     settle("macd", getMacdRefinedPaperPositions(undefined, "all", 100).then((response) => response.data as PaperPositionsPayload), errors),
+    // The three books this roll-up used to omit entirely. Each is its OWN
+    // capital pool and is never merged into another lane's equity.
+    settle("auction_mcx", getCommodityAuctionIntelligencePaper(200).then((response) => response.data as FuturesBookPayload), errors),
+    settle("convergence_nse", getInstitutionalConvergencePaper("NSE").then((response) => response.data as FuturesBookPayload), errors),
+    settle("convergence_mcx", getInstitutionalConvergencePaper("MCX").then((response) => response.data as FuturesBookPayload), errors),
   ]);
 
   return {
@@ -165,9 +205,89 @@ export async function fetchAppStrategyPortfolioSnapshot(): Promise<AppStrategyPo
     cbe,
     macd,
     usMacd,
+    auctionMcx,
+    convergenceNse,
+    convergenceMcx,
     errors,
     fetchedAt: new Date().toISOString(),
   };
+}
+
+/**
+ * A futures row from an MCX / convergence book. Unlike the option books these
+ * carry `lots` + `lot_size` and a contract LABEL rather than an expiry date —
+ * so `expiry` and `dte` stay null here rather than being parsed out of
+ * "MCX:GOLD26AUGFUT", which is a label and not a date.
+ */
+function futuresBookRow(
+  sourceKey: string,
+  desk: string,
+  strategy: string,
+  venue: string,
+  position: Record<string, any>,
+  status: PositionStatus,
+): AppStrategyPositionRow {
+  const lots = asNumber(position.lots ?? position.initial_lots, 0);
+  const lotSize = asNumber(position.lot_size, 1);
+  const qty = lots * lotSize;
+  const entry = asNumber(position.entry_price, 0);
+  const current = asNumber(position.exit_price ?? position.current_price ?? entry, entry);
+  const direction = String(position.direction || "LONG").toUpperCase();
+  const sign = direction === "SHORT" ? -1 : 1;
+  const realized = position.realized_pnl ?? position.pnl;
+  const unrealized = status === "open" ? sign * (current - entry) * qty : 0;
+  const grossCost = Math.abs(entry * Math.max(qty, 1));
+  const pnl = status === "open" ? unrealized : asNumber(realized, 0);
+  const contract = String(position.futures_contract || position.symbol || "--");
+
+  return {
+    id: `${sourceKey}-${status}-${position.position_id || contract}-${position.opened_at || position.closed_at || "na"}`,
+    desk,
+    strategy,
+    source: sourceKey,
+    venue,
+    underlying: String(position.symbol || "--"),
+    symbol: contract,
+    contract,
+    instrumentGroup: "futures",
+    action: direction,
+    qty,
+    lots: lots || null,
+    lotSize: position.lot_size ?? null,
+    entryPrice: entry,
+    currentPrice: current,
+    unrealizedPnl: status === "open" ? unrealized : 0,
+    realizedPnl: status === "closed" ? asNumber(realized, 0) : null,
+    returnPct: grossCost > 0 ? (pnl / grossCost) * 100 : null,
+    updatedAt: position.updated_at ?? position.closed_at ?? position.opened_at ?? null,
+    enteredAt: position.opened_at ?? null,
+    closedAt: position.closed_at ?? null,
+    // A futures contract label is not a date — no expiry, therefore no DTE.
+    expiry: null,
+    dte: null,
+    phase: position.target1_done ? "target1 done" : null,
+    stopPrice: position.stop ?? position.initial_stop ?? null,
+    targetPrice: position.target1 ?? null,
+    signalReason: position.exit_reason ?? position.setup_id ?? null,
+    status,
+  };
+}
+
+/** The three futures books, in one place so rows and summaries cannot drift. */
+const FUTURES_BOOKS = [
+  ["auction_mcx", "Auction IQ · MCX", "Auction Intelligence · commodity", "MCX"] as const,
+  ["convergence_nse", "Convergence · NSE", "Institutional Convergence", "NSE"] as const,
+  ["convergence_mcx", "Convergence · MCX", "Institutional Convergence · commodity", "MCX"] as const,
+];
+
+function futuresBookPayload(
+  snapshot: AppStrategyPortfolioSnapshot,
+  key: string,
+): FuturesBookPayload | null {
+  if (key === "auction_mcx") return snapshot.auctionMcx;
+  if (key === "convergence_nse") return snapshot.convergenceNse;
+  if (key === "convergence_mcx") return snapshot.convergenceMcx;
+  return null;
 }
 
 function optionContract(optionType?: unknown, strike?: unknown, expiry?: unknown) {
@@ -378,6 +498,11 @@ export function buildOpenPositionRows(snapshot?: AppStrategyPortfolioSnapshot | 
   for (const position of snapshot.usMacd?.open_positions || []) {
     rows.push(genericOptionRow("us_macd", "US MACD Refined", "US MACD Refined", "US", position, "open"));
   }
+  for (const [key, desk, strategy, venue] of FUTURES_BOOKS) {
+    for (const position of futuresBookPayload(snapshot, key)?.open_positions || []) {
+      rows.push(futuresBookRow(key, desk, strategy, venue, position, "open"));
+    }
+  }
 
   return rows.sort((left, right) => Math.abs(right.unrealizedPnl || 0) - Math.abs(left.unrealizedPnl || 0));
 }
@@ -458,6 +583,11 @@ export function buildClosedTradeRows(snapshot?: AppStrategyPortfolioSnapshot | n
   for (const position of snapshot.usMacd?.closed_positions || []) {
     rows.push(genericOptionRow("us_macd", "US MACD Refined", "US MACD Refined", "US", position, "closed"));
   }
+  for (const [key, desk, strategy, venue] of FUTURES_BOOKS) {
+    for (const position of futuresBookPayload(snapshot, key)?.closed_positions || []) {
+      rows.push(futuresBookRow(key, desk, strategy, venue, position, "closed"));
+    }
+  }
 
   return rows.sort((left, right) => toEpoch(right.closedAt || right.updatedAt) - toEpoch(left.closedAt || left.updatedAt));
 }
@@ -523,6 +653,27 @@ export function buildStrategyBookSummaries(snapshot?: AppStrategyPortfolioSnapsh
       realizedPnl: summaryNumber(summary, "realized_pnl"),
       unrealizedPnl: summaryNumber(summary, "unrealized_pnl"),
       totalPnl: summaryNumber(summary, "total_pnl", "realized_pnl") + (summary?.total_pnl == null ? summaryNumber(summary, "unrealized_pnl") : 0),
+    });
+  }
+
+  // The three futures books. Their figures live at the TOP level of the payload
+  // (no `summary` wrapper), which is why summaryNumber() alone never found them.
+  for (const [key, label, desk, venue] of FUTURES_BOOKS) {
+    const payload = futuresBookPayload(snapshot, key);
+    const realized = asNumber(payload?.realized_pnl, 0);
+    summaries.push({
+      key,
+      label,
+      desk,
+      venue,
+      openPositions: asNumber(payload?.open_count, 0),
+      closedPositions: asNumber(payload?.closed_count, 0),
+      realizedPnl: realized,
+      // These books carry no unrealised roll-up field. Reporting 0 here is a
+      // statement about the field, not about the position — and with 0 open
+      // rows on all three today it is also the measured truth.
+      unrealizedPnl: 0,
+      totalPnl: realized,
     });
   }
 

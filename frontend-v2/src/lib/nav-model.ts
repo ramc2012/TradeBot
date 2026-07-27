@@ -131,6 +131,23 @@ export function deskCurrency(desk: NavDesk): BookCurrency {
   return desk.book?.currency ?? "INR";
 }
 
+/**
+ * A desk's BOOKS page — order / trade / position / portfolio over the lane's
+ * authoritative paper book.
+ *
+ * Declared here rather than left as a bare route because the last books-style
+ * UI shipped INVISIBLE: it existed on disk and was reachable only through a
+ * collapsed group. A desk that declares `books` gets an indented child line in
+ * the rail, inside its (already open) section, and a link on its landing card.
+ */
+export type NavBooks = {
+  href: string;
+  label: string;
+  /** The four views the page carries, matching lib/lane-books BOOK_VIEWS. */
+  views: string[];
+  blurb: string;
+};
+
 export type NavDesk = {
   href: string;
   label: string;
@@ -153,7 +170,16 @@ export type NavDesk = {
   book: BookSource | null;
   /** Required when `book` is null: why there is no book to show. */
   noBookReason?: string;
+  /** The four-view books page for this lane's authoritative book, if it has one. */
+  books?: NavBooks;
 };
+
+/** The views every books page carries. Kept in lockstep with lib/lane-books. */
+export const BOOKS_VIEWS = ["orders", "trades", "positions", "portfolio"];
+
+function booksFor(base: string, label: string, blurb: string): NavBooks {
+  return { href: `${base}/books`, label, views: [...BOOKS_VIEWS], blurb };
+}
 
 export type NavSection = {
   id: string;
@@ -177,6 +203,11 @@ const INTRADAY_DESKS: NavDesk[] = [
     status: "active",
     note: "Sole home of the auction policy bundle and the RL auto-trainer; the workspace only summarizes its regime + decision.",
     book: { endpoint: "/api/auction-intelligence/paper-status", path: ["summary"] },
+    books: booksFor(
+      "/strategies/auction",
+      "Books",
+      "Order / trade / position / portfolio over BOTH auction books: the NSE index runtime JSON and the MCX commodity book that holds the CRUDEOIL trade the roll-up was missing.",
+    ),
   },
   {
     href: "/strategies/mp",
@@ -215,6 +246,11 @@ const INTRADAY_DESKS: NavDesk[] = [
       path: [],
       absent: ["unrealizedPnl", "totalEquity"],
     },
+    books: booksFor(
+      "/strategies/institutional-convergence",
+      "Books",
+      "Order / trade / position / portfolio over both convergence books. The NSE book is enabled, running and has NEVER fired — a measured zero, shown as one, with the gate ladder that explains it.",
+    ),
   },
   {
     href: "/strategies/directional",
@@ -225,6 +261,11 @@ const INTRADAY_DESKS: NavDesk[] = [
     status: "active",
     note: "Sole home of the directional options lane. Dual-horizon by design — it also appears under Positional.",
     book: { endpoint: "/api/directional-options/paper-summary", path: [] },
+    books: booksFor(
+      "/strategies/directional",
+      "Books",
+      "Order / trade / position / portfolio over directional_paper_positions. The order view is a DECISION log (approved/declined + reason) because this lane has no order layer.",
+    ),
   },
   {
     href: "/strategies/nse/live",

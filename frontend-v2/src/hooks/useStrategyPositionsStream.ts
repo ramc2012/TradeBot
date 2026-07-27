@@ -52,6 +52,11 @@ function normalizePositionsOverview(payload: PositionsOverviewPayload): AppStrat
     cbe: payload.cbe ?? null,
     macd: payload.macd ?? null,
     usMacd: payload.usMacd ?? payload.us_macd ?? null,
+    // The socket payload predates these three books. Absent stays NULL, which
+    // renders as "not reported" rather than as an empty book.
+    auctionMcx: payload.auctionMcx ?? null,
+    convergenceNse: payload.convergenceNse ?? null,
+    convergenceMcx: payload.convergenceMcx ?? null,
     errors: payload.errors ?? {},
     fetchedAt: payload.fetchedAt ?? new Date().toISOString(),
   };

@@ -38,12 +38,19 @@ const read = (...p: string[]) => readFileSync(path.join(SRC, ...p), "utf8");
 
 /**
  * The 32 lane keys emitted by backend/core/lane_registry.py get_registry(),
- * transcribed from the `key="…"` declarations. If the backend adds a lane, this
- * list and the table must both move — which is the point of asserting it.
+ * transcribed from the served /api/system/lanes payload. If the backend adds a
+ * lane, this list and the table must both move — which is the point of
+ * asserting it.
+ *
+ * Re-transcribed 2026-07-27: `s2_index_mp_macd` and `us_macd_refined` were
+ * RETIRED with the MACD-family cull and no longer appear; `stock_spot_sweep`
+ * and `macd_preopen_watchlist` are served and are now declared.
  */
 const REGISTRY_KEYS = [
   "option_flow_watchdog",
+  "stock_spot_sweep",
   "token_readiness",
+  "macd_preopen_watchlist",
   "market_intelligence",
   "auction_intelligence",
   "auction_intelligence_commodity",
@@ -60,9 +67,7 @@ const REGISTRY_KEYS = [
   "gann_tp_delta",
   "lane_audit",
   "s1_atm_30m_macd",
-  "s2_index_mp_macd",
   "commodity_mp_orderflow",
-  "us_macd_refined",
   "research_sync",
   "macd_diffusion",
   "greeks_enrichment",

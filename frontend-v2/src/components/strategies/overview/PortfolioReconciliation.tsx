@@ -6,16 +6,23 @@
  * The Strategies Overview KPI reduces open positions over 6 lanes (NSE,
  * directional, auction, gann, cbe, commodity) — trusting summary scalars for
  * some and WS-slice lengths for others. The Global Positions page counts REST
- * array rows over 9 books, INCLUDING MACD Refined, US MACD and Fractal. So the
+ * array rows over every book, INCLUDING MACD Refined and Fractal. So the
  * two totals legitimately differ (the ~72 vs ~88 gap).
  *
+ * 2026-07-27: three books were not merely uncounted here — they were ABSENT
+ * from the ledger entirely (auction MCX, convergence NSE, convergence MCX).
+ * That is how the MCX auction book's realized P&L stayed invisible while
+ * sitting in its own file. They are counted now, and each links to its
+ * four-view books page.
+ *
  * Rather than silently pick a number, this panel makes ONE canonical source —
- * buildStrategyBookSummaries over the shared snapshot, all 9 books — and shows,
+ * buildStrategyBookSummaries over the shared snapshot, every book — and shows,
  * per book: the canonical summary scalar, the actual array-row count, their Δ
  * (amber when a book's scalar disagrees with its rows), and whether the Overview
  * surface counts that book. The footer states the three numbers and the reason.
  */
 import { clsx } from "clsx";
+import Link from "next/link";
 
 import {
   buildOpenPositionRows,
@@ -24,7 +31,27 @@ import {
 } from "@/lib/strategy-position-ledger";
 
 /** Books the Strategies Overview (6-lane) surface does NOT count. */
-const OVERVIEW_EXCLUDED = new Set(["macd", "us_macd", "fractal"]);
+const OVERVIEW_EXCLUDED = new Set([
+  "macd",
+  "us_macd",
+  "fractal",
+  // Added 2026-07-27. These three books were not merely uncounted by the
+  // Overview — they were absent from this ledger entirely, which is how the
+  // MCX auction book's realized P&L stayed invisible while sitting in its own
+  // file. They are counted canonically now and flagged as outside Overview.
+  "auction_mcx",
+  "convergence_nse",
+  "convergence_mcx",
+]);
+
+/** Books that have a four-view books page, so the row can deep-link to it. */
+const BOOKS_ROUTE: Record<string, string> = {
+  directional: "/strategies/directional/books?view=portfolio",
+  auction: "/strategies/auction/books?view=portfolio&market=NSE",
+  auction_mcx: "/strategies/auction/books?view=portfolio&market=MCX",
+  convergence_nse: "/strategies/institutional-convergence/books?view=portfolio&market=NSE",
+  convergence_mcx: "/strategies/institutional-convergence/books?view=portfolio&market=MCX",
+};
 
 export function PortfolioReconciliation({
   snapshot,
@@ -71,8 +98,10 @@ export function PortfolioReconciliation({
       <div>
         <div className="text-sm font-semibold text-text-primary">Portfolio reconciliation</div>
         <div className="mt-1 text-xs text-text-muted">
-          One canonical count (all 9 strategy books). The Overview surface counts only 6 lanes —
-          the difference is shown per book, never silently resolved.
+          One canonical count over all {books.length} strategy books. The Overview surface counts
+          only {books.filter((b) => b.inOverview).length} of them — the difference is shown per
+          book, never silently resolved. Books with a four-view page link straight to their
+          Portfolio view.
         </div>
       </div>
 
@@ -89,6 +118,7 @@ export function PortfolioReconciliation({
                 Open (rows)
               </th>
               <th className="pb-2 pr-3 text-right font-medium uppercase tracking-[0.1em]">Δ</th>
+              <th className="pb-2 font-medium uppercase tracking-[0.1em]">Books</th>
             </tr>
           </thead>
           <tbody>
@@ -124,6 +154,19 @@ export function PortfolioReconciliation({
                   {b.arrayRows - b.scalar > 0 ? "+" : ""}
                   {b.arrayRows - b.scalar}
                 </td>
+                <td className="py-1.5">
+                  {BOOKS_ROUTE[b.key] ? (
+                    <Link
+                      href={BOOKS_ROUTE[b.key]}
+                      className="text-[11px] text-accent-blue underline decoration-dotted"
+                      title="Order / trade / position / portfolio over this book's authoritative source"
+                    >
+                      open
+                    </Link>
+                  ) : (
+                    <span className="text-[11px] text-text-muted">—</span>
+                  )}
+                </td>
               </tr>
             ))}
           </tbody>
@@ -136,6 +179,7 @@ export function PortfolioReconciliation({
               </td>
               <td className="pt-2 pr-3 text-right font-mono text-text-secondary">{arrayAll}</td>
               <td className="pt-2 pr-3" />
+              <td className="pt-2" />
             </tr>
           </tfoot>
         </table>
@@ -143,11 +187,11 @@ export function PortfolioReconciliation({
 
       <div className="flex flex-wrap items-center gap-x-4 gap-y-1 rounded-xl border border-bg-border bg-bg-primary/20 px-3.5 py-2.5 text-[12px]">
         <span>
-          Overview scope (6 lanes):{" "}
+          Overview scope ({books.filter((b) => b.inOverview).length} lanes):{" "}
           <span className="font-mono text-text-primary">{canonicalOverviewScope}</span>
         </span>
         <span>
-          All books (9): <span className="font-mono text-text-primary">{canonicalAll}</span>
+          All books ({books.length}): <span className="font-mono text-text-primary">{canonicalAll}</span>
         </span>
         <span className={excludedContribution !== 0 ? "text-accent-amber" : "text-text-secondary"}>
           Unreconciled Δ:{" "}
@@ -165,7 +209,8 @@ export function PortfolioReconciliation({
       </div>
 
       <p className="text-[11px] leading-5 text-text-muted">
-        Why they differ: the Overview omits MACD Refined, US MACD and Fractal (Δ ={" "}
+        Why they differ: the Overview omits{" "}
+        {books.filter((b) => !b.inOverview).map((b) => b.label).join(", ")} (Δ ={" "}
         {excludedContribution}); it counts summary scalars / WS-slice lengths while Global counts
         REST array rows. Any amber row above is a book whose server scalar disagrees with its
         materialized rows.

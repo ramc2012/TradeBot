@@ -196,6 +196,14 @@ export const LANE_HORIZON: Record<string, LaneHorizonEntry> = {
     horizon: "not_a_trading_lane",
     evidence: "data plane: builds the ATM watchlist every other lane reads",
   },
+  stock_spot_sweep: {
+    horizon: "not_a_trading_lane",
+    evidence: "data plane: kind=\"data\" in the served registry; sweeps stock spot bars and takes no position",
+  },
+  macd_preopen_watchlist: {
+    horizon: "not_a_trading_lane",
+    evidence: "data plane: builds the pre-open watchlist the MACD lanes read; execution_mode=\"none\" in the served registry",
+  },
   commodity_mp_history: {
     horizon: "not_a_trading_lane",
     evidence: "durable TPO history writer",

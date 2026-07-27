@@ -139,19 +139,46 @@ export function DeskShell({
  * /strategies/directional?tab=paper is a shareable link, and the
  * browser back button moves between tabs naturally.
  */
-export function useUrlTab(defaultTab: string): [string, (key: string) => void] {
+export function useUrlTab(defaultTab: string, param = "tab"): [string, (key: string) => void] {
   const router = useRouter();
   const pathname = usePathname();
   const searchParams = useSearchParams();
-  const active = searchParams.get("tab") || defaultTab;
+  const active = searchParams.get(param) || defaultTab;
   const set = useCallback(
     (key: string) => {
       const next = new URLSearchParams(searchParams.toString());
-      if (key === defaultTab) next.delete("tab");
-      else next.set("tab", key);
+      if (key === defaultTab) next.delete(param);
+      else next.set(param, key);
       router.replace(`${pathname}${next.size ? `?${next.toString()}` : ""}`, { scroll: false });
     },
-    [router, pathname, searchParams, defaultTab],
+    [router, pathname, searchParams, defaultTab, param],
+  );
+  return [active, set];
+}
+
+/**
+ * A second URL-synced selector for surfaces that key on more than a tab — the
+ * books pages carry `?view=` AND `?market=`, so the market switch needs the
+ * same shareable-link behaviour without stomping the view.
+ */
+export function useUrlChoice<T extends string>(
+  param: string,
+  allowed: readonly T[],
+  fallback: T,
+): [T, (value: T) => void] {
+  const router = useRouter();
+  const pathname = usePathname();
+  const searchParams = useSearchParams();
+  const raw = searchParams.get(param);
+  const active = (allowed as readonly string[]).includes(raw ?? "") ? (raw as T) : fallback;
+  const set = useCallback(
+    (value: T) => {
+      const next = new URLSearchParams(searchParams.toString());
+      if (value === fallback) next.delete(param);
+      else next.set(param, value);
+      router.replace(`${pathname}${next.size ? `?${next.toString()}` : ""}`, { scroll: false });
+    },
+    [router, pathname, searchParams, param, fallback],
   );
   return [active, set];
 }

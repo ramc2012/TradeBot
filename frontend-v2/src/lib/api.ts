@@ -450,6 +450,14 @@ export const getInstitutionalConvergenceOrders = (market?: "NSE" | "MCX") =>
   api.get(`/api/institutional-convergence${market === "MCX" ? "/commodity" : ""}/orders`);
 export const getInstitutionalConvergenceStatistics = (market?: "NSE" | "MCX") =>
   api.get(`/api/institutional-convergence${market === "MCX" ? "/commodity" : ""}/statistics`);
+/**
+ * The AUTHORITATIVE paper book for the convergence lanes:
+ * backend/runtime/institutional_convergence/{paper,commodity_paper}.json.
+ * The route existed with no client getter, which is why the MCX book never
+ * reached the cross-lane roll-up.
+ */
+export const getInstitutionalConvergencePaper = (market?: "NSE" | "MCX") =>
+  api.get(`/api/institutional-convergence${market === "MCX" ? "/commodity" : ""}/paper`);
 
 // ── Directional Long Options ───────────────────────────────────────────────
 export const getDirectionalOptionsSummary = () =>
@@ -603,6 +611,18 @@ export const runAuctionIntelligencePaperProposal = (payload: object) =>
   api.post("/api/auction-intelligence/paper-proposal", payload);
 export const getAuctionIntelligencePaperStatus = () =>
   api.get("/api/auction-intelligence/paper-status");
+/**
+ * The MCX sibling's AUTHORITATIVE book —
+ * backend/runtime/auction_intelligence_commodity/commodity_paper.json.
+ * One shot: summary + closed_positions + a REAL orders[] fill log + statistics
+ * (incl. the dated daily_pnl series) + circuit_breaker.
+ */
+export const getCommodityAuctionIntelligencePaper = (limit = 200) =>
+  api.get("/api/auction-intelligence/commodity/paper", { params: { limit } });
+export const getCommodityAuctionIntelligencePaperTrades = () =>
+  api.get("/api/auction-intelligence/commodity/paper-trades");
+export const getCommodityAuctionIntelligenceStatus = () =>
+  api.get("/api/auction-intelligence/commodity/status");
 export const runAuctionIntelligencePaperRunOnce = (symbol?: string) =>
   api.post("/api/auction-intelligence/paper-run-once", null, { params: { symbol } });
 export const runAuctionIntelligenceGateAValidation = (payload: object) =>

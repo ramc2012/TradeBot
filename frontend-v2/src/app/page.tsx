@@ -33,7 +33,7 @@
  */
 import Link from "next/link";
 import { useQueries } from "@tanstack/react-query";
-import { ArrowUpRight, Banknote, Grid3x3, Lock, Target } from "lucide-react";
+import { ArrowUpRight, Banknote, BookOpen, Grid3x3, Lock, Target } from "lucide-react";
 
 import { MetricTile, REFRESH_MS, Section, StatusBadge, formatSignedMoney, tone } from "@/components/desk-ui";
 import { LastUpdated } from "@/components/common/LastUpdated";
@@ -281,11 +281,11 @@ export default function LandingPage() {
                     maximumFractionDigits: 0,
                   })}`;
                 return (
-                  <Link
+                  <div
                     key={desk.href}
-                    href={desk.href}
-                    className="group flex flex-col rounded-2xl border border-bg-border bg-bg-primary/16 p-4 transition-colors hover:border-accent-blue/40"
+                    className="group flex flex-col rounded-2xl border border-bg-border bg-bg-primary/16 transition-colors hover:border-accent-blue/40"
                   >
+                  <Link href={desk.href} className="flex flex-1 flex-col p-4">
                     <div className="flex items-start justify-between gap-2">
                       <div className="min-w-0">
                         <div className="truncate font-semibold text-text-primary">{desk.label}</div>
@@ -330,6 +330,22 @@ export default function LandingPage() {
 
                     <div className="mt-2 text-[10.5px] leading-tight text-text-muted">{card.reason}</div>
                   </Link>
+                  {/* BOOKS affordance — order / trade / position / portfolio
+                      over the lane's AUTHORITATIVE book. Rendered on the card
+                      itself so the pages are not reachable only from the rail. */}
+                  {desk.books ? (
+                    <Link
+                      href={desk.books.href}
+                      title={desk.books.blurb}
+                      className="flex items-center gap-1.5 border-t border-bg-border/70 px-4 py-2 text-[11px] font-semibold text-text-muted transition-colors hover:bg-bg-hover hover:text-accent-blue"
+                    >
+                      <BookOpen size={12} />
+                      {desk.books.label}
+                      <span className="font-normal text-text-muted/70">{desk.books.views.join(" · ")}</span>
+                      <ArrowUpRight size={12} className="ml-auto" />
+                    </Link>
+                  ) : null}
+                  </div>
                 );
               })}
             </div>

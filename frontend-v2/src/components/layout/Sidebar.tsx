@@ -392,21 +392,44 @@ export default function Sidebar() {
               {open ? (
                 <div className={clsx("space-y-0.5", collapsed ? "mt-0" : "mt-0.5")}>
                   {desks.map((desk) => (
-                    <RailLink
-                      key={desk.href}
-                      href={desk.href}
-                      label={desk.label}
-                      icon={DESK_ICON[desk.href] ?? Target}
-                      active={matches(desk.href, desk.matchers, pathname)}
-                      muted={desk.status === "parked"}
-                      title={
-                        desk.status === "parked"
-                          ? `${desk.parkedReason}\n\n${desk.note}`
-                          : `${desk.note}\n\nLanes: ${desk.laneKeys.join(", ") || "none in the registry"}`
-                      }
-                      chip={deskPolicyLabel(desk)}
-                      caption={desk.status === "parked" ? `PARKED · ${deskCaption(desk)}` : deskCaption(desk)}
-                    />
+                    <div key={desk.href}>
+                      <RailLink
+                        href={desk.href}
+                        label={desk.label}
+                        icon={DESK_ICON[desk.href] ?? Target}
+                        active={matches(desk.href, desk.matchers, pathname)}
+                        muted={desk.status === "parked"}
+                        title={
+                          desk.status === "parked"
+                            ? `${desk.parkedReason}\n\n${desk.note}`
+                            : `${desk.note}\n\nLanes: ${desk.laneKeys.join(", ") || "none in the registry"}`
+                        }
+                        chip={deskPolicyLabel(desk)}
+                        caption={desk.status === "parked" ? `PARKED · ${deskCaption(desk)}` : deskCaption(desk)}
+                      />
+                      {/* The BOOKS page, as an indented child inside the same
+                          (open-by-default) section. A books route linked only
+                          from a collapsed group is a route nobody finds. */}
+                      {desk.books && !collapsed ? (
+                        <div className="ml-9 border-l border-bg-border/60 pl-2">
+                          <Link
+                            href={desk.books.href}
+                            title={desk.books.blurb}
+                            className={clsx(
+                              "block truncate rounded px-1.5 py-1 text-[11px] transition-colors hover:bg-bg-hover hover:text-text-primary",
+                              pathname.startsWith(desk.books.href)
+                                ? "text-accent-blue"
+                                : "text-text-muted",
+                            )}
+                          >
+                            {desk.books.label}
+                            <span className="ml-1 text-[9px] text-text-muted/70">
+                              {desk.books.views.join(" · ")}
+                            </span>
+                          </Link>
+                        </div>
+                      ) : null}
+                    </div>
                   ))}
                 </div>
               ) : null}

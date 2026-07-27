@@ -26,6 +26,7 @@ import test from "node:test";
 
 import {
   BOOK_FIELDS,
+  BOOKS_VIEWS,
   CURRENCY_SYMBOL,
   DESK_CARD_STATE_VARIANT,
   LANE_SECTIONS,
@@ -250,13 +251,20 @@ test("both surfaces render the scalp reason, not just the word 'scalp'", () => {
 
 // ─── 5. Nothing lost, parked labelled ───────────────────────────────────────
 
-/** Every strategy route the pre-2026-07-20 flat nav linked or had parked. */
+/**
+ * Every strategy route the pre-2026-07-20 flat nav linked or had parked.
+ *
+ * `/strategies/us-macd-refined` is deliberately absent: the us_macd_refined
+ * lane was RETIRED, its router 404s and its page was deleted from disk, so
+ * linking it would be a nav entry to nothing. Removing a lane is allowed;
+ * silently dropping the link to a lane that still exists is not, which is what
+ * the rest of this list guards.
+ */
 const LEGACY_ROUTES = [
   "/strategies/market-structure",
   "/strategies/overview",
   "/strategies/nse/live",
   "/strategies/macd-refined",
-  "/strategies/us-macd-refined",
   "/strategies/directional",
   "/strategies/auction",
   "/strategies/gann",
@@ -277,16 +285,16 @@ test("every legacy strategy route is still linked somewhere in the model", () =>
 
 test("parked desks read PARKED and say why", () => {
   const parked = allDesks().filter((d) => d.status === "parked");
-  assert.ok(parked.length >= 3, "US MACD Refined, Fractal MP and Sniper are all parked");
+  assert.ok(parked.length >= 2, "Fractal MP and Sniper are both parked");
   for (const d of parked) {
     assert.ok(d.parkedReason && d.parkedReason.length > 40, `${d.href} is parked without a stated reason`);
     assert.match(d.parkedReason, /PARKED/);
   }
-  const us = desk("/strategies/us-macd-refined");
-  assert.equal(us.status, "parked");
+  const fractal = desk("/strategies/fractal");
+  assert.equal(fractal.status, "parked");
   // A parked lane says PARKED even when its (flat) book resolves — "0 open" is
   // not the interesting fact about a lane that will not trade tomorrow.
-  const card = deskCardState(us, { status: "ok", payload: { open_positions: 0, realized_pnl: 0, total_trades: 0 } });
+  const card = deskCardState(fractal, { status: "ok", payload: { open_positions: 0, realized_pnl: 0, total_trades: 0 } });
   assert.equal(card.state, "PARKED");
   assert.match(card.reason, /PARKED/);
 });
@@ -395,32 +403,36 @@ test("a book carrying only an open count still REPORTS", () => {
 
 // ─── Currency: a USD book is never summed into the ₹ roll-up ────────────────
 
-test("the US lane declares USD and is the only non-INR book", () => {
-  const us = desk("/strategies/us-macd-refined");
-  assert.equal(deskCurrency(us), "USD", "US MACD Refined paper capital is USD, not INR");
-  const nonInr = allDesks().filter((d) => d.book && deskCurrency(d) !== "INR");
-  assert.deepEqual(
-    nonInr.map((d) => d.href),
-    ["/strategies/us-macd-refined"],
-  );
-  // Everything else must be INR by declaration or by default.
+test("every surviving book is INR, and the currency axis still discriminates", () => {
+  // The only USD book (US MACD Refined) was retired with its lane. The AXIS
+  // must not be deleted with it: a future non-INR book must still be excluded
+  // from the ₹ roll-up rather than summed as if $1 = ₹1.
   for (const d of allDesks()) {
-    if (d.href === us.href) continue;
     assert.equal(deskCurrency(d), "INR", `${d.href} must be an INR book`);
   }
   assert.equal(CURRENCY_SYMBOL.USD, "$");
   assert.equal(CURRENCY_SYMBOL.INR, "₹");
 });
 
-test("the INR roll-up excludes every non-INR endpoint", () => {
-  // Mirrors the landing page's INR_ENDPOINTS derivation exactly.
-  const all = Array.from(new Set(allDesks().filter((d) => d.book).map((d) => d.book!.endpoint)));
-  const inr = all.filter((e) =>
-    allDesks().some((d) => d.book?.endpoint === e && deskCurrency(d) === "INR"),
-  );
-  assert.ok(all.includes("/api/us/macd-refined/paper-summary"));
+test("the INR roll-up is derived by currency, not by a hardcoded list", () => {
+  // Mirrors the landing page's INR_ENDPOINTS derivation exactly, with a
+  // synthetic USD desk standing in for the retired one so the exclusion path
+  // stays covered.
+  const usd: NavDesk = {
+    href: "/strategies/hypothetical-usd",
+    label: "hypothetical USD book",
+    policy: null,
+    laneKeys: [],
+    status: "active",
+    note: "test-only desk proving the currency exclusion still works after the US lane retired.",
+    book: { endpoint: "/api/hypothetical/paper-summary", path: [], currency: "USD" },
+  };
+  const desks = [...allDesks(), usd];
+  const all = Array.from(new Set(desks.filter((d) => d.book).map((d) => d.book!.endpoint)));
+  const inr = all.filter((e) => desks.some((d) => d.book?.endpoint === e && deskCurrency(d) === "INR"));
+  assert.ok(all.includes("/api/hypothetical/paper-summary"));
   assert.ok(
-    !inr.includes("/api/us/macd-refined/paper-summary"),
+    !inr.includes("/api/hypothetical/paper-summary"),
     "a USD book must never enter the ₹ total — that asserts $1 = ₹1",
   );
   assert.equal(inr.length, all.length - 1);
@@ -454,7 +466,7 @@ test("the tally separates reporting from askable, parked and no-book", () => {
     deskCardState(desk("/strategies/cbe"), { status: "ok", payload: { open_positions: 1, realized_pnl: 5 } }),
     deskCardState(desk("/strategies/gann"), { status: "error", detail: "HTTP 500" }),
     deskCardState(desk("/strategies/mp"), null),
-    deskCardState(desk("/strategies/us-macd-refined"), { status: "pending" }),
+    deskCardState(desk("/strategies/fractal"), { status: "pending" }),
   ];
   assert.deepEqual(reportingTally(cards), {
     reporting: 1,
@@ -509,4 +521,85 @@ test("the endpoints that 404 are not referenced by either surface", () => {
     // a declared BookSource.
     assert.ok(!new RegExp(`endpoint:\\s*"${bad}"`).test(src), `${bad} is still declared as a book endpoint`);
   }
+});
+
+
+// ─── 8. The BOOKS pages are declared, and are VISIBLE ───────────────────────
+//
+// The failure mode this section exists to prevent: the last books-style UI
+// shipped INVISIBLE. It existed on disk and was reachable only through a group
+// that is collapsed on first paint, so the owner never saw it. A books page
+// that is not one click from first paint has not shipped.
+
+/** The three lanes the owner asked for books on. */
+const BOOKS_LANES = [
+  "/strategies/auction",
+  "/strategies/institutional-convergence",
+  "/strategies/directional",
+];
+
+test("exactly the three requested lanes declare a books page", () => {
+  const withBooks = allDesks().filter((d) => d.books).map((d) => d.href);
+  assert.deepEqual(new Set(withBooks), new Set(BOOKS_LANES));
+});
+
+test("every books page declares exactly the four views", () => {
+  assert.deepEqual(BOOKS_VIEWS, ["orders", "trades", "positions", "portfolio"]);
+  for (const href of BOOKS_LANES) {
+    const d = desk(href);
+    assert.deepEqual(d.books!.views, BOOKS_VIEWS, `${href} does not carry the four views`);
+    assert.ok(d.books!.blurb.length > 40, `${href} books entry has no blurb`);
+  }
+});
+
+test("a books href is always a sub-path of its own desk href", () => {
+  for (const href of BOOKS_LANES) {
+    const d = desk(href);
+    assert.equal(d.books!.href, `${d.href.split("?")[0]}/books`);
+  }
+});
+
+test("every books route lives inside a section that is OPEN on first paint", () => {
+  for (const section of LANE_SECTIONS) {
+    for (const d of section.desks) {
+      if (!d.books) continue;
+      assert.equal(
+        section.defaultOpen,
+        true,
+        `${d.books.href} sits in section "${section.id}", which is collapsed on first paint — that is how the last books UI shipped invisible`,
+      );
+    }
+  }
+});
+
+test("the books routes exist on disk as real pages", () => {
+  for (const href of BOOKS_LANES) {
+    const rel = desk(href).books!.href.replace(/^\//, "").split("/");
+    const file = path.join(ROOT, "src", "app", ...rel, "page.tsx");
+    assert.ok(readFileSync(file, "utf8").includes("LaneBooksDesk"), `${file} does not render the books desk`);
+  }
+});
+
+test("the sidebar actually renders desk.books as a child line", () => {
+  const src = sidebar();
+  assert.match(src, /desk\.books/);
+  assert.match(src, /desk\.books\.href/);
+  assert.match(src, /desk\.books\.views/);
+});
+
+test("the landing card carries a books affordance too", () => {
+  // Rail-only discoverability is not enough: the landing page is the first
+  // paint, and the desk cards are its index.
+  const src = landing();
+  assert.match(src, /desk\.books/);
+  assert.match(src, /desk\.books\.href/);
+});
+
+test("the cross-lane roll-up deep-links into each lane's Portfolio view", () => {
+  const src = read("src", "components", "strategies", "overview", "PortfolioReconciliation.tsx");
+  assert.match(src, /BOOKS_ROUTE/);
+  for (const lane of ["directional", "auction", "convergence"]) {
+    assert.ok(src.includes(`/strategies/${lane === "convergence" ? "institutional-convergence" : lane}/books`), `no books link for ${lane}`);
+  }
+  assert.match(src, /view=portfolio/);
 });
