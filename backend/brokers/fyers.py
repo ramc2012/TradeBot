@@ -18,6 +18,32 @@ from core.config import settings
 from analytics.greeks import bs_greeks, implied_volatility
 
 
+def _sdk_log_path() -> str:
+    """Directory for the Fyers SDK's OWN file logger.
+
+    The SDK installs a logging FileHandler we do not control and never
+    rotates it.  ``log_path=""`` put it in the process CWD — ``/app``, the
+    ``./backend`` BIND MOUNT — so it wrote onto the host source tree and the
+    host data volume, reaching 1.33 GB by 2026-07-27 against 11 GiB free.
+    Point it at a container-local directory instead; ``core.sdk_log_guard``
+    caps it from there.  Falls back to the old behaviour if the directory
+    cannot be created, so a read-only FS can never stop the WS from opening.
+    """
+    import os
+
+    target = os.environ.get("FYERS_SDK_LOG_DIR", "/var/log/tradebot-sdk")
+    try:
+        os.makedirs(target, exist_ok=True)
+        probe = os.path.join(target, ".writable")
+        with open(probe, "w") as fh:
+            fh.write("")
+        os.remove(probe)
+        return target
+    except Exception as exc:  # noqa: BLE001
+        logger.warning(f"Fyers SDK log dir {target} unusable ({exc}) — falling back to CWD")
+        return ""
+
+
 class FyersAdapter(BrokerAdapter):
     """Adapter for Fyers broker (fyers-apiv3)."""
 
@@ -606,7 +632,7 @@ class FyersAdapter(BrokerAdapter):
 
             client = data_ws.FyersDataSocket(
                 access_token=f"{settings.FYERS_APP_ID}:{self._access_token}",
-                log_path="",
+                log_path=_sdk_log_path(),
                 litemode=False,
                 write_to_file=False,
                 # reconnect=False: the router owns reconnection (_reconnect_if_stale
@@ -656,7 +682,7 @@ class FyersAdapter(BrokerAdapter):
         client = tbt_ws.FyersTbtSocket(
             access_token=f"{settings.FYERS_APP_ID}:{self._access_token}",
             write_to_file=False,
-            log_path="",
+            log_path=_sdk_log_path(),
             reconnect=True,
             on_depth_update=_on_depth,
             on_error=lambda *_a: logger.error(f"Fyers TBT WS error: {_a[0] if _a else ''}"),

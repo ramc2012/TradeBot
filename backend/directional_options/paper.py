@@ -5,7 +5,7 @@ import asyncio
 import json
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
-from typing import Any
+from typing import Any, Awaitable, Callable
 from uuid import uuid4
 
 from loguru import logger
@@ -107,6 +107,86 @@ def _with_current_expiry_calendar(position: dict[str, Any]) -> dict[str, Any]:
     row["expiry_kind"] = "monthly"
     row["expiry_correction_reason"] = "current_index_monthly_expiry_calendar"
     return row
+
+
+_IST = timezone(timedelta(hours=5, minutes=30))
+
+
+def _ist_today(now: datetime | None = None) -> date:
+    """Today's EXCHANGE date.
+
+    The expiry pass used ``datetime.now(timezone.utc).date()``, which between
+    00:00 and 05:30 IST is YESTERDAY — days-to-expiry then reads one too HIGH
+    and the close is skipped for that cycle.  The bias was always late, never
+    early, but "late" on an expiry-day pass is exactly the failure the rule
+    exists to prevent, so the whole expiry path is now on the exchange date.
+    """
+    return (now or datetime.now(timezone.utc)).astimezone(_IST).date()
+
+
+def _position_expiry(position: dict[str, Any]) -> date | None:
+    try:
+        return date.fromisoformat(str(position.get("expiry") or "")[:10])
+    except Exception:  # noqa: BLE001
+        return None
+
+
+def expiry_exit_decision(
+    position: dict[str, Any],
+    *,
+    today: date,
+    expiry_guard_days: float,
+) -> tuple[str | None, dict[str, Any]]:
+    """Must this OPEN row be closed for EXPIRY reasons on ``today``?
+
+    Two rules, in order, behind ONE implementation so the per-underlying sync
+    pass and the global sweep can never diverge:
+
+      1. ``core.expiry_policy.forced_close_check`` — the SAME 2-trading-day
+         compulsory-closure gate every MACD surface already calls
+         (``macd_refined.live``, ``paper_engine.strategy_agent_exits``,
+         ``market_data.macd_watchlist``).  Holiday-aware, flag-gated, and
+         DISABLED for indices by design (INDEX boundary = 0).  Until now
+         ``directional_options`` did not import it at all — it was the only
+         option-holding lane exempt from the owner's expiry discipline.
+
+      2. the lane's own CALENDAR days-to-expiry guard.  Retained as an
+         UNCONDITIONAL backstop, because rule 1 is inert with the policy
+         flags down and never fires for an index — without this an index
+         position could still ride into expiry.
+
+    Returns ``(reason, detail)``.  ``reason`` is None when the row may keep
+    riding; ``detail`` is always populated so the closure is explainable in
+    the journal.
+    """
+    expiry = _position_expiry(position)
+    detail: dict[str, Any] = {
+        "evaluated_on": today.isoformat(),
+        "expiry": expiry.isoformat() if expiry else None,
+        "expiry_guard_days": float(expiry_guard_days),
+    }
+    if expiry is None:
+        detail["skipped"] = "unparseable_expiry"
+        return None, detail
+
+    underlying = _normalize_symbol(position.get("underlying"))
+    try:
+        from core.expiry_policy import forced_close_check
+
+        hold = forced_close_check(underlying, expiry, today=today)
+    except Exception as exc:  # noqa: BLE001 - the policy must never break the book
+        hold = None
+        detail["forced_close_error"] = str(exc)[:200]
+    if hold is not None:
+        detail["forced_close"] = hold.as_dict()
+        if hold.must_close:
+            return str(hold.reason or "forced_expiry_roll_2td"), detail
+
+    dte = (expiry - today).days
+    detail["calendar_dte"] = dte
+    if dte <= float(expiry_guard_days):
+        return "expiry_roll", detail
+    return None, detail
 
 
 def _same_contract(position: dict[str, Any], contract: dict[str, Any]) -> bool:
@@ -408,12 +488,20 @@ class DirectionalOptionsPaperStore:
                 elif ret >= float(self.profit_target_pct):
                     reason = "profit_target"
                 else:
-                    try:
-                        dte = (date.fromisoformat(str(row.get("expiry") or "")[:10]) - datetime.now(timezone.utc).date()).days
-                        if dte <= float(self.expiry_guard_days):
-                            reason = "expiry_roll"
-                    except Exception:
-                        pass
+                    # Expiry discipline — the SHARED 2TD gate first, then the
+                    # lane's own calendar-DTE backstop (see
+                    # ``expiry_exit_decision``). This pass only ever sees rows
+                    # for the underlying being synced this cycle, and the lane
+                    # cycles ~40-53 of ~217 names per session, so it is NOT
+                    # sufficient on its own — ``sweep_expiry_closures`` below
+                    # is the guarantee. Both call the same decision function.
+                    expiry_reason, _ = expiry_exit_decision(
+                        row,
+                        today=_ist_today(),
+                        expiry_guard_days=self.expiry_guard_days,
+                    )
+                    if expiry_reason:
+                        reason = expiry_reason
                 if reason:
                     self._close_position(
                         row,
@@ -747,6 +835,236 @@ class DirectionalOptionsPaperStore:
                 }
             )
             return await self._summary(open_positions, closed_positions)
+
+    # ── global expiry sweep ────────────────────────────────────────────────
+    async def sweep_expiry_closures(
+        self,
+        *,
+        today: date | None = None,
+        mark_resolver: Callable[[dict[str, Any]], Awaitable[dict[str, Any] | None]] | None = None,
+        now: str | None = None,
+    ) -> dict[str, Any]:
+        """Close EVERY open row whose expiry is due, whatever else ran today.
+
+        WHY THIS EXISTS (2026-07-27).  The lane's only expiry exit lived
+        inside ``sync_snapshot``, whose loop iterates ``matching`` — the rows
+        for the ONE underlying being synced that cycle.  The runner cycles
+        3 indices plus a rotating batch of NIFTY-50 stocks: 40-53 distinct
+        underlyings per session out of ~217.  A held name that stops being
+        selected is therefore never re-examined, and its position can ride
+        straight through expiry — verified on 2026-07-24, when of six open
+        rows only BEL and LT were cycled while APOLLOHOSP / CIPLA /
+        MAXHEALTH / NTPC (all 2026-07-28 expiry) were not touched at all.
+        This sweep reads the WHOLE open book and depends on nothing.
+
+        PRICING AN EXIT WHOSE MARK IS STALE.  ``mark_resolver`` is given the
+        first chance to fetch a real current quote for the held leg.  When it
+        cannot (the strike has fallen off the ATM collection set as spot
+        drifted — CIPLA 1440 PE's last premium bar is 2026-07-21 while the
+        tracker now collects 1430/1410), the position closes at the LAST
+        OBSERVED premium and the row is LABELLED ``stale_mark_exit`` with the
+        observation time and age, so the P&L is attributable rather than
+        quietly fictional.  No price is ever invented: a row with no observed
+        premium at all is left open and reported as ``unpriceable``.
+        """
+        today = today or _ist_today()
+        close_time = now or _utc_now()
+
+        # Pass 1 (no lock): find the due rows and resolve their marks. Quote
+        # resolution touches the DB / chain cache, so it must not be done
+        # while holding the book lock.
+        state = await self._load_positions()
+        candidates: list[tuple[dict[str, Any], str, dict[str, Any]]] = []
+        for row in state.get("open_positions") or []:
+            reason, detail = expiry_exit_decision(
+                row, today=today, expiry_guard_days=self.expiry_guard_days
+            )
+            if reason:
+                candidates.append((row, reason, detail))
+
+        evaluated = len(state.get("open_positions") or [])
+        if not candidates:
+            return {
+                "as_of": close_time,
+                "evaluated_on": today.isoformat(),
+                "open_evaluated": evaluated,
+                "closed": 0,
+                "closures": [],
+                "skipped": [],
+            }
+
+        resolved: dict[str, dict[str, Any]] = {}
+        for row, _reason, _detail in candidates:
+            position_id = str(row.get("position_id") or "")
+            if not position_id or mark_resolver is None:
+                continue
+            try:
+                mark = await mark_resolver(dict(row))
+            except Exception as exc:  # noqa: BLE001 - a quote failure must not block the close
+                logger.warning(
+                    "[DirPaper] expiry sweep mark lookup failed for {sym} {pid}: {err}",
+                    sym=row.get("underlying"), pid=position_id, err=str(exc)[:160],
+                )
+                mark = None
+            if mark and _safe_float_or_none(mark.get("premium")):
+                resolved[position_id] = dict(mark)
+
+        # Pass 2 (locked): re-read the book and close, so a concurrent
+        # sync_snapshot that already closed a row always wins.
+        closures: list[dict[str, Any]] = []
+        skipped: list[dict[str, Any]] = []
+        async with self._lock:
+            state = await self._load_positions()
+            open_positions = list(state.get("open_positions") or [])
+            closed_positions = list(state.get("closed_positions") or [])
+            by_id = {str(r.get("position_id") or ""): r for r in open_positions}
+
+            for stale_row, reason, detail in candidates:
+                position_id = str(stale_row.get("position_id") or "")
+                row = by_id.get(position_id)
+                if row is None:
+                    continue  # already closed by the normal path this cycle
+                mark = resolved.get(position_id) or {}
+                premium = _safe_float_or_none(mark.get("premium"))
+                observed_at = row.get("mark_time") or row.get("updated_at")
+                mark_time_exact = True
+                if premium is not None and premium > 0:
+                    quality = "live_quote"
+                    exit_mark = dict(mark)
+                    exit_source = str(mark.get("price_source") or "live_quote")
+                    # A resolver can return a real, current premium with NO
+                    # timestamp: that is exactly what the live option-chain
+                    # branch does (``chain_strike_mark`` reads a Redis entry
+                    # written with a 60s TTL, so a HIT is <=60s old by
+                    # construction, but the entry carries no per-strike
+                    # observation time). Falling back to the ROW's carried
+                    # ``mark_time`` there stamped a fresh <=60s fill with the
+                    # age of the abandoned mark — on the live book that was
+                    # ``quality=live_quote, stale_mark_exit=False,
+                    # exit_mark_age_seconds=597491`` (6.9 days) on the SAME
+                    # closure, i.e. the attribution fields contradicting each
+                    # other on the one lane this fix exists to make
+                    # attributable. The observation is the FETCH, so use the
+                    # close time and flag that it is bounded, not exact.
+                    resolved_at = mark.get("mark_time")
+                    observed_at = resolved_at or close_time
+                    mark_time_exact = resolved_at is not None
+                    # ...and the same for the row's OWN ``mark_time``, which
+                    # ``_close_position`` otherwise leaves at the abandoned
+                    # value (``mark.get("mark_time") or position.get(...)``),
+                    # so the closed row would advertise a week-old mark
+                    # alongside a freshly-fetched exit_premium.
+                    exit_mark["mark_time"] = observed_at
+                else:
+                    exit_mark = {}
+                    carried = _safe_float_or_none(row.get("latest_premium"))
+                    entry = _safe_float_or_none(row.get("entry_premium"))
+                    if carried is not None and carried > 0:
+                        quality = "stale_mark"
+                    elif entry is not None and entry > 0:
+                        quality = "entry_carry"
+                    else:
+                        # Nothing was EVER observed for this leg. Refuse to
+                        # fabricate a fill; leave it open and shout.
+                        logger.error(
+                            "[DirPaper] expiry sweep CANNOT price {sym} {ts} (pid={pid}) — "
+                            "no live quote and no observed premium; left OPEN.",
+                            sym=row.get("underlying"),
+                            ts=row.get("trading_symbol"),
+                            pid=position_id,
+                        )
+                        skipped.append({
+                            "position_id": position_id,
+                            "underlying": row.get("underlying"),
+                            "trading_symbol": row.get("trading_symbol"),
+                            "expiry": row.get("expiry"),
+                            "reason": reason,
+                            "skipped": "unpriceable",
+                        })
+                        continue
+                    exit_source = f"carried:{row.get('price_source') or 'unknown'}"
+
+                age_seconds = None
+                observed_dt = _parse_iso(observed_at)
+                close_dt = _parse_iso(close_time)
+                if observed_dt is not None and close_dt is not None:
+                    age_seconds = round((close_dt - observed_dt).total_seconds(), 1)
+
+                row["expiry_sweep"] = True
+                row["exit_price_quality"] = quality
+                row["stale_mark_exit"] = quality != "live_quote"
+                row["exit_price_source"] = exit_source
+                row["exit_mark_observed_at"] = observed_at
+                row["exit_mark_age_seconds"] = age_seconds
+                row["exit_mark_time_exact"] = mark_time_exact
+                row["expiry_policy_detail"] = detail
+
+                self._close_position(
+                    row, mark=exit_mark, close_time=close_time, close_reason=reason
+                )
+                open_positions.remove(row)
+                closed_positions.append(row)
+
+                record = {
+                    "position_id": position_id,
+                    "underlying": row.get("underlying"),
+                    "trading_symbol": row.get("trading_symbol"),
+                    "expiry": row.get("expiry"),
+                    "strike": row.get("strike"),
+                    "option_type": row.get("option_type"),
+                    "quantity_units": row.get("quantity_units"),
+                    "close_reason": reason,
+                    "entry_premium": row.get("entry_premium"),
+                    "exit_premium": row.get("exit_premium"),
+                    "realized_pnl": row.get("realized_pnl"),
+                    "exit_price_quality": quality,
+                    "stale_mark_exit": row["stale_mark_exit"],
+                    "exit_price_source": exit_source,
+                    "exit_mark_observed_at": observed_at,
+                    "exit_mark_age_seconds": age_seconds,
+                    "exit_mark_time_exact": mark_time_exact,
+                    "policy": detail,
+                }
+                closures.append(record)
+                logger.warning(
+                    "[DirPaper] EXPIRY SWEEP closed {sym} {ts} expiry={exp} reason={reason} "
+                    "exit={px} quality={quality} mark_age={age}s",
+                    sym=row.get("underlying"), ts=row.get("trading_symbol"),
+                    exp=row.get("expiry"), reason=reason, px=row.get("exit_premium"),
+                    quality=quality, age=age_seconds,
+                )
+
+            if closures:
+                await self._save_positions(
+                    {
+                        "last_synced_at": close_time,
+                        "open_positions": open_positions,
+                        "closed_positions": closed_positions,
+                    }
+                )
+
+        for record in closures:
+            try:
+                await self._append_journal(
+                    {
+                        "recorded_at": close_time,
+                        "underlying": record.get("underlying"),
+                        "event": "expiry_sweep_close",
+                        "approved": None,
+                        **record,
+                    }
+                )
+            except Exception as exc:  # noqa: BLE001 - journalling must not undo a close
+                logger.warning("[DirPaper] expiry sweep journal write failed: {err}", err=str(exc)[:160])
+
+        return {
+            "as_of": close_time,
+            "evaluated_on": today.isoformat(),
+            "open_evaluated": evaluated,
+            "closed": len(closures),
+            "closures": closures,
+            "skipped": skipped,
+        }
 
     def _close_position(
         self,
@@ -1139,7 +1457,29 @@ class DirectionalOptionsPaperStore:
         """Upsert the open + closed positions by position_id. Closed positions
         accumulate (never deleted) → durable trade history. A position moves
         open→closed when it appears in the closed list (the logic always closes
-        before it leaves the open list, so no stale-open rows linger)."""
+        before it leaves the open list, so no stale-open rows linger).
+
+        CLOSED IS TERMINAL (2026-07-27).  ``self._lock`` is an ``asyncio.Lock``
+        — it serialises writers inside ONE process and gives nothing across
+        processes.  The directional lane currently runs in TWO: ``LANESET=all``
+        in ``nomadcurie_backend`` and ``LANESET=strategies`` in
+        ``nomadcurie_backend_strategies`` (verified live 2026-07-27 — both
+        started the ``directional_options`` runner within a second of each
+        other at 09:22:3x).  Every ``_save_positions`` call rewrites the WHOLE
+        open list, not just the rows it touched, so process B — holding a list
+        read a moment before process A committed a close — would upsert that
+        row straight back to ``status='open'`` with ``close_reason`` nulled.
+        Proven against this Postgres: the unguarded ``DO UPDATE`` turns
+        ``(closed, forced_expiry_roll_2td)`` into ``(open, NULL)``.
+
+        That would silently undo the expiry sweep with no error anywhere.  The
+        conflict predicate below makes ``closed`` terminal — a stale open row
+        can no longer reopen a closed one, while a genuine close
+        (``EXCLUDED.status = 'closed'``) still applies, including a later
+        re-close that only revises the exit fields.  Nothing legitimately
+        transitions closed→open: ``position_id`` is a fresh uuid4 per entry and
+        ``reset_account`` DELETEs rather than reopening.
+        """
         rows = [(p, "open") for p in (state.get("open_positions") or [])]
         rows += [(p, "closed") for p in (state.get("closed_positions") or [])]
         params = [self._position_db_params(p, s) for p, s in rows if p.get("position_id")]
@@ -1169,6 +1509,8 @@ class DirectionalOptionsPaperStore:
                 realized_pnl=EXCLUDED.realized_pnl, opened_at=EXCLUDED.opened_at,
                 updated_at=EXCLUDED.updated_at, closed_at=EXCLUDED.closed_at,
                 close_reason=EXCLUDED.close_reason, payload=EXCLUDED.payload
+            WHERE directional_paper_positions.status IS DISTINCT FROM 'closed'
+               OR EXCLUDED.status = 'closed'
             """
         )
         async with AsyncSessionLocal() as session:

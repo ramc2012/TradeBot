@@ -5,6 +5,30 @@
 #   frontend-v2 → 3000:3001   (v2 is the primary workspace, served on :3000)
 #   frontend    → 3001:3000   (legacy v1, retained on :3001 as fallback)
 
+# ── json-file log rotation (added 2026-07-27) ─────────────────────────────
+# WHY THIS IS NOT COSMETIC.  Every service ran with `json-file` and NO
+# options, i.e. ONE unbounded log file per container, appended to forever
+# across stop/start (the file is keyed to the container ID, not the boot).
+# On 2026-07-24 two ungraceful host reboots left NUL runs inside those files
+# where the VM's ext4 page cache never flushed (backend: 3887 zero bytes at
+# offset 115,945,681 and 247 at 127,123,209; redis and research-sync got the
+# same treatment within 53 s).  Docker's sequential log reader ABORTS at the
+# first NUL, so `docker logs <c>` and `docker logs --since ...` returned
+# nothing after 2026-07-24 04:36:45Z even though the app never stopped
+# writing — 45 MB / ~243k lines were unreachable and every log-based
+# conclusion drawn since Friday was unverifiable.  Nothing was wrong with the
+# app's logging; the log FILE was permanently poisoned and only a container
+# RECREATE (new ID ⇒ new file) could clear it.
+#
+# With rotation a corrupt segment AGES OUT instead of poisoning the stream
+# forever, and each container is capped at 250 MB (5 × 50 MB) instead of
+# growing without limit on a data volume that is already at 98%.
+x-logging: &default-logging
+  driver: json-file
+  options:
+    max-size: "50m"
+    max-file: "5"
+
 services:
   db:
     image: timescale/timescaledb:latest-pg15
@@ -23,6 +47,7 @@ services:
       timeout: 5s
       retries: 5
     restart: unless-stopped
+    logging: *default-logging
     # OOM containment (2026-07): the Docker VM was 7.75GiB and shared with a
     # second TimescaleDB + ~24 containers. PG was auto-tuned as if it owned the
     # whole VM (shared_buffers 1.94GB) → 786 VM-wide OOM signal-9 kills in 7
@@ -56,6 +81,7 @@ services:
       timeout: 5s
       retries: 5
     restart: unless-stopped
+    logging: *default-logging
 
   backend:
     build:
@@ -108,6 +134,7 @@ services:
              alembic upgrade head &&
              uvicorn main:app --host 0.0.0.0 --port 8000"
     restart: unless-stopped
+    logging: *default-logging
 
   # ── Phase-1 process split: strategy plane (opt-in via `--profile split`) ──
   # Same image + bind mounts as `backend`, but LANESET=strategies boots ONLY
@@ -165,6 +192,7 @@ services:
       sh -c "python scripts/wait_for_db.py &&
              uvicorn main:app --host 0.0.0.0 --port 8000"
     restart: unless-stopped
+    logging: *default-logging
 
   research-sync:
     build:
@@ -212,6 +240,7 @@ services:
           --upstox-gap-seconds $$RESEARCH_UPSTOX_GAP_SECONDS
           --daemon
     restart: unless-stopped
+    logging: *default-logging
 
   # ──────────────────────────────────────────────────────────────────
   # v1 frontend (nomadcurie_frontend, :3001) — RETIRED 2026-06-07.
@@ -244,6 +273,7 @@ services:
         # loading states) until the API comes up.
         condition: service_started
     restart: unless-stopped
+    logging: *default-logging
 
 volumes:
   db_data:

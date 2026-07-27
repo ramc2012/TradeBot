@@ -73,6 +73,18 @@ async def paper_summary() -> dict[str, object]:
     return await _service.paper_summary()
 
 
+@router.post("/paper-expiry-sweep")
+async def paper_expiry_sweep() -> dict[str, object]:
+    """Force the global expiry sweep over the WHOLE open paper book.
+
+    The sweep also runs automatically at the head of every directional runner
+    cycle; this is the manual lever for ops (e.g. immediately after a deploy,
+    without waiting for the next 180s cadence). Idempotent: rows that are not
+    due simply stay open.
+    """
+    return await _service.sweep_expiry_closures()
+
+
 @router.post("/reset-paper")
 async def reset_paper_account(body: DirectionalResetRequest) -> dict[str, object]:
     if (body.confirm or "").strip().upper() != "RESET":

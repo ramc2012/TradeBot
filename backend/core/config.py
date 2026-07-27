@@ -364,6 +364,14 @@ class Settings(BaseSettings):
     # option-premium chart gaps. OFF ⇒ _build_row re-picks strikes per cycle,
     # exactly as today.
     MACD_PREOPEN_WATCHLIST_ENABLED: bool = False
+    # PREOPEN_SPOT_SNAPSHOT_ENABLED — owner spec 2026-07-27: persist a durable
+    # per-(session, underlying) record of the NSE cash pre-open call auction
+    # (equilibrium price, matched quantity, gap vs prior close, auction book
+    # imbalance) plus an ACTIVENESS flag. Observation only: it reads ticks
+    # already in Postgres after the 09:00-09:15 window closes, makes no broker
+    # call, and touches no strategy math. Default OFF so the owner enables it
+    # deliberately; see market_data/preopen_spot.py for the definition.
+    PREOPEN_SPOT_SNAPSHOT_ENABLED: bool = False
     # Pre-open sample window (IST). NSE's call auction runs 09:00-09:08; we
     # sample at 09:04+ so the book has actually built (sampling at 09:00 mostly
     # returns a carried previous close).

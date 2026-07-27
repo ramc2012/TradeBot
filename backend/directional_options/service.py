@@ -440,6 +440,74 @@ class DirectionalOptionsService:
             "paper_journal": await self.paper.list_journal(symbol=underlying, limit=8),
         }
 
+    async def resolve_position_mark(self, row: dict[str, object]) -> dict[str, object] | None:
+        """Best-effort CURRENT price for one held contract.
+
+        The SAME two-source ladder ``record_paper_snapshot`` uses for its
+        per-underlying marks — a fresh local option mark, then the live
+        option-chain cache — and deliberately NOT the history fallback, so a
+        four-session-old bar can never masquerade as a fill price. Returns
+        None when neither source has a usable live quote; the caller decides
+        what to do about that (the expiry sweep labels the exit instead of
+        inventing a price).
+        """
+        row_underlying = str(row.get("underlying") or "")
+        row_expiry = str(row.get("expiry") or "")
+        row_strike = float(row.get("strike") or 0.0)
+        row_otype = str(row.get("option_type") or "")
+        try:
+            premium, mark_time, price_source = await self.store.latest_local_option_mark(
+                underlying=row_underlying,
+                expiry=row_expiry,
+                strike=row_strike,
+                option_type=row_otype,
+                instrument_key=str(row.get("instrument_key") or "") or None,
+                allow_history_fallback=False,
+            )
+        except Exception:  # noqa: BLE001
+            premium, mark_time, price_source = None, None, None
+        max_mark_age = float(
+            settings.DIRECTIONAL_STOCK_WATCHLIST_MAX_AGE_SECONDS
+            if not self.is_index_underlying(row_underlying)
+            else self.config["paper_trading"]["stale_watchlist_seconds"]
+        )
+        if (
+            premium is None
+            or premium <= 0
+            or not _fresh_quote_time(mark_time, max_age_seconds=max_mark_age)
+        ):
+            from directional_options.chain_analytics import chain_strike_mark
+
+            try:
+                chain_mark = await chain_strike_mark(
+                    row_underlying, row_expiry, row_strike, row_otype
+                )
+            except Exception:  # noqa: BLE001
+                chain_mark = None
+            if chain_mark is None or chain_mark <= 0:
+                return None
+            premium = float(chain_mark)
+            mark_time = None
+            price_source = "chain_cache_live"
+        return {
+            "premium": float(premium),
+            "spot": float(row.get("latest_spot") or 0.0),
+            "mark_time": mark_time,
+            "price_source": price_source,
+        }
+
+    async def sweep_expiry_closures(self, *, today: object | None = None) -> dict[str, object]:
+        """Global expiry sweep over the WHOLE directional paper book.
+
+        Runs independently of which underlyings the cycle happens to scan —
+        the per-underlying pass in ``paper.sync_snapshot`` only ever sees the
+        one symbol being synced, and the runner covers 40-53 of ~217 names a
+        session, so held names can (and did) go unexamined for days.
+        """
+        return await self.paper.sweep_expiry_closures(
+            today=today, mark_resolver=self.resolve_position_mark
+        )
+
     async def record_paper_snapshot(
         self,
         underlying: str,

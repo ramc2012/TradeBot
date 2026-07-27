@@ -143,6 +143,31 @@ def _in_token_readiness_window(now: datetime) -> bool:
     )
 
 
+def _in_preopen_snapshot_window(now: datetime) -> bool:
+    """09:12-09:30 IST on NSE session days — AFTER the call auction closes.
+
+    Deliberately starts at 09:12: matching completes 09:08-09:12, so before
+    that the equilibrium does not exist yet. Deliberately does NOT overlap the
+    09:04-09:14 MACD ladder build in any way that competes — this runner makes
+    no broker call at all, it only reads ticks already committed to Postgres.
+    """
+    return (
+        trading_calendar.has_exchange_session("NSE", now.date())
+        and time(9, 12) <= now.time() <= time(9, 30)
+    )
+
+
+def _next_preopen_snapshot_open(now: datetime) -> datetime:
+    if _in_preopen_snapshot_window(now):
+        return now
+    candidate = now.replace(hour=9, minute=12, second=0, microsecond=0)
+    while candidate <= now or not trading_calendar.has_exchange_session("NSE", candidate.date()):
+        candidate = (candidate + timedelta(days=1)).replace(
+            hour=9, minute=12, second=0, microsecond=0
+        )
+    return candidate
+
+
 def _next_token_readiness_open(now: datetime) -> datetime:
     if _in_token_readiness_window(now):
         return now
@@ -557,6 +582,15 @@ class MarketHoursPaperSupervisor:
             from market_data.macd_watchlist import run_preopen_phase
             return await run_preopen_phase()
 
+        async def _preopen_spot_snapshot_runner() -> dict[str, Any]:
+            # Owner spec 2026-07-27: durable per-session pre-open spot record +
+            # activeness flag. Pure observation — reads `market_ticks` rows that
+            # are already committed, makes NO broker call, writes one bounded
+            # table. Flag-gated OFF (PREOPEN_SPOT_SNAPSHOT_ENABLED): a no-op
+            # returning {"status": "disabled"} until the owner flips it.
+            from market_data.preopen_spot import run_preopen_spot_snapshot
+            return await run_preopen_spot_snapshot()
+
         async def _option_flow_watchdog_runner() -> dict[str, Any]:
             # Detection/telemetry only (default OFF): flags a frozen REST premium
             # feed once the FAST lanes lean on the Fyers tick path. See
@@ -679,6 +713,23 @@ class MarketHoursPaperSupervisor:
             failures: dict[str, str] = {}
             default_timeframe = str(directional_service.config["default_timeframe"])
             lookback_sessions = int(directional_service.config["backtest"]["lookback_sessions"])
+
+            # EXPIRY SWEEP — first, and over the WHOLE open book. The
+            # per-underlying expiry exit inside paper.sync_snapshot only sees
+            # rows for the symbol being synced, and this runner covers 3
+            # indices + a rotating stock batch (40-53 of ~217 names/session),
+            # so a held name that stops being selected was never re-examined
+            # and could ride through expiry (verified 2026-07-24: 4 of 6 open
+            # rows on the 07-28 expiry went untouched). Isolated: a sweep
+            # failure is reported, never allowed to kill the scan cycle.
+            expiry_sweep: dict[str, Any]
+            try:
+                expiry_sweep = await asyncio.wait_for(
+                    directional_service.sweep_expiry_closures(), timeout=120.0
+                )
+            except Exception as exc:  # noqa: BLE001 - never break the cycle
+                expiry_sweep = {"error": str(exc)[:200] or type(exc).__name__}
+                logger.warning(f"[Supervisor] directional expiry sweep failed: {exc}")
 
             def _result_row(underlying: str, snapshot: dict[str, Any], kind: str) -> dict[str, Any]:
                 current_snapshot = dict(snapshot.get("snapshot") or {})
@@ -871,6 +922,7 @@ class MarketHoursPaperSupervisor:
                 "symbols_completed": [item.get("underlying") for item in results],
                 "result_count": len(results),
                 "actionable_count": actionable_count,
+                "expiry_sweep": expiry_sweep,
                 "rejection_counts": dict(rejection_counts.most_common(10)),
                 "failure_count": len(failures),
                 "failures": failures,
@@ -1249,6 +1301,30 @@ class MarketHoursPaperSupervisor:
                 post_close_catchup=False,
                 # Phase 1 can walk the whole universe's warm-up under BULK.
                 timeout_seconds=1200.0,
+                plane="core",
+            ),
+            RunnerConfig(
+                key="preopen_spot_snapshot",
+                label="Pre-open Spot Snapshot + Activeness",
+                # 5-minute cadence inside a 09:12-09:30 window ⇒ up to 4 passes.
+                # The write is an idempotent upsert keyed on
+                # (session_date, underlying), so a later pass simply rewrites
+                # the same derived values — there is no re-race to lose.
+                interval_seconds=300,
+                callback=_preopen_spot_snapshot_runner,
+                enabled=getattr(settings, "PREOPEN_SPOT_SNAPSHOT_ENABLED", False),
+                market_hours_fn=_in_preopen_snapshot_window,
+                next_open_fn=_next_preopen_snapshot_open,
+                # A post-close catch-up IS meaningful here, unlike the ladder:
+                # the pre-open ticks are still sitting in Postgres at 15:35, so
+                # a missed morning window can be recovered losslessly and the
+                # session still gets its row.
+                post_close_catchup=True,
+                post_close_force_daily=True,
+                # ~217 instruments, three bounded SELECTs, one batched upsert.
+                timeout_seconds=300.0,
+                # No broker REST at all — leave broker_profile default so
+                # neither cadence-group kill switch darkens a zero-cost reader.
                 plane="core",
             ),
             RunnerConfig(

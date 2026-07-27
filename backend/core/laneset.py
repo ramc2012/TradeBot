@@ -95,6 +95,10 @@ CORE_SUBSYSTEMS = frozenset(
         "runner:market_intelligence",
         "runner:stock_spot_sweep",
         "runner:macd_preopen_watchlist",
+        # Pre-open spot snapshot + activeness (owner spec 2026-07-27). Core
+        # plane: it is data recording, not a decision lane, and it reads only
+        # rows already in Postgres.
+        "runner:preopen_spot_snapshot",
     }
 )
 

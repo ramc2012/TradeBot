@@ -1337,3 +1337,160 @@ async def get_expiries(symbol: str):
             "default_expiry": local_expiries[0] if local_expiries else None,
             "source": "catalog" if local_expiries else source,
         }
+
+
+# ══════════════════════════════════════════════════════════════════════════
+# Pre-open spot snapshot + activeness (owner spec 2026-07-27)
+# READ-ONLY and ADDITIVE. Serves `preopen_spot_snapshots` (migration 030).
+# The frontend is owned by another workflow — this is the API surface only.
+# ══════════════════════════════════════════════════════════════════════════
+@router.get("/preopen/session")
+async def get_preopen_session(
+    session_date: Optional[str] = Query(None, description="YYYY-MM-DD; defaults to today IST"),
+    state: Optional[str] = Query(None, description="active | quiet | unknown"),
+    underlying: Optional[str] = Query(None, description="single name lookup"),
+    limit: int = Query(500, ge=1, le=1000),
+) -> dict:
+    """One session's pre-open snapshot.
+
+    A name that is not in the table for that session resolves to
+    `activeness_state: "unknown"` with `data_status: "not_recorded"` — never to
+    "quiet". Absence of evidence is reported as absence, not as a verdict.
+    """
+    from market_data.preopen_spot import (
+        DEFINITION_VERSION,
+        MCX_EXCLUSION_REASON,
+        STATE_UNKNOWN,
+        load_session_rows,
+    )
+
+    ist = timezone(timedelta(hours=5, minutes=30))
+    try:
+        day = (
+            date.fromisoformat(session_date)
+            if session_date
+            else datetime.now(ist).date()
+        )
+    except ValueError:
+        raise HTTPException(status_code=400, detail="session_date must be YYYY-MM-DD")
+
+    if state and state not in {"active", "quiet", "unknown"}:
+        raise HTTPException(status_code=400, detail="state must be active|quiet|unknown")
+
+    rows = await load_session_rows(day, state=state, underlying=underlying, limit=limit)
+
+    if underlying:
+        want = str(underlying).strip().upper()
+        if not rows:
+            return {
+                "session_date": day.isoformat(),
+                "definition_version": DEFINITION_VERSION,
+                "count": 0,
+                "rows": [
+                    {
+                        "underlying": want,
+                        "data_status": "not_recorded",
+                        "data_status_reason": (
+                            "no pre-open snapshot row exists for this name on this "
+                            "session — unknown, NOT inactive"
+                        ),
+                        "activeness_state": STATE_UNKNOWN,
+                        "activeness_score": None,
+                        "activeness_reasons": [],
+                    }
+                ],
+                "mcx_excluded_reason": MCX_EXCLUSION_REASON,
+            }
+
+    return {
+        "session_date": day.isoformat(),
+        "definition_version": DEFINITION_VERSION,
+        "count": len(rows),
+        "rows": rows,
+        "mcx_excluded_reason": MCX_EXCLUSION_REASON,
+    }
+
+
+@router.get("/preopen/coverage")
+async def get_preopen_coverage(limit: int = Query(60, ge=1, le=200)) -> dict:
+    """Per-session coverage of the pre-open snapshot store.
+
+    This is the honest view of how far the history actually goes: sessions
+    absent from the list were never captured, and sessions present with
+    ok_rows = 0 were dark.
+    """
+    from market_data.preopen_spot import DEFINITION_VERSION, load_session_coverage
+
+    sessions = await load_session_coverage(limit=limit)
+    return {
+        "definition_version": DEFINITION_VERSION,
+        "sessions": sessions,
+        "count": len(sessions),
+    }
+
+
+@router.get("/preopen/definition")
+async def get_preopen_definition() -> dict:
+    """The activeness definition, served from the constants that compute it.
+
+    Nothing here is a restatement: every threshold below is read off the module
+    the runner uses, so the documented definition cannot drift from the one in
+    force.
+    """
+    from market_data import preopen_spot as ps
+
+    return {
+        "definition_version": ps.DEFINITION_VERSION,
+        "window_ist": {
+            "start": ps.PREOPEN_START_IST.strftime("%H:%M"),
+            "end": ps.PREOPEN_END_IST.strftime("%H:%M"),
+        },
+        "components": {
+            ps.COMPONENT_REL_VOLUME: {
+                "formula": "preopen_volume / median(own prior pre-open volumes)",
+                "threshold": ps.REL_VOLUME_THRESHOLD,
+                "min_baseline_observations": ps.REL_VOLUME_MIN_BASELINE,
+                "why": "self-relative, so it cannot just select large caps",
+            },
+            ps.COMPONENT_GAP_ATR: {
+                "formula": "abs(gap_pct) / atr_pct_14",
+                "threshold": ps.GAP_ATR_THRESHOLD,
+                "min_atr_sessions": ps.ATR_MIN_SESSIONS,
+                "atr_target_sessions": ps.ATR_TARGET_SESSIONS,
+                "why": "the gap measured in the name's own daily range, not in absolute %",
+            },
+            ps.COMPONENT_BOOK_IMBALANCE: {
+                "formula": "(total_buy_qty - total_sell_qty) / (total_buy_qty + total_sell_qty)",
+                "formula_scored": "(raw - session median raw) / (1.4826 * session MAD)",
+                "threshold_abs_z": ps.BOOK_IMBALANCE_Z_THRESHOLD,
+                "min_peers": ps.BOOK_IMBALANCE_MIN_PEERS,
+                "why": (
+                    "the RAW level carries a market-wide bias — 269 of 288 measured "
+                    "prints are sell-skewed and every session's mean sits near -0.4 — "
+                    "so only the deviation from the session's own cross-section is "
+                    "name-specific. Robust (median/MAD) so a few extreme books cannot "
+                    "move the reference."
+                ),
+            },
+        },
+        "applicable_components_by_kind": {
+            k: list(v) for k, v in ps.APPLICABLE_COMPONENTS.items()
+        },
+        "states": {
+            "active": "at least one component triggered",
+            "quiet": "no component triggered AND at least half the applicable components were computable",
+            "unknown": "no auction print, or too little evidence to make a claim",
+        },
+        "excluded_from_score": {
+            "tick_count": (
+                "a WS capture artifact (how many frames arrived), not market "
+                "participation — stored for provenance only"
+            )
+        },
+        "mcx_excluded_reason": ps.MCX_EXCLUSION_REASON,
+        "thresholds_swept": False,
+        "thresholds_note": (
+            "a-priori structural points; no forward return, P&L or other outcome "
+            "variable was consulted in choosing them, and there is no tuning loop"
+        ),
+    }

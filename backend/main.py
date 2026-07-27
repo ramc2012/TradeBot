@@ -117,6 +117,21 @@ async def lifespan(app: FastAPI):
 
     research_sync_task: asyncio.Task | None = None
     loop_lag_task: asyncio.Task | None = None
+    sdk_log_guard_task: asyncio.Task | None = None
+
+    # Third-party SDK log cap (2026-07-27). fyers_apiv3 installs its own,
+    # never-rotated FileHandler; with log_path="" it wrote into the /app bind
+    # mount and reached 1.33 GB on a host volume that is 98% full. The guard
+    # truncates in place (O_APPEND-verified) keeping the newest few MB.
+    try:
+        from core.sdk_log_guard import run_sdk_log_guard
+
+        sdk_log_guard_task = asyncio.create_task(
+            run_sdk_log_guard(), name="sdk-log-guard"
+        )
+        logger.info("✓ SDK log guard started")
+    except Exception as e:
+        logger.warning(f"SDK log guard start skipped: {e}")
 
     # Event-loop lag monitor (WS-0.2): pure observation, started first so it
     # captures startup contention too. Cancelled on shutdown below.
@@ -420,6 +435,12 @@ async def lifespan(app: FastAPI):
         loop_lag_task.cancel()
         try:
             await loop_lag_task
+        except asyncio.CancelledError:
+            pass
+    if sdk_log_guard_task is not None:
+        sdk_log_guard_task.cancel()
+        try:
+            await sdk_log_guard_task
         except asyncio.CancelledError:
             pass
     # B4 (gap-audit): cancel the market-data background loops too — previously they

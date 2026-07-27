@@ -163,6 +163,29 @@ def get_registry() -> tuple[LaneSpec, ...]:
             ),
         ),
         LaneSpec(
+            key="preopen_spot_snapshot",
+            label="Pre-open Spot Snapshot + Activeness",
+            kind="scheduler-runner",
+            execution_mode="none",
+            status_source="supervisor",
+            cadence_seconds=300.0,
+            broker_profile=None,
+            exchange_session=nse,
+            enabled_flag_name="PREOPEN_SPOT_SNAPSHOT_ENABLED",
+            runner_keys=("preopen_spot_snapshot",),
+            status_endpoint="/api/market/preopen/coverage",
+            notes=(
+                "Owner spec 2026-07-27. Fires 09:12-09:30 IST, AFTER the NSE cash "
+                "call auction matches, and reads only ticks already committed to "
+                "Postgres — no broker REST, no competition with the 09:04-09:14 "
+                "MACD ladder build. Writes one bounded row per (session, underlying) "
+                "to preopen_spot_snapshots with the equilibrium print, matched "
+                "quantity, gap vs prior close and an activeness verdict. MCX is "
+                "excluded (no call auction exists). Observation only — takes no "
+                "position and touches no strategy math."
+            ),
+        ),
+        LaneSpec(
             key="auction_intelligence",
             audit_lane_key="auction_intelligence",
             label="Auction Intelligence Paper Cycle",
@@ -586,7 +609,10 @@ def supervisor_runner_keys() -> set[str]:
 # variants and are untouched.
 # 2026-07-20: 31 -> 32 with macd_preopen_watchlist, the pre-open expiry +
 # frozen-ATM-ladder runner the two surviving MACD lanes share.
-EXPECTED_LANE_TOTAL = 32
+# 2026-07-27: 32 -> 33 with preopen_spot_snapshot, the post-auction pre-open
+# spot + activeness recorder (owner spec). Observation only, default OFF, and
+# it makes no broker call.
+EXPECTED_LANE_TOTAL = 33
 
 
 def registry_counts() -> dict[str, int]:

@@ -87,6 +87,7 @@ def test_planned_runner_inventory_matches_supervisor(monkeypatch):
         "market_intelligence",
         "stock_spot_sweep",
         "macd_preopen_watchlist",
+        "preopen_spot_snapshot",
     }
 
 
@@ -99,7 +100,10 @@ def test_supervisor_runner_partition_by_laneset(monkeypatch):
     # 19 = 18 + macd_preopen_watchlist (pre-open expiry + frozen ATM ladder,
     # 2026-07-20). It is a CORE-plane data runner: it takes no position, it
     # builds the instrument list the two MACD lanes then read.
-    assert len(all_keys) == 19
+    # 20 = 19 + preopen_spot_snapshot (pre-open spot record + activeness flag,
+    # 2026-07-27). Also CORE-plane data: it takes no position and makes no
+    # broker call — it reads ticks already committed to Postgres.
+    assert len(all_keys) == 20
 
     monkeypatch.setattr(settings, "LANESET", "core", raising=False)
     core_keys = set(MarketHoursPaperSupervisor(enabled=False)._runners)
@@ -109,6 +113,7 @@ def test_supervisor_runner_partition_by_laneset(monkeypatch):
         "market_intelligence",
         "stock_spot_sweep",
         "macd_preopen_watchlist",
+        "preopen_spot_snapshot",
     }
 
     monkeypatch.setattr(settings, "LANESET", "strategies", raising=False)

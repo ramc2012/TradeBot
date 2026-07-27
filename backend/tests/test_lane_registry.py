@@ -221,7 +221,7 @@ def test_registry_count_is_internally_consistent() -> None:
     # Buckets partition the registry → they sum to the total exactly (proves no
     # entry counted twice).
     assert counts["supervisor"] + counts["own_loop"] + counts["product_daemon"] == counts["total"]
-    assert counts["total"] == len(specs) == EXPECTED_LANE_TOTAL == 32
+    assert counts["total"] == len(specs) == EXPECTED_LANE_TOTAL == 33
     # No lane key is ALSO another lane's runner_key (no two-bucket duplicate).
     assert counts["key_runnerkey_collisions"] == 0
 
