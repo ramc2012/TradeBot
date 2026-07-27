@@ -1100,7 +1100,14 @@ class SectorRotationTracker:
                 )
             data = response.json().get("data", [])
             for item in data:
-                if item.get("index") == "India VIX":
+                # NSE returns this row as "INDIA VIX" (upper case). An exact
+                # case-sensitive compare against "India VIX" never matched, so
+                # this fell through to price=0 for the lifetime of the repo —
+                # which made institutional_convergence NSE's `vix_available`
+                # gate permanently False and its gate conjunction unsatisfiable.
+                # Compare case-insensitively so a casing change cannot silently
+                # brick a downstream lane again.
+                if str(item.get("index", "")).strip().upper() == "INDIA VIX":
                     return {
                         "price": item.get("last", 0),
                         "change_pct": item.get("percentChange", 0),
