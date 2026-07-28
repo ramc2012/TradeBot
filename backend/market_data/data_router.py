@@ -33,6 +33,24 @@ IST = timezone(timedelta(hours=5, minutes=30))
 LATEST_TICK_KEY_PREFIX = "tick:"
 LATEST_TICK_TTL_SECONDS = 300
 
+# Plane-split subscription forwarding (2026-07-28). With LANESET=strategies the
+# broker WS lives ONLY in the core plane, but the strategy lanes still call
+# subscribe()/add_subscriptions() with the contracts they need — and before the
+# split those calls were what put the symbols on the broker stream. Every
+# downstream feed is subscription-driven (market_ticks rows via
+# live_candle_store, tick:* last-value keys, ticks:* pub/sub), so silently
+# dropping the calls starved flow-driven lanes: institutional-convergence read
+# ZERO ticks all of 2026-07-28 (footprint source='insufficient_ticks',
+# tick_age_ms=None) because nothing in the core plane ever subscribed its MCX
+# contracts. The gated subscribe() now forwards wanted symbols to this Redis
+# hash (symbol -> unix ts) and the core plane's feed watchdog absorbs fresh
+# entries every ~30s. Entries older than the freshness window age out, so a
+# contract stops being subscribed ~30 min after the last lane cycle that asked
+# for it (e.g. after an expiry rollover).
+WANTED_SYMBOLS_KEY = "laneset:wanted_symbols"
+WANTED_SYMBOLS_FRESH_SECONDS = 1800.0
+WANTED_SYMBOLS_TTL_SECONDS = 3600
+
 # Redis P0 (2026-07-18): tick → Redis fan-out is COALESCED. The old path spawned
 # one asyncio task per tick, each doing a publish + SET on its own pooled
 # connection; during event-loop stalls thousands of tasks piled up and demanded
@@ -205,8 +223,10 @@ class DataRouter:
                 self._laneset_ws_gate_logged = True
                 logger.info(
                     "[DataRouter] LANESET=strategies — broker WS subscribe suppressed; "
-                    "this plane reads ticks/marks from Redis tick:* / quotes:bus"
+                    f"wanted symbols forward to the core plane via Redis {WANTED_SYMBOLS_KEY}; "
+                    "ticks/marks read back from Redis tick:* / market_ticks"
                 )
+            await self._forward_wanted_symbols(symbols)
             return
         async with self._subscription_lock:
             await self._subscribe_unlocked(symbols)
@@ -366,6 +386,76 @@ class DataRouter:
         logger.info(f"[DataRouter] Removed {len(drop)} subscriptions")
         return len(drop)
 
+    # ── Plane-split subscription forwarding ──────────────────────────────────
+
+    async def _forward_wanted_symbols(self, symbols: List[str]) -> None:
+        """LANESET=strategies: publish this plane's wanted symbols to Redis.
+
+        Called from the gated subscribe() with whatever the lane asked for.
+        Sticky extras ride along because add_subscriptions() pins new symbols
+        there BEFORE routing through subscribe(), so an add-path call always
+        reaches the hash even though the primary list it passes may not
+        contain the new names. Best-effort: a Redis fault must never break a
+        lane cycle.
+        """
+        wanted = [to_app_symbol(s) for s in symbols if s]
+        wanted.extend(self._sticky_extras)
+        wanted = [s for s in dict.fromkeys(wanted) if s]
+        if not wanted:
+            return
+        try:
+            redis = await get_redis()
+            now = datetime.now(timezone.utc).timestamp()
+            pipe = redis.pipeline(transaction=False)
+            pipe.hset(WANTED_SYMBOLS_KEY, mapping={s: now for s in wanted})
+            pipe.expire(WANTED_SYMBOLS_KEY, WANTED_SYMBOLS_TTL_SECONDS)
+            await pipe.execute()
+        except Exception as exc:  # noqa: BLE001
+            logger.debug(f"[DataRouter] wanted-symbol forward failed: {exc}")
+
+    async def _absorb_forwarded_symbols(self) -> None:
+        """Core plane: subscribe symbols the strategy plane asked for.
+
+        Runs from the required-feed watchdog (~30s). Reads WANTED_SYMBOLS_KEY
+        (symbol -> unix ts), deletes entries older than the freshness window
+        (contract rolled / lane disabled), and add_subscriptions() the fresh
+        ones not already streaming — which also pins them sticky so a broker
+        auth resync cannot drop them.
+        """
+        try:
+            redis = await get_redis()
+            raw = await redis.hgetall(WANTED_SYMBOLS_KEY)
+        except Exception as exc:  # noqa: BLE001
+            logger.debug(f"[DataRouter] wanted-symbol read failed: {exc}")
+            return
+        if not raw:
+            return
+        now = datetime.now(timezone.utc).timestamp()
+        fresh: List[str] = []
+        stale: List[str] = []
+        for sym, ts in raw.items():
+            name = sym.decode() if isinstance(sym, bytes) else str(sym)
+            try:
+                is_fresh = (now - float(ts)) <= WANTED_SYMBOLS_FRESH_SECONDS
+            except (TypeError, ValueError):
+                is_fresh = False
+            (fresh if is_fresh else stale).append(name)
+        if stale:
+            try:
+                await redis.hdel(WANTED_SYMBOLS_KEY, *stale)
+            except Exception:  # noqa: BLE001
+                pass
+        new = [s for s in fresh if s not in self._subscribed_symbols]
+        if not new:
+            return
+        added = await self.add_subscriptions(new)
+        if added:
+            logger.info(
+                f"[DataRouter] Watchdog absorbed {added} strategy-plane symbol(s) "
+                f"from {WANTED_SYMBOLS_KEY}: {', '.join(sorted(new)[:8])}"
+                + ("…" if len(new) > 8 else "")
+            )
+
     # ── Required-feed watchdog ───────────────────────────────────────────────
 
     @staticmethod
@@ -472,6 +562,9 @@ class DataRouter:
                         logger.warning(
                             "[DataRouter] Watchdog re-subscribed missing required index symbols."
                         )
+                    # Plane split: absorb the strategy plane's wanted symbols
+                    # (its subscribe() is gated and forwards here via Redis).
+                    await self._absorb_forwarded_symbols()
                     # During market hours, force a reconnect if required
                     # streams have gone stale even though they're "subscribed".
                     if self._is_index_market_open() and self._ws_client is not None:
