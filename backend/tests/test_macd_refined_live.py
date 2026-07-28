@@ -190,3 +190,51 @@ def test_live_cycle_times_out_one_name_without_losing_full_universe_cycle(
 
     assert list(result["fetched"]) == ["FAST"]
     assert result["failures"] == {"SLOW": "name scan timed out after 0.03s"}
+
+
+def test_queued_names_are_not_starved_by_the_per_name_timeout(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """Regression: the per-name timeout must not consume time spent QUEUED.
+
+    Every name-task is created up-front, so with `max_concurrent_names` slots
+    the rest sit on the semaphore.  When the timeout wrapped the semaphore
+    acquisition, a queued name's clock ran while it held no slot, so names past
+    roughly `slots * (timeout / per_name_work)` were reported as timed out
+    having done no work — in production 203-215 of a 216-name universe failed
+    every cycle and the same first ~30 names won every time.
+
+    Here 8 names each need 0.10s of work through a single slot (0.80s serial)
+    while the per-name timeout is 0.30s.  If the timeout covered queue time,
+    every name after the third would fail; all 8 must succeed.
+    """
+    engine = _engine(tmp_path)
+    engine.config["live"]["name_timeout_seconds"] = 0.30
+    engine.config["live"]["max_concurrent_names"] = 1
+
+    names = [f"NAME{i}" for i in range(8)]
+
+    class _Adapter:
+        async def get_option_chain(self, _symbol: str, _expiry: str):
+            await asyncio.sleep(0.10)   # real work, comfortably inside 0.30s
+            return object()
+
+    async def _adapter():
+        return _Adapter()
+
+    async def _universe():
+        return list(names)
+
+    async def _evaluate(_adapter, _underlying, _expiries, _diag, _signal_updates):
+        return []
+
+    monkeypatch.setattr(engine, "_adapter", _adapter)
+    monkeypatch.setattr(engine, "_resolve_universe", _universe)
+    monkeypatch.setattr(engine, "resolve_expiries", lambda *_a, **_k: [date(2026, 7, 28)])
+    monkeypatch.setattr(engine, "_chain_to_rows", lambda *_a, **_k: ([], []))
+    monkeypatch.setattr(engine, "_evaluate", _evaluate)
+
+    result = asyncio.run(engine.run_cycle(allow_entries=False))
+
+    assert result["failures"] == {}, f"queued names starved: {result['failures']}"
+    assert sorted(result["fetched"]) == sorted(names)

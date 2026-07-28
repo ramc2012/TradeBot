@@ -422,48 +422,68 @@ class MacdRefinedLiveEngine:
         )
 
         async def _process_underlying(underlying: str) -> dict[str, Any]:
-            async with semaphore:
-                expiries = self.resolve_expiries(underlying, today)
-                fy = self._underlying_symbol(underlying)
-                persisted_here = 0
-                for kind, exp in zip(("current", "next"), expiries):
-                    chain = await asyncio.wait_for(
-                        adapter.get_option_chain(fy, exp.isoformat()),
-                        timeout=float(self.config["live"].get("broker_timeout_seconds", 12.0)),
-                    )
-                    rows, _snaps = self._chain_to_rows(underlying, exp, kind, chain, strikes_side)
-                    persisted_here += self._persist_snapshots(underlying, rows)
-                # Generate causal proposals (premium-MACD seeded from broker
-                # history when live snapshots are still thin). Per-name diag is
-                # returned to the caller and folded into the aggregate funnel.
-                name_diag: dict[str, int] = {}
-                signal_updates: dict[str, str] = {}
-                props = await self._evaluate(
-                    adapter, underlying, expiries, name_diag, signal_updates
+            # NOTE: the concurrency semaphore is acquired by `_safe_process`
+            # BEFORE the per-name timeout starts — see the comment there.
+            expiries = self.resolve_expiries(underlying, today)
+            fy = self._underlying_symbol(underlying)
+            persisted_here = 0
+            for kind, exp in zip(("current", "next"), expiries):
+                chain = await asyncio.wait_for(
+                    adapter.get_option_chain(fy, exp.isoformat()),
+                    timeout=float(self.config["live"].get("broker_timeout_seconds", 12.0)),
                 )
-                return {
-                    "underlying": underlying,
-                    "expiries": [e.isoformat() for e in expiries],
-                    "persisted_rows": persisted_here,
-                    "proposals": props,
-                    "diag": name_diag,
-                    "signal_updates": signal_updates,
-                }
+                rows, _snaps = self._chain_to_rows(underlying, exp, kind, chain, strikes_side)
+                persisted_here += self._persist_snapshots(underlying, rows)
+            # Generate causal proposals (premium-MACD seeded from broker
+            # history when live snapshots are still thin). Per-name diag is
+            # returned to the caller and folded into the aggregate funnel.
+            name_diag: dict[str, int] = {}
+            signal_updates: dict[str, str] = {}
+            props = await self._evaluate(
+                adapter, underlying, expiries, name_diag, signal_updates
+            )
+            return {
+                "underlying": underlying,
+                "expiries": [e.isoformat() for e in expiries],
+                "persisted_rows": persisted_here,
+                "proposals": props,
+                "diag": name_diag,
+                "signal_updates": signal_updates,
+            }
 
         async def _safe_process(underlying: str) -> dict[str, Any]:
-            try:
-                return await asyncio.wait_for(
-                    _process_underlying(underlying),
-                    timeout=float(self.config["live"].get("name_timeout_seconds", 75.0)),
-                )
-            except asyncio.TimeoutError:
-                timeout_s = float(self.config["live"].get("name_timeout_seconds", 75.0))
-                return {
-                    "underlying": underlying,
-                    "error": f"name scan timed out after {timeout_s:g}s",
-                }
-            except Exception as exc:  # noqa: BLE001
-                return {"underlying": underlying, "error": str(exc) or type(exc).__name__}
+            # The semaphore MUST be acquired outside `wait_for`, so the
+            # per-name timeout measures actual work and not time spent queued.
+            #
+            # Every task is created up-front (see `tasks = [...]` below), so all
+            # ~216 names start running immediately and then block on this
+            # semaphore. When the timeout wrapped the semaphore acquisition, a
+            # queued name's 75s clock ran while it held no slot: with
+            # max_concurrent_names=6 and ~12-15s of real work per name, only the
+            # ~30 names that got a slot within 75s ever completed, and names
+            # 31..216 were reported as "timed out" having done no work at all.
+            # Because the universe order is deterministic, the SAME first ~30
+            # names won every cycle and the tail was starved permanently —
+            # failure_count 203-215/216 every cycle since 2026-07-21.
+            #
+            # Acquiring first makes the cycle a proper bounded queue: total
+            # runtime ~= ceil(216/6) * per_name  (~470s), inside the 1140s
+            # supervisor budget. Trading behaviour is unchanged — this only
+            # governs how many names get scanned, not what any signal decides.
+            async with semaphore:
+                try:
+                    return await asyncio.wait_for(
+                        _process_underlying(underlying),
+                        timeout=float(self.config["live"].get("name_timeout_seconds", 75.0)),
+                    )
+                except asyncio.TimeoutError:
+                    timeout_s = float(self.config["live"].get("name_timeout_seconds", 75.0))
+                    return {
+                        "underlying": underlying,
+                        "error": f"name scan timed out after {timeout_s:g}s",
+                    }
+                except Exception as exc:  # noqa: BLE001
+                    return {"underlying": underlying, "error": str(exc) or type(exc).__name__}
 
         # CLASS_BULK: the full-universe chain sweep is the single biggest bulk
         # consumer of the shared broker budget. Hard-capped at 25% of every
