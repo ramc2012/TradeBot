@@ -9,6 +9,7 @@ from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, Request, Response, WebSocket
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.middleware.gzip import GZipMiddleware
 from fastapi.responses import JSONResponse
 from loguru import logger
 
@@ -538,6 +539,21 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+# ── Response compression ─────────────────────────────────────────────────────
+# The API serves large JSON status/book payloads (a books response measured
+# 3.17 MB, automation-status 768 KB - 1.46 MB) and previously never negotiated
+# compression: identical bytes and no content-encoding header even when the
+# client sent `Accept-Encoding: gzip`. These bodies compress 6.6-13x.
+#
+# Starlette applies middleware in REVERSE registration order, so registering
+# GZipMiddleware AFTER CORSMiddleware puts it OUTSIDE CORS: the CORS headers
+# are added first and then the whole response is compressed, which is the
+# correct nesting (compressing after CORS, never compressing the preflight
+# handshake away). HTTP-only — WebSocket scopes pass through untouched, so
+# /ws/* streams are unaffected. Only compresses when the client advertises
+# gzip, so non-gzip clients see byte-identical responses to before.
+app.add_middleware(GZipMiddleware, minimum_size=1024)
 
 # ── REST Routers ─────────────────────────────────────────────────────────────
 app.include_router(auth.router)

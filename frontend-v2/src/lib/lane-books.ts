@@ -358,11 +358,11 @@ export const LANE_BOOKS: Record<BookKey, LaneBook> = {
         "/api/institutional-convergence/status",
       ],
       note:
-        "The book exists, is enabled, has paper execution on, and is EMPTY. Its order_log, closed_positions and open_positions are all [] since inception.",
+        "A separate file from the MCX book — the two never share capital and are never summed here.",
     },
     orderLayer: "fill_events",
     orderLayerStatement:
-      "This lane keeps a real fill-event log with the same shape as its MCX sibling — and it is EMPTY. Zero orders, zero trades, zero positions since inception. That is a measured zero from a running lane, not missing data.",
+      "This lane keeps a real append-only FILL-EVENT log with the same shape as its MCX sibling: open, close and partial_close records with price, lots, lot size, reason and position id. It is not a broker order book — paper fills are instant, so no working, pending or rejected state ever exists.",
     fields: {
       fees: { state: "unavailable", reason: "This book records no brokerage, taxes or transaction cost." },
       slippage: { state: "unavailable", reason: "No slippage is modelled or recorded on this book." },
@@ -370,7 +370,7 @@ export const LANE_BOOKS: Record<BookKey, LaneBook> = {
         state: "available",
         note: "The engine records initial_stop / stop / target1 / target2 on any position it opens.",
       },
-      markClock: { state: "partial", note: "Open rows would carry current_price and updated_at; there are none." },
+      markClock: { state: "partial", note: "Open rows carry current_price and updated_at; there is no separate mark clock." },
       dte: {
         state: "unavailable",
         reason: "Index futures positions carry a contract label, not an expiry date, so DTE cannot be computed.",
@@ -380,11 +380,17 @@ export const LANE_BOOKS: Record<BookKey, LaneBook> = {
       orderStatus: NO_BROKER_ORDER_STATUS,
     },
     day: {
-      mode: "never_traded",
-      note: "daily_pnl[] is empty because the lane has never opened a position. There is no day figure and no lifetime figure to split.",
+      mode: "derived_from_closes",
+      note: "This book serves no dated daily series, so the day figure is derived by bucketing closed_positions on closed_at in IST. Lifetime realized comes from the book's own realized_pnl.",
     },
-    neverFired:
-      "The lane is enabled with paper execution on and its cycles are running, but no setup has ever cleared the gate ladder — actionable_count has been 0 every cycle. Capital is untouched at its declared initial capital. The gate ladder below is the honest answer to 'why nothing fired'.",
+    // NOT a never-fired lane. This previously asserted the lane had never
+    // opened a position and that "capital is untouched at its declared initial
+    // capital" — while the live book carried 26 closed trades, realized
+    // -Rs 23,71,330 and equity of -Rs 13,71,330 against Rs 10,00,000 initial.
+    // A books page must never hardcode a claim about its own contents; the
+    // emptiness state has to come from the data. Left null so the page renders
+    // whatever the book actually holds.
+    neverFired: null,
   },
 
   institutional_convergence_commodity: {

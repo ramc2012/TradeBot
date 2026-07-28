@@ -235,16 +235,23 @@ test("the exit plan is only claimed where stops and targets are actually stored"
   assert.match(unavailableReason(bookField("directional_options", "exitPlan"))!, /RULE/);
 });
 
-test("the never-fired lane is declared as measured zero, not as missing", () => {
-  const ic = LANE_BOOKS.institutional_convergence;
-  assert.ok(ic.neverFired && ic.neverFired.length > 60);
-  assert.match(ic.neverFired, /has ever cleared|never/i);
-  assert.match(ic.neverFired, /actionable_count has been 0/);
-  assert.equal(ic.day.mode, "never_traded");
-  // Every OTHER book has traded and must not carry the flag.
+test("no book hardcodes a claim about its own contents", () => {
+  // Regression (2026-07-28). institutional_convergence used to declare that it
+  // had never opened a position and that "capital is untouched at its declared
+  // initial capital". The live book at the time held 26 closed trades,
+  // realized -Rs 23,71,330 and equity of -Rs 13,71,330 against Rs 10,00,000
+  // initial — the page asserted the exact opposite of the truth, and this test
+  // pinned the lie in place.
+  //
+  // Emptiness is a property of the DATA, not of the declaration. No book may
+  // carry a static neverFired string; a lane that genuinely has not traded
+  // renders that from its own rows.
   for (const key of BOOK_KEYS) {
-    if (key === "institutional_convergence") continue;
-    assert.equal(LANE_BOOKS[key].neverFired, null, `${key} must not claim never-fired`);
+    assert.equal(
+      LANE_BOOKS[key].neverFired,
+      null,
+      `${key} must not hardcode a never-fired claim — derive it from the data`,
+    );
   }
 });
 
@@ -324,9 +331,16 @@ test("a null P&L is never summed into the day figure as a zero", () => {
 
 test("dayFigureFor dispatches on the DECLARED day source, not on what is passed", () => {
   const monday = Date.UTC(2026, 6, 27, 8, 0, 0);
-  // The never-traded lane refuses even when handed a series.
-  const never = dayFigureFor("institutional_convergence", { daily: [{ date: "2026-07-27", pnl: 9 }] }, monday);
-  assert.equal(never.state, "never_traded");
+  // institutional_convergence is declared derived_from_closes (it serves no
+  // dated daily series), so a `daily` series it should not have is IGNORED and
+  // the figure comes from its closes.
+  const fromCloses = dayFigureFor(
+    "institutional_convergence",
+    { closed: [{ closedAt: "2026-07-27T04:00:00", pnl: -11 }], daily: [{ date: "2026-07-27", pnl: 9 }] },
+    monday,
+  );
+  assert.equal(fromCloses.state, "derived");
+  assert.equal(fromCloses.state === "derived" ? fromCloses.realized : null, -11);
   // A derive-from-closes lane ignores a series it should not have.
   const derived = dayFigureFor(
     "directional_options",
