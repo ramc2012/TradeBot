@@ -141,6 +141,13 @@ class MacdRefinedLiveEngine:
         self._signal_state_path = self.tracking_root.parent / "signal_state.json"
         self._signal_state: dict[str, str] = self._load_signal_state()
         self._fyers_fb: tuple | None = None  # (token, adapter) fallback cache
+        # Rotating start offset into the universe. A full 216-name sweep cannot
+        # fit in one cycle (see run_cycle), so the cycle always covered the same
+        # leading names and starved the tail forever. The cursor makes each
+        # cycle resume where the last one stopped. Persisted so a restart does
+        # not reset every lane back to the same first names.
+        self._universe_cursor_path = self.tracking_root.parent / "universe_cursor.json"
+        self._universe_cursor: int = self._load_universe_cursor()
 
     def _load_signal_state(self) -> dict[str, str]:
         try:
@@ -165,6 +172,22 @@ class MacdRefinedLiveEngine:
             tmp = self._signal_state_path.with_suffix(".json.tmp")
             tmp.write_text(json.dumps(self._signal_state, default=str))
             tmp.replace(self._signal_state_path)
+        except Exception:
+            pass
+
+    def _load_universe_cursor(self) -> int:
+        try:
+            if self._universe_cursor_path.exists():
+                return max(0, int(json.loads(self._universe_cursor_path.read_text()).get("cursor", 0)))
+        except Exception:
+            pass
+        return 0
+
+    def _save_universe_cursor(self) -> None:
+        try:
+            tmp = self._universe_cursor_path.with_suffix(".json.tmp")
+            tmp.write_text(json.dumps({"cursor": int(self._universe_cursor)}))
+            tmp.replace(self._universe_cursor_path)
         except Exception:
             pass
 
@@ -416,10 +439,30 @@ class MacdRefinedLiveEngine:
             for position in open_positions
             if position.get("underlying")
         }
-        universe = sorted(
-            universe,
-            key=lambda name: (str(name).upper() not in open_underlyings, universe.index(name)),
-        )
+
+        # ROTATE the discovery order across cycles.
+        #
+        # A full sweep cannot fit in one cycle. Fyers allows 200 REST req/min
+        # shared across the whole app and CLASS_BULK (this sweep) is capped at
+        # 25% of every window, so this lane gets ~50 req/min. A name costs ~4
+        # calls (current+next chain, then CE/PE premium history), so 216 names
+        # is ~864 calls ~= 17 minutes of budget — longer than the per-name
+        # timeout and pressing against the supervisor's cycle budget.
+        #
+        # The order used to be identical every cycle, so the same leading names
+        # consumed the whole budget and names past them were NEVER scanned —
+        # failure_count sat at 203-215 of 216 indefinitely and only 5-8 distinct
+        # underlyings were evaluated per day. Resuming from a persisted cursor
+        # spreads coverage: each cycle picks up where the last stopped, so the
+        # entire universe is covered over consecutive cycles instead of never.
+        #
+        # Names holding an OPEN POSITION are still pinned to the front,
+        # unrotated — risk management must never wait for its turn. `sorted` is
+        # stable, so the rotated order is preserved inside each group.
+        if universe:
+            start = self._universe_cursor % len(universe)
+            universe = universe[start:] + universe[:start]
+        universe = sorted(universe, key=lambda name: str(name).upper() not in open_underlyings)
 
         async def _process_underlying(underlying: str) -> dict[str, Any]:
             # NOTE: the concurrency semaphore is acquired by `_safe_process`
@@ -543,6 +586,20 @@ class MacdRefinedLiveEngine:
                 if not task.done():
                     task.cancel()
             await asyncio.gather(*tasks, return_exceptions=True)
+
+        # Advance the rotation by how many names this cycle actually COMPLETED,
+        # so the next cycle resumes at the first name this one could not reach.
+        # Advancing by completions (not by the whole universe) means no name is
+        # skipped: the tail this cycle starved becomes the head of the next one.
+        # Guard with max(...,1) so a fully-failing cycle still moves and cannot
+        # wedge the rotation on one bad leading name.
+        if universe:
+            covered = max(len(status["fetched"]), 1)
+            self._universe_cursor = (self._universe_cursor + covered) % len(universe)
+            self._save_universe_cursor()
+            status["universe_cursor"] = self._universe_cursor
+            status["universe_covered"] = len(status["fetched"])
+            status["universe_size"] = len(universe)
 
         status["paper_syncs"] = paper_syncs
         status["paper_summary"] = status.get("paper_summary") or self.paper.capital_status()

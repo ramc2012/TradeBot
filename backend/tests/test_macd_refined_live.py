@@ -238,3 +238,61 @@ def test_queued_names_are_not_starved_by_the_per_name_timeout(
 
     assert result["failures"] == {}, f"queued names starved: {result['failures']}"
     assert sorted(result["fetched"]) == sorted(names)
+
+
+def test_universe_rotates_so_the_tail_is_not_starved(tmp_path: Path, monkeypatch) -> None:
+    """Regression: consecutive cycles must not re-scan the same leading names.
+
+    A full sweep does not fit in one cycle (Fyers 200 req/min shared, CLASS_BULK
+    capped at 25% -> ~50 req/min; ~4 calls per name over 216 names). The order
+    used to be identical every cycle, so the leading names consumed the whole
+    budget and the tail was NEVER reached — failure_count sat at 203-215/216.
+
+    Here only 2 of 6 names can be served per cycle. Across three cycles the
+    lane must cover DIFFERENT names and eventually all of them.
+    """
+    engine = _engine(tmp_path)
+    engine.config["live"]["max_concurrent_names"] = 1
+    names = [f"N{i}" for i in range(6)]
+    served: list[str] = []
+    budget = {"left": 0}
+
+    class _Adapter:
+        async def get_option_chain(self, symbol: str, _expiry: str):
+            if budget["left"] <= 0:
+                await asyncio.sleep(5)          # starved: will hit the name timeout
+            budget["left"] -= 1
+            return object()
+
+    async def _adapter():
+        return _Adapter()
+
+    async def _universe():
+        return list(names)
+
+    async def _evaluate(_a, underlying, _e, _d, _s):
+        served.append(underlying)
+        return []
+
+    monkeypatch.setattr(engine, "_adapter", _adapter)
+    monkeypatch.setattr(engine, "_resolve_universe", _universe)
+    monkeypatch.setattr(engine, "resolve_expiries", lambda *_a, **_k: [date(2026, 7, 28)])
+    monkeypatch.setattr(engine, "_chain_to_rows", lambda *_a, **_k: ([], []))
+    monkeypatch.setattr(engine, "_evaluate", _evaluate)
+    engine.config["live"]["name_timeout_seconds"] = 0.25
+
+    covered_per_cycle = []
+    for _ in range(3):
+        budget["left"] = 4                      # 4 chain calls = 2 names/cycle
+        served.clear()
+        result = asyncio.run(engine.run_cycle(allow_entries=False))
+        covered_per_cycle.append(sorted(result["fetched"]))
+
+    # Cycle 2 must not repeat cycle 1 — that was the starvation bug.
+    assert covered_per_cycle[0] != covered_per_cycle[1], (
+        f"universe did not rotate: {covered_per_cycle}"
+    )
+    seen = {n for cycle in covered_per_cycle for n in cycle}
+    assert len(seen) > len(covered_per_cycle[0]), (
+        f"rotation covered no new names across cycles: {covered_per_cycle}"
+    )
