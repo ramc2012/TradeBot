@@ -54,8 +54,16 @@ async def paper_proposal(
 async def paper_journal(
     symbol: str | None = Query(None),
     limit: int = Query(50, ge=1, le=200),
+    offset: int = Query(0, ge=0),
 ) -> dict[str, object]:
-    return await _service.paper_journal(symbol=symbol, limit=limit)
+    """Per-cycle DECISION journal (proposals, approvals, declines, cooldown
+    skips) — paginated. Envelope carries total/offset/limit/has_more.
+
+    Calls the paper store directly rather than `_service.paper_journal`, whose
+    signature carries no offset (service.py is outside this change's blast
+    radius); the store method is the same one the service wrapper delegates to.
+    """
+    return await _service.paper.list_journal(symbol=symbol, limit=limit, offset=offset)
 
 
 @router.get("/paper-positions")
@@ -63,8 +71,47 @@ async def paper_positions(
     symbol: str | None = Query(None),
     status: str = Query("all"),
     limit: int = Query(50, ge=1, le=200),
+    offset: int = Query(0, ge=0),
 ) -> dict[str, object]:
-    return await _service.paper_positions(symbol=symbol, status=status, limit=limit)
+    """Position book (open + closed), paginated.
+
+    308 closed rows exist against a le=200 page cap, so before `offset` every
+    row past the first page was unreachable. `summary` is unchanged — it is
+    still computed over the whole filtered book, not the page.
+    """
+    return await _service.paper.list_positions(
+        symbol=symbol, status=status, limit=limit, offset=offset
+    )
+
+
+@router.get("/orders")
+async def orders(
+    limit: int = Query(500, ge=1, le=1000),
+    offset: int = Query(0, ge=0),
+) -> dict[str, object]:
+    """Order book — HONESTLY EMPTY.
+
+    This lane records no order-fill events (no placement/ack/fill state
+    machine, no order ids, no partials). The response says so via
+    `order_layer: "none"` plus a note naming the surfaces that ARE real, rather
+    than synthesising two fake orders per position out of the trade book.
+    """
+    return await _service.paper.list_orders(limit=limit, offset=offset)
+
+
+@router.get("/trades")
+async def trades(
+    symbol: str | None = Query(None),
+    limit: int = Query(500, ge=1, le=1000),
+    offset: int = Query(0, ge=0),
+) -> dict[str, object]:
+    """Closed-trade book as flat CSV-able JSON rows, paginated.
+
+    Same contract as `/api/institutional-convergence/trades`: rows are derived
+    from `closed_positions`, with every money field copied verbatim off the
+    stored position (no P&L is recomputed here).
+    """
+    return await _service.paper.list_trades(symbol=symbol, limit=limit, offset=offset)
 
 
 @router.get("/paper-summary")

@@ -117,6 +117,7 @@ class PaperPositionBook:
         symbol: str | None = None,
         status: str = "all",
         limit: int = 50,
+        offset: int = 0,
     ) -> dict[str, Any]:
         state = await self._load_state()
         normalized = _normalize_underlying(symbol)
@@ -130,8 +131,13 @@ class PaperPositionBook:
         elif status == "closed":
             open_positions = []
 
-        open_positions = open_positions[:limit]
-        closed_positions = closed_positions[:limit]
+        # Page each book independently, then report a combined envelope. offset=0
+        # reproduces the historical (unpaged) response byte-for-byte.
+        offset = max(0, int(offset or 0))
+        open_total = len(open_positions)
+        closed_total = len(closed_positions)
+        open_positions = open_positions[offset : offset + limit]
+        closed_positions = closed_positions[offset : offset + limit]
 
         return {
             "symbol_filter": normalized or None,
@@ -139,6 +145,120 @@ class PaperPositionBook:
             "summary": self._summary(state, symbol=normalized),
             "open_positions": open_positions,
             "closed_positions": closed_positions,
+            # pagination envelope (additive)
+            "limit": limit,
+            "offset": offset,
+            "count": len(open_positions) + len(closed_positions),
+            "total": open_total + closed_total,
+            "has_more": bool(
+                (offset + len(open_positions)) < open_total
+                or (offset + len(closed_positions)) < closed_total
+            ),
+            "pagination": {
+                "limit": limit,
+                "offset": offset,
+                "open": {
+                    "total": open_total,
+                    "returned": len(open_positions),
+                    "has_more": (offset + len(open_positions)) < open_total,
+                },
+                "closed": {
+                    "total": closed_total,
+                    "returned": len(closed_positions),
+                    "has_more": (offset + len(closed_positions)) < closed_total,
+                },
+            },
+            "updated_at": state.get("last_synced_at"),
+        }
+
+    @staticmethod
+    def _trade_record(position: dict[str, Any]) -> dict[str, Any]:
+        """Flat (CSV-able) row for one CLOSED paper position.
+
+        Pure RE-SHAPING of the persisted record: every money/size figure
+        (quantity, entry_premium, exit_premium, realized_pnl, spots, stop,
+        target) is passed through VERBATIM as persisted by ``_close_position``.
+        Nothing here recomputes P&L. ``duration_minutes`` is the only derived
+        field and it is plain arithmetic over the two stored timestamps.
+        """
+        opened = _parse_time(position.get("opened_at"))
+        closed = _parse_time(position.get("closed_at") or position.get("updated_at"))
+        duration_minutes = (
+            round((closed - opened).total_seconds() / 60.0, 2)
+            if opened is not None and closed is not None
+            else None
+        )
+        return {
+            "trade_id": position.get("position_id"),
+            "position_id": position.get("position_id"),
+            "underlying_symbol": position.get("underlying_symbol"),
+            "symbol": position.get("symbol"),
+            "trading_symbol": position.get("trading_symbol"),
+            "instrument_key": position.get("instrument_key"),
+            "agent_name": position.get("agent_name"),
+            "signal_action": position.get("signal_action"),
+            "broker_action": position.get("broker_action"),
+            "instrument_type": position.get("instrument_type"),
+            "option_type": position.get("option_type"),
+            "strike": position.get("strike"),
+            "expiry": position.get("expiry"),
+            "expiry_kind": position.get("expiry_kind"),
+            "days_to_expiry": position.get("days_to_expiry"),
+            "moneyness": position.get("moneyness"),
+            "execution_style": position.get("execution_style"),
+            "regime_entry": position.get("regime_entry"),
+            "regime_last": position.get("regime_last"),
+            "opened_at": position.get("opened_at"),
+            "closed_at": position.get("closed_at"),
+            "duration_minutes": duration_minutes,
+            "quantity": position.get("quantity"),
+            "lot_size": position.get("lot_size"),
+            "entry_premium": position.get("entry_premium"),
+            "exit_premium": position.get("exit_premium"),
+            "entry_spot_price": position.get("entry_spot_price"),
+            "exit_spot_price": position.get("exit_spot_price"),
+            "stop_price": position.get("stop_price"),
+            "target_price": position.get("target_price"),
+            "entry_confidence": position.get("entry_confidence"),
+            "close_reason": position.get("close_reason"),
+            "realized_pnl": position.get("realized_pnl"),
+        }
+
+    async def list_trades(
+        self,
+        *,
+        symbol: str | None = None,
+        limit: int = 200,
+        offset: int = 0,
+    ) -> dict[str, Any]:
+        """Closed-trade book: flat rows derived from ``closed_positions``.
+
+        Read-only. Reuses the existing ``_summary`` aggregation so no P&L
+        number is computed a second (different) way.
+        """
+        state = await self._load_state()
+        normalized = _normalize_underlying(symbol)
+        closed_positions = self._filter_positions(state.get("closed_positions", []), symbol=normalized)
+        closed_positions.sort(
+            key=lambda item: str(item.get("closed_at") or item.get("updated_at") or ""),
+            reverse=True,
+        )
+        offset = max(0, int(offset or 0))
+        limit = max(1, int(limit or 1))
+        total = len(closed_positions)
+        page = closed_positions[offset : offset + limit]
+        records = [self._trade_record(position) for position in page]
+        return {
+            "symbol_filter": normalized or None,
+            "trades": records,
+            "count": len(records),
+            "total": total,
+            "limit": limit,
+            "offset": offset,
+            "has_more": (offset + len(records)) < total,
+            "summary": self._summary(state, symbol=normalized),
+            "updated_at": state.get("last_synced_at"),
+            "source": str(self.path),
         }
 
     async def sync_analysis(self, bundle: AnalysisBundle) -> dict[str, Any]:

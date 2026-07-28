@@ -497,7 +497,11 @@ async def shadow_records(symbol: str = "BANKNIFTY", limit: int = 50) -> dict:
 
 
 @router.get("/paper-journal")
-async def paper_journal(symbol: str | None = None, limit: int = 50) -> dict:
+async def paper_journal(
+    symbol: str | None = None,
+    limit: int = 50,
+    offset: int = Query(0, ge=0),
+) -> dict:
     limit = max(1, min(limit, 500))
     filtered = [
         record
@@ -505,7 +509,7 @@ async def paper_journal(symbol: str | None = None, limit: int = 50) -> dict:
         if _journal_matches_symbol(record, symbol)
     ]
     filtered.sort(key=lambda item: str(item.get("recorded_at") or ""), reverse=True)
-    records = filtered[:limit]
+    records = filtered[offset : offset + limit]
 
     action_breakdown = Counter(str(item.get("action") or "UNKNOWN") for item in filtered)
     style_breakdown = Counter(str(item.get("execution_style") or "unknown") for item in filtered)
@@ -525,8 +529,13 @@ async def paper_journal(symbol: str | None = None, limit: int = 50) -> dict:
         "symbol_filter": _normalize_symbol_filter(symbol),
         "count": len(records),
         "total_records": len(filtered),
+        # pagination envelope (additive; offset=0 reproduces the old response)
+        "limit": limit,
+        "offset": offset,
+        "total": len(filtered),
+        "has_more": (offset + len(records)) < len(filtered),
         "summary": {
-            "latest_recorded_at": records[0].get("recorded_at") if records else None,
+            "latest_recorded_at": filtered[0].get("recorded_at") if filtered else None,
             "avg_confidence": round(sum(confidences) / len(confidences), 4) if confidences else None,
             "avg_premium": round(sum(premiums) / len(premiums), 4) if premiums else None,
             "action_breakdown": dict(action_breakdown),
@@ -538,7 +547,12 @@ async def paper_journal(symbol: str | None = None, limit: int = 50) -> dict:
 
 
 @router.get("/paper-positions")
-async def paper_positions(symbol: str | None = None, status: str = "all", limit: int = 50) -> dict:
+async def paper_positions(
+    symbol: str | None = None,
+    status: str = "all",
+    limit: int = 50,
+    offset: int = Query(0, ge=0),
+) -> dict:
     normalized_status = str(status or "all").lower()
     if normalized_status not in {"all", "open", "closed"}:
         raise HTTPException(status_code=400, detail="status must be one of: all, open, closed")
@@ -546,7 +560,95 @@ async def paper_positions(symbol: str | None = None, status: str = "all", limit:
         symbol=symbol,
         status=normalized_status,
         limit=max(1, min(limit, 200)),
+        offset=offset,
     )
+
+
+# ── NSE index auction book surfaces (orders / trades / positions) ────────────
+#  These are the NSE sleeve's books. The MCX sibling keeps its own pair under
+#  /commodity/paper and /commodity/paper-trades — do not conflate them.
+
+
+@router.get("/trades")
+async def trades(
+    symbol: str | None = None,
+    limit: int = Query(200, ge=1, le=500),
+    offset: int = Query(0, ge=0),
+) -> dict:
+    """Closed-trade book for the NSE index auction lane.
+
+    Flat rows re-shaped from the persisted ``closed_positions`` — every money
+    figure is passed through verbatim (no P&L is recomputed here).
+    """
+    return await _paper_book.list_trades(symbol=symbol, limit=limit, offset=offset)
+
+
+@router.get("/orders")
+async def orders(
+    symbol: str | None = None,
+    limit: int = Query(200, ge=1, le=500),
+    offset: int = Query(0, ge=0),
+) -> dict:
+    """Order book for the NSE index auction lane — deliberately EMPTY.
+
+    This lane has no order/fill layer. ``PaperTradingService.record_analysis``
+    appends one *pre-trade intent* per non-FLAT execution-plan leg on EVERY
+    analysis cycle (including legs the position book never opens), with no
+    order id, no fill state and no link back to a position_id. Those intents
+    therefore cannot be reconciled into orders, so we report the truth rather
+    than fabricating orders out of trades.
+    """
+    try:
+        intent_count = sum(
+            1
+            for record in _paper_journal.iter_records()
+            if _journal_matches_symbol(record, symbol)
+        )
+    except Exception:  # pragma: no cover - journal is best-effort metadata here
+        intent_count = None
+
+    book_summary: dict = {}
+    try:
+        positions = await _paper_book.list_positions(symbol=symbol, status="all", limit=1)
+        book_summary = positions.get("summary") or {}
+    except Exception:  # pragma: no cover
+        book_summary = {}
+
+    note = (
+        "No order/fill layer exists for the NSE auction lane. "
+        f"/api/auction-intelligence/paper-journal is an INTENT log ({intent_count} records "
+        f"vs {book_summary.get('closed_count')} closed and {book_summary.get('open_count')} open "
+        "positions): one record is written per non-FLAT execution-plan leg on every analysis "
+        "cycle, carrying no order id, no fill status and no position linkage, so it is not "
+        "reconcilable to fills. Executions are only observable as positions "
+        "(/api/auction-intelligence/paper-positions) and closed trades "
+        "(/api/auction-intelligence/trades)."
+    )
+
+    return {
+        "orders": [],
+        "count": 0,
+        "total": 0,
+        "limit": limit,
+        "offset": offset,
+        "has_more": False,
+        "order_layer": "none",
+        "note": note,
+        "symbol_filter": _normalize_symbol_filter(symbol),
+        "intent_log": {
+            "route": "/api/auction-intelligence/paper-journal",
+            "path": str(_paper_journal.root),
+            "record_count": intent_count,
+            "reconcilable_to_fills": False,
+        },
+        "fill_layer": {
+            "trades_route": "/api/auction-intelligence/trades",
+            "positions_route": "/api/auction-intelligence/paper-positions",
+            "path": str(_paper_book.path),
+            "closed_count": book_summary.get("closed_count"),
+            "open_count": book_summary.get("open_count"),
+        },
+    }
 
 
 @router.get("/paper-status")

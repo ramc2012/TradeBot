@@ -29,6 +29,14 @@ _TIMEFRAME_MINUTES = {
 }
 
 
+# How many rows the in-memory loaders pull. These are the numbers the read
+# paths use to decide whether the list they hold is COMPLETE (slice it) or was
+# TRUNCATED by the load (re-read the page from SQL with a real OFFSET). They
+# are wired straight into the LIMIT clauses below so the two can never drift.
+_CLOSED_LOAD_CAP = 500
+_JOURNAL_LOAD_CAP = 1000
+
+
 def _utc_now() -> str:
     return datetime.now(timezone.utc).isoformat()
 
@@ -189,6 +197,107 @@ def expiry_exit_decision(
     return None, detail
 
 
+def _ist_date_str(value: Any) -> str | None:
+    """IST calendar date of an ISO timestamp — display grouping only.
+
+    Matches the convention `realized_pnl_windows` already uses for the daily
+    loss cap (`timezone('Asia/Kolkata', closed_at)::date`), so a trade-book
+    row groups on the same day the risk engine books it on.
+    """
+    ts = _parse_iso(value)
+    return ts.astimezone(_IST).date().isoformat() if ts is not None else None
+
+
+def trade_record(position: dict[str, Any]) -> dict[str, Any]:
+    """One flat (CSV-able) closed-trade row.
+
+    RESHAPE ONLY. Every money number is copied VERBATIM off the persisted
+    closed position — `realized_pnl` / `realized_pnl_gross` /
+    `transaction_cost` / `policy_r_multiple` are the values `_close_position`
+    wrote at exit and are never recomputed here. The only derived fields are
+    `duration_minutes` and `session_date`, both pure timestamp arithmetic.
+
+    The convergence lane's shared `stats.trade_records` is deliberately NOT
+    reused: it reads a futures schema (entry_price / lots / lot_size /
+    initial_stop / exit_reason) that this long-option book does not carry, so
+    it would emit a row of zeros and nulls.
+    """
+    opened = _parse_iso(position.get("opened_at"))
+    closed = _parse_iso(position.get("closed_at") or position.get("updated_at"))
+    duration_minutes = (
+        round((closed - opened).total_seconds() / 60.0, 2)
+        if opened is not None and closed is not None
+        else None
+    )
+    return {
+        "position_id": position.get("position_id"),
+        "underlying": position.get("underlying"),
+        "trading_symbol": position.get("trading_symbol"),
+        "instrument_key": position.get("instrument_key"),
+        "option_type": position.get("option_type"),
+        "direction": position.get("direction"),
+        "strike": _safe_float_or_none(position.get("strike")),
+        "expiry": position.get("expiry"),
+        "expiry_kind": position.get("expiry_kind"),
+        "session_date": _ist_date_str(position.get("closed_at") or position.get("updated_at")),
+        "opened_at": position.get("opened_at"),
+        "closed_at": position.get("closed_at"),
+        "duration_minutes": duration_minutes,
+        "quantity_units": _safe_int_or_none(position.get("quantity_units")),
+        "quantity_lots": _safe_int_or_none(position.get("quantity_lots")),
+        "entry_premium": _safe_float_or_none(position.get("entry_premium")),
+        "exit_premium": _safe_float_or_none(position.get("exit_premium")),
+        "entry_spot": _safe_float_or_none(position.get("entry_spot")),
+        "exit_spot": _safe_float_or_none(position.get("exit_spot")),
+        "close_reason": position.get("close_reason"),
+        # ── verbatim P&L (never recomputed) ──────────────────────────────
+        "pnl": _safe_float_or_none(position.get("realized_pnl")),
+        "realized_pnl": _safe_float_or_none(position.get("realized_pnl")),
+        "realized_pnl_gross": _safe_float_or_none(position.get("realized_pnl_gross")),
+        "transaction_cost": _safe_float_or_none(position.get("transaction_cost")),
+        "r_multiple": _safe_float_or_none(position.get("policy_r_multiple")),
+        # ── context the desk reads alongside the fill ────────────────────
+        "regime": position.get("regime"),
+        "confidence": _safe_float_or_none(position.get("confidence")),
+        "price_source": position.get("price_source"),
+        "selection_reason": position.get("selection_reason"),
+    }
+
+
+def trade_records(closed_positions: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Flat closed-trade rows — mirrors institutional_convergence's trades()."""
+    return [trade_record(row) for row in closed_positions]
+
+
+def _page_int(value: Any, default: int, *, minimum: int = 0) -> int:
+    """Coerce a paging argument to a usable int.
+
+    These router functions are ALSO called directly as plain Python — the
+    positions-overview websocket frame calls
+    `api.routers.directional_options.paper_positions(symbol=None,
+    status="all", limit=100)` at api/websockets/ticks.py:413, with no HTTP
+    layer to resolve defaults. A FastAPI `Query(...)` default is an object, not
+    an int, so `int(offset)` on that path raises and takes the whole lane out
+    of the frame ("[WS] positions overview source failed: directional"). Fall
+    back to the documented default instead of blowing up.
+    """
+    try:
+        return max(minimum, int(value))
+    except (TypeError, ValueError):
+        return default
+
+
+def _page_envelope(*, total: int, offset: int, limit: int, returned: int) -> dict[str, Any]:
+    """Uniform pagination envelope shared by every directional book route."""
+    return {
+        "total": int(total),
+        "offset": int(offset),
+        "limit": int(limit),
+        "returned": int(returned),
+        "has_more": (int(offset) + int(returned)) < int(total),
+    }
+
+
 def _same_contract(position: dict[str, Any], contract: dict[str, Any]) -> bool:
     position_key = str(position.get("instrument_key") or "").strip()
     contract_key = str(contract.get("instrument_key") or "").strip()
@@ -251,28 +360,91 @@ class DirectionalOptionsPaperStore:
         # per-process; the journal carries the durable cooldown_skip records).
         self._cooldown_skips_by_day: dict[str, int] = {}
 
-    async def list_journal(self, symbol: str | None = None, limit: int = 50) -> dict[str, Any]:
-        records = await self._load_journal()
+    async def list_journal(
+        self,
+        symbol: str | None = None,
+        limit: int = 50,
+        offset: int = 0,
+    ) -> dict[str, Any]:
+        """Paginated decision journal.
+
+        `_load_journal` reads only the newest `_JOURNAL_LOAD_CAP` rows, so a
+        plain Python slice of it makes every record past that boundary
+        physically unreachable (24,877 journal rows live on 2026-07-28 against
+        a 1000-row load). When the RAW load comes back SATURATED — i.e. it was
+        truncated — the page is re-read straight from Postgres with the offset
+        pushed into SQL. Only when the raw load is short is the in-memory list
+        the complete set, and slicing it exact.
+
+        Saturation is judged on the RAW load, never on the symbol-filtered
+        list: filtering 1000 truncated rows down to 48 NIFTY rows does not make
+        those 48 the whole NIFTY history, and reporting `total: 48` for it
+        would be a lie the UI cannot see through.
+        """
+        limit = _page_int(limit, 50, minimum=1)
+        offset = _page_int(offset, 0)
         normalized = _normalize_symbol(symbol)
+
+        records = await self._load_journal()
+        truncated_load = len(records) >= _JOURNAL_LOAD_CAP
         if normalized:
             records = [row for row in records if _normalize_symbol(row.get("underlying")) == normalized]
         records.sort(key=lambda row: str(row.get("recorded_at") or ""), reverse=True)
+
+        if truncated_load:
+            page, total = await self._journal_page(symbol=symbol, limit=limit, offset=offset)
+            page_source = "db_offset"
+        else:
+            page, total = records[offset : offset + limit], len(records)
+            page_source = "loaded_window"
+
         return {
             "symbol_filter": normalized or None,
-            "count": len(records),
-            "records": records[:limit],
+            # `count` kept for backward compatibility with existing UI wiring:
+            # it has always meant "how many records match the filter".
+            "count": total,
+            "records": page,
+            "page_source": page_source,
+            **_page_envelope(total=total, offset=offset, limit=limit, returned=len(page)),
         }
 
-    async def list_positions(self, symbol: str | None = None, status: str = "all", limit: int = 50) -> dict[str, Any]:
+    async def list_positions(
+        self,
+        symbol: str | None = None,
+        status: str = "all",
+        limit: int = 50,
+        offset: int = 0,
+    ) -> dict[str, Any]:
         state = await self._load_positions()
+        limit = _page_int(limit, 50, minimum=1)
+        offset = _page_int(offset, 0)
         normalized = _normalize_symbol(symbol)
         open_positions = [_with_current_expiry_calendar(row) for row in state.get("open_positions", [])]
         closed_positions = [_with_current_expiry_calendar(row) for row in state.get("closed_positions", [])]
+        # Judged on the RAW load, before any symbol filter — a filter that
+        # shrinks a TRUNCATED window below the cap does not make that window
+        # complete for the filtered symbol.
+        closed_load_truncated = len(closed_positions) >= _CLOSED_LOAD_CAP
         if normalized:
             open_positions = [row for row in open_positions if _normalize_symbol(row.get("underlying")) == normalized]
             closed_positions = [row for row in closed_positions if _normalize_symbol(row.get("underlying")) == normalized]
-        open_positions.sort(key=lambda row: str(row.get("opened_at") or ""), reverse=True)
-        closed_positions.sort(key=lambda row: str(row.get("closed_at") or row.get("updated_at") or ""), reverse=True)
+        # position_id is the tiebreak (matching the SQL page's
+        # `ORDER BY ... , position_id DESC`). Without it, rows sharing a
+        # timestamp — the expiry sweep closes dozens in the same microsecond —
+        # keep whatever arbitrary order Postgres returned, so two paged
+        # requests could show the same row twice or skip it entirely. Ordering
+        # only; no row is added, dropped or re-valued.
+        open_positions.sort(
+            key=lambda row: (str(row.get("opened_at") or ""), str(row.get("position_id") or "")),
+            reverse=True,
+        )
+        closed_positions.sort(
+            key=lambda row: (
+                str(row.get("closed_at") or row.get("updated_at") or ""),
+                str(row.get("position_id") or ""),
+            ),
+            reverse=True,
+        )
         if status == "open":
             closed_positions = []
         elif status == "closed":
@@ -313,13 +485,225 @@ class DirectionalOptionsPaperStore:
             except Exception:  # noqa: BLE001
                 pass
 
+        # Summary is computed on the SAME lists as before this change (whole
+        # filtered book, post status-gate, post live-mark overlay) so every
+        # statistic it carries — realized, unrealized, max_drawdown, sharpe,
+        # win_rate — is bit-identical to what it always reported. Pagination
+        # below only chooses which ROWS travel over the wire.
+        summary = await self._summary(open_positions, closed_positions)
+
+        # Open rows are loaded IN FULL (no LIMIT on the open query), so slicing
+        # them with the offset is exact.
+        open_total = len(open_positions)
+        open_page = open_positions[offset : offset + limit]
+
+        # Closed rows are NOT loaded in full — `_load_positions` caps at
+        # `_CLOSED_LOAD_CAP`. Slicing a truncated list would leave deep history
+        # unreachable, so a saturated load escalates to a real SQL OFFSET.
+        # (308 closed rows live on 2026-07-28; the le=200 route cap alone left
+        # 108 of them off the wire with no way to ask for them.)
+        closed_page: list[dict[str, Any]] = []
+        closed_total = 0
+        page_source = "loaded_window"
+        if status != "open":
+            if closed_load_truncated:
+                closed_page, closed_total = await self._closed_positions_page(
+                    symbol=symbol, limit=limit, offset=offset
+                )
+                page_source = "db_offset"
+            else:
+                closed_page = closed_positions[offset : offset + limit]
+                closed_total = len(closed_positions)
+
         return {
             "symbol_filter": normalized or None,
             "status": status,
-            "summary": await self._summary(open_positions, closed_positions),
-            "open_positions": open_positions[:limit],
-            "closed_positions": closed_positions[:limit],
+            "summary": summary,
+            "open_positions": open_page,
+            "closed_positions": closed_page,
+            "page_source": page_source,
+            # Envelope: `total` is the whole book (open + closed) for this
+            # filter; the per-book totals are broken out so a UI can page each
+            # table independently.
+            **_page_envelope(
+                total=open_total + closed_total,
+                offset=offset,
+                limit=limit,
+                returned=len(open_page) + len(closed_page),
+            ),
+            "pagination": {
+                "offset": offset,
+                "limit": limit,
+                "open": _page_envelope(
+                    total=open_total, offset=offset, limit=limit, returned=len(open_page)
+                ),
+                "closed": _page_envelope(
+                    total=closed_total, offset=offset, limit=limit, returned=len(closed_page)
+                ),
+            },
         }
+
+    # ── Order / trade books (read-only reshapes of the persisted book) ───────
+
+    async def list_trades(
+        self,
+        symbol: str | None = None,
+        limit: int = 500,
+        offset: int = 0,
+    ) -> dict[str, Any]:
+        """Closed-trade book as flat CSV-able JSON rows.
+
+        Mirrors `institutional_convergence.paper.ConvergencePaperBook.trades()`
+        — same envelope, same "derive from closed_positions" contract. Numbers
+        are copied verbatim (see `trade_record`).
+        """
+        limit = _page_int(limit, 500, minimum=1)
+        offset = _page_int(offset, 0)
+        rows, total = await self._closed_positions_page(
+            symbol=symbol, limit=limit, offset=offset
+        )
+        records = trade_records(rows)
+        return {
+            "trades": records,
+            "count": total,
+            "symbol_filter": _normalize_symbol(symbol) or None,
+            "updated_at": _utc_now(),
+            **_page_envelope(total=total, offset=offset, limit=limit, returned=len(records)),
+        }
+
+    async def list_orders(self, limit: int = 500, offset: int = 0) -> dict[str, Any]:
+        """There is NO order-fill log in this lane — say so, do not invent one.
+
+        What directional_options actually persists is two things, neither of
+        which is an order book:
+
+          * `directional_paper_journal` — a per-cycle DECISION log (one row per
+            underlying per evaluation: regime, direction, confidence, approved
+            true/false, selection_reason, plus `cooldown_skip` records). It is
+            written even when nothing trades; on 2026-07-28 it held 24,809 rows
+            against 308 lifetime fills. Only 5 rows (`event=expiry_sweep_close`)
+            are fill-shaped, and those cover the expiry sweep alone — not opens
+            and not ordinary stop/target/flat closes.
+          * `directional_paper_positions` — the position rows, which carry the
+            entry and exit ON the position (entry_premium/opened_at,
+            exit_premium/closed_at) rather than as separate order events.
+
+        Synthesising two orders per position out of that would be a fabricated
+        order book: no order id, no placement time, no state machine
+        (placed/acked/filled), no partials, no rejects. So this returns empty
+        with a pointer to the two surfaces that ARE real.
+        """
+        return {
+            "orders": [],
+            "count": 0,
+            "order_layer": "none",
+            "note": (
+                "directional_options keeps no order-fill log: paper entries and "
+                "exits are written straight onto the position row "
+                "(directional_paper_positions) with no placement/ack/fill events, "
+                "and directional_paper_journal is a per-cycle DECISION log of "
+                "proposals (approved/declined/cooldown_skip), not orders. Use "
+                "GET /api/directional-options/trades for the closed-trade book, "
+                "GET /api/directional-options/paper-positions for live and closed "
+                "positions, and GET /api/directional-options/paper-journal for the "
+                "decision trail."
+            ),
+            "records_instead": {
+                "trades": "/api/directional-options/trades",
+                "positions": "/api/directional-options/paper-positions",
+                "decision_journal": "/api/directional-options/paper-journal",
+            },
+            **_page_envelope(
+                total=0,
+                offset=_page_int(offset, 0),
+                limit=_page_int(limit, 500, minimum=1),
+                returned=0,
+            ),
+        }
+
+    async def _closed_positions_page(
+        self,
+        *,
+        symbol: str | None = None,
+        limit: int = 500,
+        offset: int = 0,
+    ) -> tuple[list[dict[str, Any]], int]:
+        """One DB page of the closed book + the TRUE total for that filter.
+
+        `count(*) OVER ()` keeps it to a single round-trip on the common path;
+        the extra COUNT only fires when the page came back empty (offset past
+        the end), where the window function has no row to ride on.
+        """
+        await self._maybe_seed_from_file()
+        normalized = _normalize_symbol(symbol)
+        where = "WHERE status = 'closed'"
+        params: dict[str, Any] = {
+            "limit": _page_int(limit, 500, minimum=1),
+            "offset": _page_int(offset, 0),
+        }
+        if normalized:
+            where += " AND UPPER(COALESCE(underlying, '')) = :symbol"
+            params["symbol"] = normalized
+        async with AsyncSessionLocal() as session:
+            rows = (await session.execute(
+                text(
+                    "SELECT payload, count(*) OVER () AS total "
+                    f"FROM directional_paper_positions {where} "
+                    # position_id tiebreak keeps paging stable when several
+                    # closes share a timestamp (otherwise a row can appear on
+                    # two pages or on none).
+                    "ORDER BY closed_at DESC NULLS LAST, position_id DESC "
+                    "LIMIT :limit OFFSET :offset"
+                ),
+                params,
+            )).mappings().all()
+            if rows:
+                total = int(rows[0]["total"] or 0)
+            else:
+                count_params = {"symbol": normalized} if normalized else {}
+                total = int((await session.execute(
+                    text(f"SELECT count(*) FROM directional_paper_positions {where}"),
+                    count_params,
+                )).scalar() or 0)
+        return [_with_current_expiry_calendar(_as_dict(r["payload"])) for r in rows], total
+
+    async def _journal_page(
+        self,
+        *,
+        symbol: str | None = None,
+        limit: int = 50,
+        offset: int = 0,
+    ) -> tuple[list[dict[str, Any]], int]:
+        """One DB page of the decision journal + the TRUE total for that filter."""
+        await self._maybe_seed_from_file()
+        normalized = _normalize_symbol(symbol)
+        where = ""
+        params: dict[str, Any] = {
+            "limit": _page_int(limit, 50, minimum=1),
+            "offset": _page_int(offset, 0),
+        }
+        if normalized:
+            where = "WHERE UPPER(COALESCE(underlying, '')) = :symbol"
+            params["symbol"] = normalized
+        async with AsyncSessionLocal() as session:
+            rows = (await session.execute(
+                text(
+                    "SELECT payload, count(*) OVER () AS total "
+                    f"FROM directional_paper_journal {where} "
+                    "ORDER BY recorded_at DESC NULLS LAST, id DESC "
+                    "LIMIT :limit OFFSET :offset"
+                ),
+                params,
+            )).mappings().all()
+            if rows:
+                total = int(rows[0]["total"] or 0)
+            else:
+                count_params = {"symbol": normalized} if normalized else {}
+                total = int((await session.execute(
+                    text(f"SELECT count(*) FROM directional_paper_journal {where}"),
+                    count_params,
+                )).scalar() or 0)
+        return [_as_dict(r["payload"]) for r in rows], total
 
     # ── Anti-churn: per-underlying re-entry cooldown (2026-07-17) ────────────
     # OWNER DIRECTIVE: "uncap signals, no hard gate. but see that the lane has
@@ -1430,7 +1814,8 @@ class DirectionalOptionsPaperStore:
             rows = (await session.execute(
                 text(
                     "SELECT payload FROM directional_paper_journal "
-                    "ORDER BY recorded_at DESC NULLS LAST, id DESC LIMIT 1000"
+                    "ORDER BY recorded_at DESC NULLS LAST, id DESC "
+                    f"LIMIT {_JOURNAL_LOAD_CAP}"
                 )
             )).mappings().all()
         return [_as_dict(r["payload"]) for r in rows]
@@ -1444,7 +1829,7 @@ class DirectionalOptionsPaperStore:
             closed_rows = (await session.execute(
                 text(
                     "SELECT payload FROM directional_paper_positions WHERE status = 'closed' "
-                    "ORDER BY closed_at DESC NULLS LAST LIMIT 500"
+                    f"ORDER BY closed_at DESC NULLS LAST LIMIT {_CLOSED_LOAD_CAP}"
                 )
             )).mappings().all()
         return {
