@@ -51,6 +51,21 @@ def _same_contract(position: dict[str, Any], execution: Any) -> bool:
     )
 
 
+def _page_int(value: Any, default: int, *, floor: int = 0) -> int:
+    """Coerce a paging argument defensively.
+
+    The positions-overview WebSocket (api/websockets/ticks.py) calls the ROUTER
+    functions directly as plain Python, so a FastAPI ``Query(...)`` default
+    arrives here as a Query OBJECT, not an int — ``int(offset)`` raised and
+    knocked this whole lane out of the WS frame every ~2s. Same hazard and same
+    guard as directional_options/paper.py::_page_int.
+    """
+    try:
+        return max(floor, int(value))
+    except (TypeError, ValueError):
+        return default
+
+
 def _as_float(value: Any) -> Optional[float]:
     if value is None:
         return None
@@ -133,7 +148,8 @@ class PaperPositionBook:
 
         # Page each book independently, then report a combined envelope. offset=0
         # reproduces the historical (unpaged) response byte-for-byte.
-        offset = max(0, int(offset or 0))
+        offset = _page_int(offset, 0)
+        limit = _page_int(limit, 50, floor=1)
         open_total = len(open_positions)
         closed_total = len(closed_positions)
         open_positions = open_positions[offset : offset + limit]
@@ -243,8 +259,8 @@ class PaperPositionBook:
             key=lambda item: str(item.get("closed_at") or item.get("updated_at") or ""),
             reverse=True,
         )
-        offset = max(0, int(offset or 0))
-        limit = max(1, int(limit or 1))
+        offset = _page_int(offset, 0)
+        limit = _page_int(limit, 200, floor=1)
         total = len(closed_positions)
         page = closed_positions[offset : offset + limit]
         records = [self._trade_record(position) for position in page]
