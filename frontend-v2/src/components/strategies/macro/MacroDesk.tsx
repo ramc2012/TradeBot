@@ -14,7 +14,7 @@
  */
 import { useMemo, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
-import { Activity, Compass, Flame, Gauge, Layers, Search, Sparkles, TrendingDown, TrendingUp } from "lucide-react";
+import { Activity, Compass, Flame, Gauge, History, Layers, Search, Sparkles, TrendingDown, TrendingUp } from "lucide-react";
 
 import {
   DeskShell,
@@ -30,10 +30,12 @@ import { api as apiClient } from "@/lib/api";
 
 import { CommodityBoard, type Commodity } from "./CommodityBoard";
 import { SectorScatter, type ScatterSector } from "./SectorScatter";
+import { MacroHistoryCharts } from "./MacroHistoryCharts";
 import { Sparkline } from "@/components/desk-ui";
 
 const TABS = [
   { key: "overview", label: "Overview", icon: Gauge },
+  { key: "history", label: "Macro history", icon: History },
   { key: "commodities", label: "Commodities", icon: Flame },
   { key: "sectors", label: "Sectors", icon: Layers },
   { key: "discovery", label: "Discovery", icon: Search },
@@ -185,6 +187,8 @@ export default function MacroDesk() {
       {activeTab === "overview" ? (
         <OverviewTab indicators={indicators} read={read} loading={overviewQuery.isLoading} />
       ) : null}
+
+      {activeTab === "history" ? <MacroHistoryCharts indicators={indicators} /> : null}
 
       {activeTab === "commodities" ? (
         <Section title="Commodity-pressure board" icon={<Flame size={16} />} description="Input-cost trend and second-order sector impact. Rising = inflationary headwind.">
