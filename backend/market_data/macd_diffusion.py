@@ -199,9 +199,8 @@ async def backfill_from_candles(*, market: str = "NSE", days: int = 21) -> int:
             )
         ).all()
 
-        agg: dict[datetime, dict[str, int]] = defaultdict(
-            lambda: {"ce_total": 0, "ce_above": 0, "pe_total": 0, "pe_above": 0}
-        )
+        leg_series: list[tuple[bool, dict[datetime, float]]] = []
+        all_buckets: set[datetime] = set()
 
         for leg in legs:
             rows = (
@@ -233,9 +232,33 @@ async def backfill_from_candles(*, market: str = "NSE", days: int = 21) -> int:
                     continue
                 t = r.time if r.time.tzinfo else r.time.replace(tzinfo=timezone.utc)
                 per_hour[t.astimezone(timezone.utc).replace(minute=0, second=0, microsecond=0)] = m
-            is_ce = leg.option_type == "CE"
-            for hour, m in per_hour.items():
-                b = agg[hour]
+            if not per_hour:
+                continue
+            leg_series.append((leg.option_type == "CE", per_hour))
+            all_buckets.update(per_hour.keys())
+
+        # SEMANTIC (2026-08-02): a leg counts in EVERY bucket at-or-after its
+        # first MACD print, carrying its freshest sign forward — bounded by the
+        # same WATCHLIST_FRESHNESS_DAYS the live snapshot applies to watchlist
+        # MACDs. Previously a leg only counted in buckets where it printed a
+        # 30m bar in that exact hour, so the denominator swung with per-hour
+        # bar availability (observed 74→212 CE inside one session) instead of
+        # tracking the ~stable watchlist universe the way live rows do.
+        buckets_sorted = sorted(all_buckets)
+        freshness = timedelta(days=WATCHLIST_FRESHNESS_DAYS)
+        agg: dict[datetime, dict[str, int]] = defaultdict(
+            lambda: {"ce_total": 0, "ce_above": 0, "pe_total": 0, "pe_above": 0}
+        )
+        for is_ce, per_hour in leg_series:
+            times = sorted(per_hour)
+            latest = -1  # index of the freshest print at-or-before the bucket
+            for bucket in buckets_sorted:
+                while latest + 1 < len(times) and times[latest + 1] <= bucket:
+                    latest += 1
+                if latest < 0 or bucket - times[latest] > freshness:
+                    continue
+                m = per_hour[times[latest]]
+                b = agg[bucket]
                 if is_ce:
                     b["ce_total"] += 1
                     if m > 0:
