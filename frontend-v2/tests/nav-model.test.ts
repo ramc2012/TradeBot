@@ -31,6 +31,7 @@ import {
   DESK_CARD_STATE_VARIANT,
   LANE_SECTIONS,
   deskCurrency,
+  SIDEBAR_GROUPS,
   WORKSPACE_ROUTE,
   WORKSPACE_VIEWS,
   allDesks,
@@ -78,13 +79,38 @@ test("workspace route is the declared primary destination", () => {
   }
 });
 
-test("sidebar renders the workspace outside any collapsible group", () => {
-  const src = sidebar();
-  assert.match(src, /WORKSPACE_ROUTE/);
-  // The workspace block must not be gated on an `isOpen(...)` check.
-  const block = src.slice(src.indexOf("Workspace: the primary destination"), src.indexOf("LANE_SECTIONS.map"));
-  assert.ok(block.length > 200, "workspace block not found in the sidebar");
-  assert.ok(!/isOpen\(/.test(block), "the workspace section must never be collapsible");
+test("sidebar workspace leads the Market data group, which opens by default", () => {
+  // CONTRACT CHANGE (2026-08-02, owner-requested): the sidebar renders SEVEN
+  // functional groups (SIDEBAR_GROUPS) instead of the horizon sections, and
+  // the workspace lives as the FIRST entry of "Market data" — a group that is
+  // defaultOpen so the workspace stays discoverable on first paint.
+  assert.match(sidebar(), /SIDEBAR_GROUPS/);
+  const marketData = SIDEBAR_GROUPS.find((g) => g.id === "market-data");
+  assert.ok(marketData, "market-data group missing");
+  assert.equal(marketData.entries[0]?.kind, "workspace", "workspace must lead Market data");
+  assert.equal(marketData.defaultOpen, true, "Market data must open by default");
+});
+
+test("sidebar has exactly the seven owner-requested groups, in order", () => {
+  assert.deepEqual(
+    SIDEBAR_GROUPS.map((g) => g.id),
+    ["overview", "market-data", "technical", "auction-mp", "research", "future", "settings"],
+  );
+  const future = SIDEBAR_GROUPS.find((g) => g.id === "future");
+  assert.deepEqual(
+    future?.entries.map((e) => (e.kind === "desk" ? e.href : null)),
+    ["/strategies/gann", "/strategies/fractal", "/strategies/sniper"],
+    "Future lanes must hold Gann, Fractal and Sniper",
+  );
+});
+
+test("every sidebar desk entry resolves to a declared desk", () => {
+  const byHref = new Set(allDesks().map((d) => d.href));
+  for (const g of SIDEBAR_GROUPS) {
+    for (const e of g.entries) {
+      if (e.kind === "desk") assert.ok(byHref.has(e.href), `sidebar references unknown desk ${e.href}`);
+    }
+  }
 });
 
 test("landing page leads with the workspace and its built views", () => {
@@ -240,13 +266,15 @@ test("no scalp desk may ever be added without removing the unavailability record
   }
 });
 
-test("both surfaces render the scalp reason, not just the word 'scalp'", () => {
-  for (const [name, src] of [["sidebar", sidebar()], ["landing", landing()]] as const) {
-    assert.match(src, /section\.unavailable/, `${name} does not branch on the unavailability record`);
-    assert.match(src, /missingCapabilities/, `${name} does not render the missing capabilities`);
-  }
-  assert.match(landing(), /u\.reason/);
-  assert.match(landing(), /u\.citation/);
+test("the landing page renders the scalp reason, not just the word 'scalp'", () => {
+  // Since the sidebar moved to the seven functional groups (2026-08-02) it no
+  // longer shows horizon sections, so the scalp unavailability record renders
+  // on the LANDING page only — which still reads LANE_SECTIONS.
+  const src = landing();
+  assert.match(src, /section\.unavailable/, "landing does not branch on the unavailability record");
+  assert.match(src, /missingCapabilities/, "landing does not render the missing capabilities");
+  assert.match(src, /u\.reason/);
+  assert.match(src, /u\.citation/);
 });
 
 // ─── 5. Nothing lost, parked labelled ───────────────────────────────────────

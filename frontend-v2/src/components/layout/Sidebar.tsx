@@ -1,31 +1,21 @@
 "use client";
 
 /**
- * v2 sidebar — grouped by the LANE LOGIC, not by a hand-kept flat list.
+ * v2 sidebar — SEVEN functional groups (owner-requested 2026-08-02):
+ * Overview · Market data · Technical lanes · Auction/MP lanes · Research ·
+ * Future lanes · Settings.
  *
- * ─── What changed (2026-07-20) ──────────────────────────────────────────────
+ * The grouping is declared in lib/nav-model.ts (SIDEBAR_GROUPS) as a VIEW
+ * over the same desk model the landing page reads — the landing page keeps
+ * the horizon × policy taxonomy (LANE_SECTIONS) untouched. Desk rows still
+ * carry their policy chip, the registry-served KIND caption, and the books
+ * child link; the Market Structure workspace keeps its four view sub-links
+ * as the first entry of "Market data".
  *
- * 1. WORKSPACE FIRST, AND ALWAYS OPEN. The cross-lane workspace used to be the
- *    first item inside "Strategy desks", a group that is COLLAPSED on the
- *    landing route — so the owner opened the terminal and saw none of the new
- *    work. It now has its own section at the top that is NOT collapsible, with
- *    its four BUILT views linked directly.
+ * "Future lanes" holds Gann, Fractal and Sniper — linked and inspectable,
+ * not part of today's production loop. Parked desks stay visibly PARKED.
  *
- * 2. DESKS GROUPED BY HORIZON × KIND × POLICY, from lib/nav-model.ts, which
- *    reads lib/lane-taxonomy.ts and lib/policy-state.ts. Sections are declared
- *    horizons; policy terminals sort first inside a section and carry their
- *    policy-column chip; the KIND chip is resolved from the SERVED
- *    /api/system/lanes registry and says so when the registry has not loaded.
- *
- * 3. SCALP is rendered as a permanently-unavailable row carrying its reason,
- *    never as an empty group.
- *
- * 4. Nothing was deleted. Every previously-linked route is still linked, and
- *    the two routes whose nav entries had been commented out (Fractal MP,
- *    Sniper) are linked again under "Parked lanes" — labelled PARKED, which is
- *    a decision, not the "idle" a missing link implied.
- *
- * Manual group toggles still persist; width-collapse (icon rail) still works.
+ * Manual group toggles persist; width-collapse (icon rail) still works.
  */
 import Link from "next/link";
 import { usePathname } from "next/navigation";
@@ -43,7 +33,6 @@ import {
   ChevronRight,
   Compass,
   Crosshair,
-  FileText,
   Fingerprint,
   FlaskConical,
   Globe,
@@ -51,7 +40,6 @@ import {
   Inbox,
   LayoutDashboard,
   Layers3,
-  Lock,
   Network,
   Radar,
   Server,
@@ -64,26 +52,37 @@ import {
 
 import { useLaneRegistry } from "@/hooks/useLaneRegistry";
 import {
-  LANE_SECTIONS,
+  SIDEBAR_GROUPS,
   WORKSPACE_ROUTE,
   WORKSPACE_VIEWS,
+  allDesks,
   deskKinds,
   deskPolicyLabel,
   kindShort,
-  policyRank,
   type NavDesk,
 } from "@/lib/nav-model";
 
 const SIDEBAR_STORAGE_KEY = "nomad-curie.sidebar.collapsed.v2";
-// v3 key on purpose: the v2 overrides refer to group titles that no longer
-// exist, and a stale `{"Strategy desks": false}` would re-hide the new model.
-const GROUPS_STORAGE_KEY = "nomad-curie.sidebar.groups.v3";
+// v4 key on purpose: v3 overrides refer to the horizon-section ids that no
+// longer exist as sidebar groups, and a stale override would hide new groups.
+const GROUPS_STORAGE_KEY = "nomad-curie.sidebar.groups.v4";
 
-type NavItem = { href: string; label: string; icon: typeof Target; matchers?: string[] };
-type NavGroup = { title: string; items: NavItem[]; defaultOpen?: boolean };
-
-/** Desk route → rail icon. Purely decorative; the model carries no icons. */
-const DESK_ICON: Record<string, typeof Target> = {
+/** Route → rail icon. Purely decorative; the model carries no icons. */
+const ROUTE_ICON: Record<string, typeof Target> = {
+  "/": LayoutDashboard,
+  "/trading": Activity,
+  "/positions": Banknote,
+  "/proposals": Inbox,
+  "/analytics": BriefcaseBusiness,
+  "/market": Globe,
+  "/charts": CandlestickChart,
+  "/orderflow": Workflow,
+  "/sector-interaction": Network,
+  "/macro-research": BarChart3,
+  "/research": FlaskConical,
+  "/agent": Bot,
+  "/system": Server,
+  "/settings": Settings,
   "/strategies/auction": Layers3,
   "/strategies/mp": Sigma,
   "/strategies/commodity": Waves,
@@ -98,45 +97,6 @@ const DESK_ICON: Record<string, typeof Target> = {
   "/strategies/fractal": Fingerprint,
   "/strategies/sniper": Crosshair,
 };
-
-/** The non-lane groups. These are functions, not lanes, so they have no axes. */
-const OPS_GROUPS: NavGroup[] = [
-  {
-    title: "Trade",
-    items: [
-      { href: "/", label: "Landing", icon: LayoutDashboard },
-      { href: "/trading", label: "Execution", icon: Activity },
-      { href: "/positions", label: "Positions", icon: Banknote },
-      { href: "/proposals", label: "Proposals", icon: Inbox },
-      { href: "/analytics", label: "Portfolio", icon: BriefcaseBusiness },
-    ],
-  },
-  {
-    title: "Markets",
-    items: [
-      { href: "/market", label: "Option chain", icon: Globe },
-      { href: "/charts", label: "Charts", icon: CandlestickChart },
-      { href: "/orderflow", label: "Orderflow", icon: Workflow },
-      { href: "/sector-interaction", label: "Sector network", icon: Network },
-      { href: "/macro-research", label: "Macro", icon: BarChart3 },
-    ],
-  },
-  {
-    title: "Research",
-    items: [
-      { href: "/research", label: "Research lab", icon: FlaskConical, matchers: ["/research", "/analysis", "/backtester", "/data"] },
-      { href: "/agent", label: "AI agent", icon: Bot },
-    ],
-  },
-  {
-    title: "Platform",
-    items: [
-      { href: "/system", label: "System hub", icon: Server, matchers: ["/system", "/health", "/lane-health"] },
-      { href: "/reports", label: "Reports", icon: FileText },
-      { href: "/settings", label: "Settings", icon: Settings },
-    ],
-  },
-];
 
 function matches(href: string, matchers: string[] | undefined, pathname: string): boolean {
   const ms = matchers || [href.split("?")[0]];
@@ -158,6 +118,12 @@ export default function Sidebar() {
     return out;
   }, [registry.data]);
 
+  const deskByHref = useMemo(() => {
+    const out: Record<string, NavDesk> = {};
+    for (const d of allDesks()) out[d.href] = d;
+    return out;
+  }, []);
+
   useEffect(() => {
     try {
       setCollapsed(window.localStorage.getItem(SIDEBAR_STORAGE_KEY) === "1");
@@ -167,10 +133,18 @@ export default function Sidebar() {
     }
   }, []);
 
-  const laneSectionActive = (id: string) =>
-    LANE_SECTIONS.find((s) => s.id === id)?.desks.some((d) => matches(d.href, d.matchers, pathname)) ?? false;
-  const opsGroupActive = (title: string) =>
-    OPS_GROUPS.find((g) => g.title === title)?.items.some((i) => matches(i.href, i.matchers, pathname)) ?? false;
+  const groupActive = (id: string) => {
+    const g = SIDEBAR_GROUPS.find((s) => s.id === id);
+    if (!g) return false;
+    return g.entries.some((e) => {
+      if (e.kind === "workspace") return matches(WORKSPACE_ROUTE, undefined, pathname);
+      if (e.kind === "desk") {
+        const d = deskByHref[e.href];
+        return d ? matches(d.href, d.matchers, pathname) : false;
+      }
+      return matches(e.href, e.matchers, pathname);
+    });
+  };
 
   const isOpen = (key: string, fallback: boolean) =>
     collapsed ? true : key in overrides ? overrides[key] : fallback;
@@ -281,6 +255,70 @@ export default function Sidebar() {
     return k.kinds.map(kindShort).join(" · ");
   };
 
+  const DeskRow = ({ desk }: { desk: NavDesk }) => (
+    <div>
+      <RailLink
+        href={desk.href}
+        label={desk.label}
+        icon={ROUTE_ICON[desk.href] ?? Target}
+        active={matches(desk.href, desk.matchers, pathname)}
+        muted={desk.status === "parked"}
+        title={
+          desk.status === "parked"
+            ? `${desk.parkedReason}\n\n${desk.note}`
+            : `${desk.note}\n\nLanes: ${desk.laneKeys.join(", ") || "none in the registry"}`
+        }
+        chip={deskPolicyLabel(desk)}
+        caption={desk.status === "parked" ? `PARKED · ${deskCaption(desk)}` : deskCaption(desk)}
+      />
+      {/* The BOOKS page as an indented child so the route stays findable. */}
+      {desk.books && !collapsed ? (
+        <div className="ml-9 border-l border-bg-border/60 pl-2">
+          <Link
+            href={desk.books.href}
+            title={desk.books.blurb}
+            className={clsx(
+              "block truncate rounded px-1.5 py-1 text-[11px] transition-colors hover:bg-bg-hover hover:text-text-primary",
+              pathname.startsWith(desk.books.href) ? "text-accent-blue" : "text-text-muted",
+            )}
+          >
+            {desk.books.label}
+            <span className="ml-1 text-[9px] text-text-muted/70">{desk.books.views.join(" · ")}</span>
+          </Link>
+        </div>
+      ) : null}
+    </div>
+  );
+
+  // Workspace: the primary destination — first entry of "Market data", with
+  // its BUILT views linked directly underneath.
+  const WorkspaceRow = () => (
+    <div>
+      <RailLink
+        href={WORKSPACE_ROUTE}
+        label="Market Structure"
+        icon={Grid3x3}
+        active={matches(WORKSPACE_ROUTE, undefined, pathname)}
+        title="Market Structure workspace — the cross-lane command surface. One pinned instrument, every lane's read on it."
+        caption="cross-lane · one pin"
+      />
+      {!collapsed ? (
+        <div className="ml-9 space-y-0.5 border-l border-bg-border/60 pl-2">
+          {WORKSPACE_VIEWS.map((v) => (
+            <Link
+              key={v.view}
+              href={v.href}
+              title={v.blurb}
+              className="block truncate rounded px-1.5 py-1 text-[11px] text-text-muted transition-colors hover:bg-bg-hover hover:text-text-primary"
+            >
+              {v.label}
+            </Link>
+          ))}
+        </div>
+      ) : null}
+    </div>
+  );
+
   return (
     <nav
       className={clsx(
@@ -310,150 +348,30 @@ export default function Sidebar() {
       </div>
 
       <div className="space-y-1.5">
-        {/* ── Workspace: the primary destination. Never collapsed. ── */}
-        <div>
-          {collapsed ? (
-            <div className="my-1 border-t border-bg-border/70" />
-          ) : (
-            <div className="flex items-center gap-1 px-2 py-1 text-text-muted">
-              <span className="text-[10px] font-semibold uppercase tracking-[0.12em]">Workspace</span>
-              <span className="rounded bg-accent-blue/15 px-1 text-[8.5px] font-bold uppercase tracking-[0.12em] text-accent-blue">
-                primary
-              </span>
-            </div>
-          )}
-          <div className="space-y-0.5">
-            <RailLink
-              href={WORKSPACE_ROUTE}
-              label="Market Structure"
-              icon={Grid3x3}
-              active={matches(WORKSPACE_ROUTE, undefined, pathname)}
-              title="Market Structure workspace — the cross-lane command surface. One pinned instrument, every lane's read on it."
-              caption="cross-lane · one pin"
-            />
-            {!collapsed ? (
-              <div className="ml-9 space-y-0.5 border-l border-bg-border/60 pl-2">
-                {WORKSPACE_VIEWS.map((v) => (
-                  <Link
-                    key={v.view}
-                    href={v.href}
-                    title={v.blurb}
-                    className="block truncate rounded px-1.5 py-1 text-[11px] text-text-muted transition-colors hover:bg-bg-hover hover:text-text-primary"
-                  >
-                    {v.label}
-                  </Link>
-                ))}
-                <div className="px-1.5 py-1 text-[9px] leading-tight text-text-muted/70">
-                  Risk &amp; Research views are scaffolds — they deep-link back to the legacy desks.
-                </div>
-              </div>
-            ) : null}
-          </div>
-        </div>
-
-        {/* ── Desks, grouped by declared HORIZON; policy terminals first. ── */}
-        {LANE_SECTIONS.map((section) => {
-          if (section.unavailable) {
-            // Permanently unavailable horizon. One row, its reason on hover.
-            const u = section.unavailable;
-            return (
-              <div key={section.id}>
-                {collapsed ? <div className="my-1 border-t border-bg-border/70" /> : null}
-                <div
-                  title={`${u.reason}\n\nMissing capabilities: ${u.missingCapabilities.join(", ")}\nCitation: ${u.citation}`}
-                  className={clsx(
-                    "flex cursor-help items-center gap-2 rounded-lg border border-dashed border-bg-border/70 px-2 py-1.5 text-text-muted",
-                    collapsed ? "justify-center" : "",
-                  )}
-                >
-                  <Lock size={13} className="shrink-0" />
-                  {!collapsed ? (
-                    <span className="min-w-0">
-                      <span className="block truncate text-[11px] font-semibold uppercase tracking-[0.1em]">{section.title}</span>
-                      <span className="block text-[9px] leading-tight">
-                        needs {u.missingCapabilities.join(" + ")} — structurally absent, not unbuilt
-                      </span>
-                    </span>
-                  ) : null}
-                </div>
-              </div>
-            );
-          }
-          const open = isOpen(section.id, section.defaultOpen || laneSectionActive(section.id));
-          const desks = [...section.desks].sort((a, b) => policyRank(a) - policyRank(b));
+        {SIDEBAR_GROUPS.map((group) => {
+          const open = isOpen(group.id, group.defaultOpen ?? groupActive(group.id));
           return (
-            <div key={section.id}>
-              <GroupHeader
-                label={section.title}
-                title={section.blurb}
-                open={open}
-                onToggle={() => toggleGroup(section.id, open)}
-              />
+            <div key={group.id}>
+              <GroupHeader label={group.title} open={open} onToggle={() => toggleGroup(group.id, open)} />
               {open ? (
                 <div className={clsx("space-y-0.5", collapsed ? "mt-0" : "mt-0.5")}>
-                  {desks.map((desk) => (
-                    <div key={desk.href}>
+                  {group.entries.map((entry) => {
+                    if (entry.kind === "workspace") return <WorkspaceRow key="workspace" />;
+                    if (entry.kind === "desk") {
+                      const desk = deskByHref[entry.href];
+                      if (!desk) return null;
+                      return <DeskRow key={desk.href} desk={desk} />;
+                    }
+                    return (
                       <RailLink
-                        href={desk.href}
-                        label={desk.label}
-                        icon={DESK_ICON[desk.href] ?? Target}
-                        active={matches(desk.href, desk.matchers, pathname)}
-                        muted={desk.status === "parked"}
-                        title={
-                          desk.status === "parked"
-                            ? `${desk.parkedReason}\n\n${desk.note}`
-                            : `${desk.note}\n\nLanes: ${desk.laneKeys.join(", ") || "none in the registry"}`
-                        }
-                        chip={deskPolicyLabel(desk)}
-                        caption={desk.status === "parked" ? `PARKED · ${deskCaption(desk)}` : deskCaption(desk)}
+                        key={entry.href}
+                        href={entry.href}
+                        label={entry.label}
+                        icon={ROUTE_ICON[entry.href] ?? Target}
+                        active={matches(entry.href, entry.matchers, pathname)}
                       />
-                      {/* The BOOKS page, as an indented child inside the same
-                          (open-by-default) section. A books route linked only
-                          from a collapsed group is a route nobody finds. */}
-                      {desk.books && !collapsed ? (
-                        <div className="ml-9 border-l border-bg-border/60 pl-2">
-                          <Link
-                            href={desk.books.href}
-                            title={desk.books.blurb}
-                            className={clsx(
-                              "block truncate rounded px-1.5 py-1 text-[11px] transition-colors hover:bg-bg-hover hover:text-text-primary",
-                              pathname.startsWith(desk.books.href)
-                                ? "text-accent-blue"
-                                : "text-text-muted",
-                            )}
-                          >
-                            {desk.books.label}
-                            <span className="ml-1 text-[9px] text-text-muted/70">
-                              {desk.books.views.join(" · ")}
-                            </span>
-                          </Link>
-                        </div>
-                      ) : null}
-                    </div>
-                  ))}
-                </div>
-              ) : null}
-            </div>
-          );
-        })}
-
-        {/* ── Non-lane function groups, unchanged in content. ── */}
-        {OPS_GROUPS.map((group) => {
-          const open = isOpen(group.title, group.defaultOpen ?? opsGroupActive(group.title));
-          return (
-            <div key={group.title}>
-              <GroupHeader label={group.title} open={open} onToggle={() => toggleGroup(group.title, open)} />
-              {open ? (
-                <div className={clsx("space-y-0.5", collapsed ? "mt-0" : "mt-0.5")}>
-                  {group.items.map(({ href, label, icon: Icon, matchers }) => (
-                    <RailLink
-                      key={href}
-                      href={href}
-                      label={label}
-                      icon={Icon}
-                      active={matches(href, matchers, pathname)}
-                    />
-                  ))}
+                    );
+                  })}
                 </div>
               ) : null}
             </div>

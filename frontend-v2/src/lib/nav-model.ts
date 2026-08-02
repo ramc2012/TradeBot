@@ -434,6 +434,107 @@ export const LANE_SECTIONS: NavSection[] = [
   },
 ];
 
+// ─── Sidebar grouping (2026-08-02, owner-requested) ─────────────────────────
+//
+// The SIDEBAR renders these seven functional groups instead of the horizon
+// sections — the owner found eleven headers too many. The LANDING page keeps
+// LANE_SECTIONS (the horizon × policy taxonomy) untouched; this is a VIEW over
+// the same desks, so every desk href below must exist in LANE_SECTIONS
+// (tests/nav-model.test.ts asserts it).
+//
+// "Future lanes" is the owner's name for lanes that are linked but not part
+// of today's production loop (Gann, Fractal, Sniper) — it does NOT change any
+// desk's status/horizon in the model above.
+
+export type SidebarEntry =
+  | { kind: "desk"; href: string }
+  | { kind: "workspace" }
+  | { kind: "link"; href: string; label: string; matchers?: string[] };
+
+export type SidebarGroup = {
+  id: string;
+  title: string;
+  entries: SidebarEntry[];
+  defaultOpen?: boolean;
+};
+
+export const SIDEBAR_GROUPS: SidebarGroup[] = [
+  {
+    id: "overview",
+    title: "Overview",
+    defaultOpen: true,
+    entries: [
+      { kind: "link", href: "/", label: "Landing" },
+      { kind: "desk", href: "/strategies/overview" },
+      { kind: "link", href: "/positions", label: "Positions", matchers: ["/positions", "/reports"] },
+      { kind: "link", href: "/analytics", label: "Portfolio" },
+      { kind: "link", href: "/trading", label: "Execution" },
+      { kind: "link", href: "/proposals", label: "Proposals" },
+      { kind: "link", href: "/agent", label: "AI agent" },
+    ],
+  },
+  {
+    id: "market-data",
+    title: "Market data",
+    defaultOpen: true,
+    entries: [
+      { kind: "workspace" },
+      { kind: "link", href: "/market", label: "Option chain" },
+      { kind: "link", href: "/charts", label: "Charts" },
+      { kind: "link", href: "/orderflow", label: "Orderflow" },
+    ],
+  },
+  {
+    id: "technical",
+    title: "Technical lanes",
+    defaultOpen: true,
+    entries: [
+      { kind: "desk", href: "/strategies/nse/live" },
+      { kind: "desk", href: "/strategies/macd-refined" },
+      { kind: "desk", href: "/strategies/directional" },
+      { kind: "desk", href: "/strategies/directional?horizon=positional" },
+      { kind: "desk", href: "/strategies/cbe" },
+    ],
+  },
+  {
+    id: "auction-mp",
+    title: "Auction / MP lanes",
+    defaultOpen: true,
+    entries: [
+      { kind: "desk", href: "/strategies/auction" },
+      { kind: "desk", href: "/strategies/mp" },
+      { kind: "desk", href: "/strategies/commodity" },
+      { kind: "desk", href: "/strategies/institutional-convergence" },
+    ],
+  },
+  {
+    id: "research",
+    title: "Research",
+    entries: [
+      { kind: "link", href: "/research", label: "Research lab", matchers: ["/research", "/analysis", "/backtester", "/data"] },
+      { kind: "link", href: "/macro-research", label: "Macro" },
+      { kind: "link", href: "/sector-interaction", label: "Sector network" },
+    ],
+  },
+  {
+    id: "future",
+    title: "Future lanes",
+    entries: [
+      { kind: "desk", href: "/strategies/gann" },
+      { kind: "desk", href: "/strategies/fractal" },
+      { kind: "desk", href: "/strategies/sniper" },
+    ],
+  },
+  {
+    id: "settings",
+    title: "Settings",
+    entries: [
+      { kind: "link", href: "/system", label: "System hub", matchers: ["/system", "/health", "/lane-health"] },
+      { kind: "link", href: "/settings", label: "Settings" },
+    ],
+  },
+];
+
 /** Every desk in the model, section order preserved. */
 export function allDesks(): NavDesk[] {
   return LANE_SECTIONS.flatMap((s) => s.desks);
