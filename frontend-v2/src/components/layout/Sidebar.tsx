@@ -27,6 +27,7 @@ import {
   BarChart3,
   Bot,
   BriefcaseBusiness,
+  CalendarClock,
   CandlestickChart,
   ChevronDown,
   ChevronLeft,
@@ -48,6 +49,7 @@ import {
   Target,
   Waves,
   Workflow,
+  Zap,
 } from "lucide-react";
 
 import { useLaneRegistry } from "@/hooks/useLaneRegistry";
@@ -87,8 +89,10 @@ const ROUTE_ICON: Record<string, typeof Target> = {
   "/strategies/mp": Sigma,
   "/strategies/commodity": Waves,
   "/strategies/institutional-convergence": Network,
-  "/strategies/directional": Target,
-  "/strategies/directional?horizon=positional": Target,
+  // The dual-horizon Long Premium desk: lightning for the weekly-DTE
+  // intraday horizon, calendar-clock for the monthly-DTE positional one.
+  "/strategies/directional": Zap,
+  "/strategies/directional?horizon=positional": CalendarClock,
   "/strategies/nse/live": Crosshair,
   "/strategies/macd-refined": BarChart3,
   "/strategies/gann": Compass,
