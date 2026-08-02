@@ -16,41 +16,17 @@ import { createPositionsOverviewSocket } from "@/lib/websocket";
 import {
   type AppStrategyPortfolioSnapshot,
   type AppStrategyPositionRow,
+  type PositionsOverviewPayload,
   buildClosedTradeRows,
   buildOpenPositionRows,
   fetchAppStrategyPortfolioSnapshot,
+  normalizePositionsOverview,
 } from "@/lib/strategy-position-ledger";
 import { PortfolioReconciliation } from "@/components/strategies/overview/PortfolioReconciliation";
 
 type PositionScope = "all" | "options" | "futures";
 
 type GlobalPositionRow = AppStrategyPositionRow;
-type PositionsOverviewPayload = AppStrategyPortfolioSnapshot & {
-  strategy?: AppStrategyPortfolioSnapshot["nse"];
-  manual?: unknown;
-  us_macd?: AppStrategyPortfolioSnapshot["usMacd"];
-};
-
-function normalizePositionsOverview(payload: PositionsOverviewPayload): AppStrategyPortfolioSnapshot {
-  return {
-    nse: payload.nse ?? payload.strategy ?? null,
-    commodity: payload.commodity ?? null,
-    directional: payload.directional ?? null,
-    gann: payload.gann ?? null,
-    auction: payload.auction ?? null,
-    fractal: payload.fractal ?? null,
-    cbe: payload.cbe ?? null,
-    macd: payload.macd ?? null,
-    usMacd: payload.usMacd ?? payload.us_macd ?? null,
-    // The socket payload predates these three books. Absent stays NULL, which
-    // renders as "not reported" rather than as an empty book.
-    auctionMcx: payload.auctionMcx ?? null,
-    convergenceNse: payload.convergenceNse ?? null,
-    convergenceMcx: payload.convergenceMcx ?? null,
-    errors: payload.errors ?? {},
-    fetchedAt: payload.fetchedAt ?? new Date().toISOString(),
-  };
-}
 
 const RESEARCH_BOOK_SOURCES = ["directional", "gann", "auction", "fractal", "cbe"];
 

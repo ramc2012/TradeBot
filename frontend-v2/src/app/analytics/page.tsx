@@ -27,41 +27,17 @@ import {
 import {
   type AppStrategyPortfolioSnapshot,
   type AppStrategyPositionRow,
+  type PositionsOverviewPayload,
   buildClosedTradeRows,
   buildOpenPositionRows,
   buildStrategyBookSummaries,
   fetchAppStrategyPortfolioSnapshot,
+  normalizePositionsOverview,
   toEpoch,
 } from "@/lib/strategy-position-ledger";
 import { getStrategyEquityHistory, getStrategyPortfolio } from "@/lib/api";
 import { useLiveSnapshotQuery } from "@/hooks/useLiveSnapshotQuery";
 import { createPositionsOverviewSocket } from "@/lib/websocket";
-
-type PositionsOverviewPayload = AppStrategyPortfolioSnapshot & {
-  strategy?: AppStrategyPortfolioSnapshot["nse"];
-  us_macd?: AppStrategyPortfolioSnapshot["usMacd"];
-};
-
-function normalizePositionsOverview(payload: PositionsOverviewPayload): AppStrategyPortfolioSnapshot {
-  return {
-    nse: payload.nse ?? payload.strategy ?? null,
-    commodity: payload.commodity ?? null,
-    directional: payload.directional ?? null,
-    gann: payload.gann ?? null,
-    auction: payload.auction ?? null,
-    fractal: payload.fractal ?? null,
-    cbe: payload.cbe ?? null,
-    macd: payload.macd ?? null,
-    usMacd: payload.usMacd ?? payload.us_macd ?? null,
-    // The socket payload predates these three books. Absent stays NULL, which
-    // renders as "not reported" rather than as an empty book.
-    auctionMcx: payload.auctionMcx ?? null,
-    convergenceNse: payload.convergenceNse ?? null,
-    convergenceMcx: payload.convergenceMcx ?? null,
-    errors: payload.errors ?? {},
-    fetchedAt: payload.fetchedAt ?? new Date().toISOString(),
-  };
-}
 
 function fmtMoney(value?: number | null, digits = 0) {
   if (value == null || Number.isNaN(value)) return "--";

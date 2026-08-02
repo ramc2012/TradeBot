@@ -127,6 +127,35 @@ export type AppStrategyPortfolioSnapshot = {
   fetchedAt: string;
 };
 
+/** Wire shape of the /ws/positions-overview socket payload — a snapshot plus
+ *  legacy field aliases from before the book renames. */
+export type PositionsOverviewPayload = AppStrategyPortfolioSnapshot & {
+  strategy?: AppStrategyPortfolioSnapshot["nse"];
+  manual?: unknown;
+  us_macd?: AppStrategyPortfolioSnapshot["usMacd"];
+};
+
+export function normalizePositionsOverview(payload: PositionsOverviewPayload): AppStrategyPortfolioSnapshot {
+  return {
+    nse: payload.nse ?? payload.strategy ?? null,
+    commodity: payload.commodity ?? null,
+    directional: payload.directional ?? null,
+    gann: payload.gann ?? null,
+    auction: payload.auction ?? null,
+    fractal: payload.fractal ?? null,
+    cbe: payload.cbe ?? null,
+    macd: payload.macd ?? null,
+    usMacd: payload.usMacd ?? payload.us_macd ?? null,
+    // The socket payload predates these three books. Absent stays NULL, which
+    // renders as "not reported" rather than as an empty book.
+    auctionMcx: payload.auctionMcx ?? null,
+    convergenceNse: payload.convergenceNse ?? null,
+    convergenceMcx: payload.convergenceMcx ?? null,
+    errors: payload.errors ?? {},
+    fetchedAt: payload.fetchedAt ?? new Date().toISOString(),
+  };
+}
+
 export function computeDTE(expiry?: string | null): number | null {
   if (!expiry) return null;
   const parsed = new Date(expiry);
