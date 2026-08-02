@@ -15,8 +15,8 @@ import { clsx } from "clsx";
 
 import { REFRESH_MS, Section, StatusBadge, formatIST, formatNumber, formatSignedMoney, tone } from "@/components/desk-ui";
 import { CHART } from "@/components/strategies/shared";
-import { OptionStudyChart, type StudyBar, type StudyLine } from "@/components/strategies/nse/OptionStudyChart";
-import { type OptionChartContract } from "@/components/strategies/nse/OptionChartModal";
+import { OptionStudyChart, type StudyBar, type StudyLine } from "@/components/strategies/shared/OptionStudyChart";
+import { type OptionChartContract } from "@/components/strategies/shared/OptionChartModal";
 import { getOptionOHLC } from "@/lib/api";
 
 type CockpitPosition = {

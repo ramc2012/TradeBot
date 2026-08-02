@@ -36,6 +36,7 @@ import {
   toEpoch,
 } from "@/lib/strategy-position-ledger";
 import { getStrategyEquityHistory, getStrategyPortfolio } from "@/lib/api";
+import { MetricTile } from "@/components/desk-ui";
 import { useLiveSnapshotQuery } from "@/hooks/useLiveSnapshotQuery";
 import { createPositionsOverviewSocket } from "@/lib/websocket";
 
@@ -76,26 +77,6 @@ function formatTimestamp(value?: string | null) {
 function shortReason(value?: string | null) {
   if (!value) return "--";
   return value.replaceAll("_", " ");
-}
-
-function MetricCard({
-  label,
-  value,
-  detail,
-  color = "text-text-primary",
-}: {
-  label: string;
-  value: string | number;
-  detail?: string;
-  color?: string;
-}) {
-  return (
-    <div className="rounded-lg border border-bg-border bg-bg-secondary/35 p-4">
-      <div className="text-[11px] uppercase tracking-[0.16em] text-text-muted">{label}</div>
-      <div className={clsx("mt-2 font-mono text-lg font-semibold", color)}>{value}</div>
-      {detail ? <div className="mt-1 text-[11px] text-text-muted">{detail}</div> : null}
-    </div>
-  );
 }
 
 function SectionTitle({
@@ -283,11 +264,11 @@ export default function AnalyticsPage() {
         />
 
         <div className="mt-4 grid gap-3 md:grid-cols-2 xl:grid-cols-5">
-          <MetricCard label="Open P&L" value={fmtSigned(openPnl, 0)} color={tone(openPnl)} />
-          <MetricCard label="Realized P&L" value={fmtSigned(realizedPnl, 0)} color={tone(realizedPnl)} />
-          <MetricCard label="Total P&L" value={fmtSigned(totalPnl, 0)} color={tone(totalPnl)} />
-          <MetricCard label="Open Positions" value={String(openRows.length)} detail={`${activeBooks} books active`} />
-          <MetricCard label="Closed Trades" value={String(closedCount)} detail="strategy books only" />
+          <MetricTile label="Open P&L" value={fmtSigned(openPnl, 0)} color={tone(openPnl)} />
+          <MetricTile label="Realized P&L" value={fmtSigned(realizedPnl, 0)} color={tone(realizedPnl)} />
+          <MetricTile label="Total P&L" value={fmtSigned(totalPnl, 0)} color={tone(totalPnl)} />
+          <MetricTile label="Open Positions" value={String(openRows.length)} detail={`${activeBooks} books active`} />
+          <MetricTile label="Closed Trades" value={String(closedCount)} detail="strategy books only" />
         </div>
 
         {sourceErrors.length ? (
@@ -308,10 +289,10 @@ export default function AnalyticsPage() {
           />
 
           <div className="mt-4 grid gap-3 sm:grid-cols-2">
-            <MetricCard label="Initial Capital" value={fmtMoney(commodityInitial)} />
-            <MetricCard label="Realized Closed" value={fmtSigned(commodityRealized, 0)} color={tone(commodityRealized)} />
-            <MetricCard label="Open Mark" value={fmtSigned(commodityUnrealized, 0)} color={tone(commodityUnrealized)} />
-            <MetricCard label="Reported Equity" value={fmtMoney(commodityEquity)} color={tone(commodityRealized + commodityUnrealized)} />
+            <MetricTile label="Initial Capital" value={fmtMoney(commodityInitial)} />
+            <MetricTile label="Realized Closed" value={fmtSigned(commodityRealized, 0)} color={tone(commodityRealized)} />
+            <MetricTile label="Open Mark" value={fmtSigned(commodityUnrealized, 0)} color={tone(commodityUnrealized)} />
+            <MetricTile label="Reported Equity" value={fmtMoney(commodityEquity)} color={tone(commodityRealized + commodityUnrealized)} />
           </div>
 
           <div className="mt-4 rounded-lg border border-bg-border bg-bg-primary/30 p-4">
@@ -328,8 +309,8 @@ export default function AnalyticsPage() {
           </div>
 
           <div className="mt-4 grid gap-3 sm:grid-cols-2">
-            <MetricCard label="Day P&L Bucket" value={fmtSigned(commoditySummary?.day_pnl, 0)} color={tone(commoditySummary?.day_pnl)} />
-            <MetricCard label="Open Commodity Rows" value={String(commodityOpenRows.length)} />
+            <MetricTile label="Day P&L Bucket" value={fmtSigned(commoditySummary?.day_pnl, 0)} color={tone(commoditySummary?.day_pnl)} />
+            <MetricTile label="Open Commodity Rows" value={String(commodityOpenRows.length)} />
           </div>
         </div>
 
@@ -399,10 +380,10 @@ export default function AnalyticsPage() {
                 <div className={clsx("font-mono text-sm font-semibold", tone(book.totalPnl))}>{fmtSigned(book.totalPnl, 0)}</div>
               </div>
               <div className="mt-4 grid grid-cols-2 gap-2 text-xs">
-                <MetricCard label="Open" value={String(book.openPositions)} />
-                <MetricCard label="Closed" value={String(book.closedPositions)} />
-                <MetricCard label="Realized" value={fmtSigned(book.realizedPnl, 0)} color={tone(book.realizedPnl)} />
-                <MetricCard label="Open P&L" value={fmtSigned(book.unrealizedPnl, 0)} color={tone(book.unrealizedPnl)} />
+                <MetricTile label="Open" value={String(book.openPositions)} />
+                <MetricTile label="Closed" value={String(book.closedPositions)} />
+                <MetricTile label="Realized" value={fmtSigned(book.realizedPnl, 0)} color={tone(book.realizedPnl)} />
+                <MetricTile label="Open P&L" value={fmtSigned(book.unrealizedPnl, 0)} color={tone(book.unrealizedPnl)} />
               </div>
             </div>
           ))}

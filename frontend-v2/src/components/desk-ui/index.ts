@@ -31,6 +31,7 @@ export {
 } from "./tones";
 
 export { MetricTile } from "./MetricTile";
+export { Sparkline } from "./Sparkline";
 export { StatusBadge } from "./StatusBadge";
 export { Section } from "./Section";
 export { DeskShell, useUrlTab, useUrlChoice, type DeskTab } from "./DeskShell";

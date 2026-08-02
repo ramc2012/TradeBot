@@ -68,7 +68,7 @@ import { LastUpdated } from "@/components/common/LastUpdated";
 import { PaperPerformance } from "@/components/strategies/shared";
 import { StrategyLiveStream } from "@/components/strategies/shared/StrategyLiveStream";
 import { SignalQualityTab } from "@/components/strategies/overview/SignalQualityTab";
-import { OptionChartModal, type OptionChartContract } from "@/components/strategies/nse/OptionChartModal";
+import { OptionChartModal, type OptionChartContract } from "@/components/strategies/shared/OptionChartModal";
 import { MacdCockpit } from "@/components/strategies/nse/MacdCockpit";
 import { useLiveSnapshotQuery } from "@/hooks/useLiveSnapshotQuery";
 import { useStrategyPositionsStream } from "@/hooks/useStrategyPositionsStream";

@@ -9,7 +9,7 @@
 import { CHART } from "../shared/chartTheme";
 import { StatusBadge, formatNumber, formatPct } from "@/components/desk-ui";
 
-import { Sparkline } from "./Sparkline";
+import { Sparkline } from "@/components/desk-ui";
 
 export type Commodity = {
   code: string;

@@ -23,6 +23,7 @@ import {
   normalizePositionsOverview,
 } from "@/lib/strategy-position-ledger";
 import { PortfolioReconciliation } from "@/components/strategies/overview/PortfolioReconciliation";
+import { MetricTile } from "@/components/desk-ui";
 
 type PositionScope = "all" | "options" | "futures";
 
@@ -124,26 +125,6 @@ function rowMatchesFilters(row: GlobalPositionRow, scope: PositionScope, search:
     row.signalReason,
   ].join(" ").toLowerCase();
   return haystack.includes(search);
-}
-
-function MetricTile({
-  label,
-  value,
-  detail,
-  tone,
-}: {
-  label: string;
-  value: string;
-  detail?: string;
-  tone?: string;
-}) {
-  return (
-    <div className="rounded-2xl border border-bg-border bg-bg-secondary/35 px-4 py-3">
-      <div className="text-[11px] uppercase tracking-[0.16em] text-text-muted">{label}</div>
-      <div className={clsx("mt-2 font-mono text-lg font-semibold text-text-primary", tone)}>{value}</div>
-      {detail ? <div className="mt-1 text-[11px] text-text-muted">{detail}</div> : null}
-    </div>
-  );
 }
 
 function ScopeButton({
@@ -589,7 +570,7 @@ export default function PositionsPage() {
 
         <div className="mt-5 grid gap-3 md:grid-cols-2 xl:grid-cols-5">
           <MetricTile label="Open Positions" value={String(filteredOpenRows.length)} detail={isLoading ? "Refreshing…" : `${openRows.length} total open`} />
-          <MetricTile label="Open P&L" value={formatSigned(totalOpenPnl, 0)} tone={pnlTone(totalOpenPnl)} />
+          <MetricTile label="Open P&L" value={formatSigned(totalOpenPnl, 0)} color={pnlTone(totalOpenPnl)} />
           <MetricTile label="Gross Notional" value={formatCompact(grossNotional)} />
           <MetricTile label="Options / Futures" value={`${optionsCount} / ${futuresCount}`} />
           <MetricTile label="Active Desks" value={String(desksActive)} detail="strategy-owned books only" />
@@ -655,9 +636,9 @@ export default function PositionsPage() {
 
         <div className="mt-4 grid gap-3 md:grid-cols-2 xl:grid-cols-4">
           <MetricTile label="Closed Trades" value={String(filteredClosedRows.length)} detail={`${closedRows.length} total closed`} />
-          <MetricTile label="Realized P&L" value={formatSigned(totalClosedPnl, 0)} tone={pnlTone(totalClosedPnl)} />
+          <MetricTile label="Realized P&L" value={formatSigned(totalClosedPnl, 0)} color={pnlTone(totalClosedPnl)} />
           <MetricTile label="Winners" value={String(closedWinners)} detail={`${formatNumber(closedWinRate, 1)}% win rate`} />
-          <MetricTile label="Avg Closed P&L" value={formatSigned(filteredClosedRows.length ? totalClosedPnl / filteredClosedRows.length : 0, 0)} tone={pnlTone(totalClosedPnl)} />
+          <MetricTile label="Avg Closed P&L" value={formatSigned(filteredClosedRows.length ? totalClosedPnl / filteredClosedRows.length : 0, 0)} color={pnlTone(totalClosedPnl)} />
         </div>
 
         <ClosedPositionsTable rows={filteredClosedRows} />

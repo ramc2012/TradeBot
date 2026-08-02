@@ -18,7 +18,7 @@ import { CandlestickChart, ChevronLeft, ChevronRight, X } from "lucide-react";
 
 import { REFRESH_MS, Section, StatusBadge, formatIST, formatNumber, tone } from "@/components/desk-ui";
 import { CHART } from "@/components/strategies/shared";
-import { OptionStudyChart, type StudyBar, type StudyLine } from "@/components/strategies/nse/OptionStudyChart";
+import { OptionStudyChart, type StudyBar, type StudyLine } from "@/components/strategies/shared/OptionStudyChart";
 import { getOptionOHLC } from "@/lib/api";
 
 export type OptionChartContract = {

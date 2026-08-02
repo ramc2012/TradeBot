@@ -18,6 +18,7 @@ import {
   rowsToCsv,
   type ReportRow,
 } from "@/lib/reports-ledger";
+import { MetricTile } from "@/components/desk-ui";
 
 function fmt(n?: number | null, digits = 2): string {
   if (n == null || Number.isNaN(n)) return "—";
@@ -45,16 +46,6 @@ function dateOnly(iso?: string | null): string | null {
   const d = new Date(iso);
   if (Number.isNaN(d.getTime())) return iso.slice(0, 10);
   return d.toLocaleDateString("en-CA", { timeZone: "Asia/Kolkata" });
-}
-
-function KpiCard({ label, value, tone, detail }: { label: string; value: string; tone?: string; detail?: string }) {
-  return (
-    <div className="rounded-xl border border-bg-border bg-bg-secondary/25 p-3">
-      <div className="text-[10px] uppercase tracking-[0.14em] text-text-muted">{label}</div>
-      <div className={clsx("mt-1.5 font-mono text-base font-semibold", tone || "text-text-primary")}>{value}</div>
-      {detail ? <div className="mt-0.5 text-[10px] text-text-muted">{detail}</div> : null}
-    </div>
-  );
 }
 
 const deskTone: Record<string, string> = {
@@ -169,12 +160,12 @@ export default function ReportsPage() {
 
       {/* KPIs */}
       <div className="grid grid-cols-2 gap-2 md:grid-cols-3 xl:grid-cols-6">
-        <KpiCard label="Trades" value={String(kpis.trades)} />
-        <KpiCard label="Gross P&L" value={fmtSigned(kpis.gross, 0)} tone={pnlTone(kpis.gross)} />
-        <KpiCard label="Win rate" value={kpis.winRate != null ? `${kpis.winRate.toFixed(1)}%` : "—"} />
-        <KpiCard label="Profit factor" value={kpis.profitFactor != null ? fmt(kpis.profitFactor, 2) : "—"} />
-        <KpiCard label="Avg win" value={fmtSigned(kpis.avgWin, 0)} tone="text-accent-green" />
-        <KpiCard label="Avg loss" value={fmtSigned(kpis.avgLoss, 0)} tone="text-accent-red" />
+        <MetricTile size="sm" label="Trades" value={String(kpis.trades)} />
+        <MetricTile size="sm" label="Gross P&L" value={fmtSigned(kpis.gross, 0)} color={pnlTone(kpis.gross)} />
+        <MetricTile size="sm" label="Win rate" value={kpis.winRate != null ? `${kpis.winRate.toFixed(1)}%` : "—"} />
+        <MetricTile size="sm" label="Profit factor" value={kpis.profitFactor != null ? fmt(kpis.profitFactor, 2) : "—"} />
+        <MetricTile size="sm" label="Avg win" value={fmtSigned(kpis.avgWin, 0)} color="text-accent-green" />
+        <MetricTile size="sm" label="Avg loss" value={fmtSigned(kpis.avgLoss, 0)} color="text-accent-red" />
       </div>
 
       {/* Filters */}

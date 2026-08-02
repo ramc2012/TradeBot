@@ -31,6 +31,7 @@ import {
   getSectorRotationComponents,
 } from "@/lib/api";
 import { useLiveSnapshotQuery } from "@/hooks/useLiveSnapshotQuery";
+import { MetricTile as DeskMetricTile, StatusBadge as DeskStatusBadge } from "@/components/desk-ui";
 import {
   createMarketOptionChainSocket,
   createMarketWatchlistSocket,
@@ -492,37 +493,16 @@ function badgeTone(value?: string | null) {
   return "border-bg-border bg-bg-secondary/40 text-text-secondary";
 }
 
+// Thin adapter over desk-ui StatusBadge: market callers pass a semantic
+// keyword (or reuse the label) that badgeTone maps to tone classes.
 function StatusBadge({ label, tone }: { label: string; tone?: string | null }) {
-  return (
-    <span
-      className={clsx(
-        "inline-flex items-center rounded-md border px-1.5 py-0.5 text-[10px] font-semibold uppercase tracking-[0.08em]",
-        badgeTone(tone || label),
-      )}
-    >
-      {label}
-    </span>
-  );
+  return <DeskStatusBadge label={label} tone={badgeTone(tone || label)} />;
 }
 
-function MetricTile({
-  label,
-  value,
-  detail,
-  tone,
-}: {
-  label: string;
-  value: string;
-  detail?: string;
-  tone?: string;
-}) {
-  return (
-    <div className="rounded-lg border border-bg-border bg-bg-secondary/35 px-3 py-2" title={detail || label}>
-      <div className="text-[10px] uppercase tracking-[0.1em] text-text-muted">{label}</div>
-      <div className={clsx("mt-1 font-mono text-base font-semibold text-text-primary", tone)}>{value}</div>
-      {detail ? <div className="truncate text-[10px] text-text-muted">{detail}</div> : null}
-    </div>
-  );
+// Thin adapter over desk-ui MetricTile (size="sm"); local prop name `tone`
+// maps to desk-ui `color`. The Phase-4 split of this page retires it.
+function MetricTile({ label, value, detail, tone }: { label: string; value: string; detail?: string; tone?: string }) {
+  return <DeskMetricTile size="sm" label={label} value={value} detail={detail} color={tone} />;
 }
 
 function PanelHeader({

@@ -30,7 +30,7 @@ import { api as apiClient } from "@/lib/api";
 
 import { CommodityBoard, type Commodity } from "./CommodityBoard";
 import { SectorScatter, type ScatterSector } from "./SectorScatter";
-import { Sparkline } from "./Sparkline";
+import { Sparkline } from "@/components/desk-ui";
 
 const TABS = [
   { key: "overview", label: "Overview", icon: Gauge },

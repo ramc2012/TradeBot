@@ -49,7 +49,7 @@ import { rowTapeSymbol } from "@/lib/marketSymbols";
 
 import { RrgScatter, QUADRANT_COLOR, type RrgPoint } from "./RrgScatter";
 import { SectorRotation, type SectorRow } from "./SectorRotation";
-import { Sparkline } from "./Sparkline";
+import { Sparkline } from "@/components/desk-ui";
 
 const TABS = [
   { key: "portfolio", label: "Portfolio", icon: Briefcase },
@@ -1087,7 +1087,7 @@ function CandidateTable({ rows }: { rows: ScanResult[] }) {
                   <td className="px-2.5 py-1.5 text-right font-mono text-[12px] text-text-secondary">{formatNumber(r.latest_close, 1)}</td>
                   <td className="px-2.5 py-1.5 text-right">
                     <div className="ml-auto w-[96px]">
-                      <Sparkline values={r.recent_closes_30d} />
+                      <Sparkline values={r.recent_closes_30d} endDot />
                     </div>
                   </td>
                   <td className="px-2.5 py-1.5 text-right">

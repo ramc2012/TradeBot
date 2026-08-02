@@ -41,7 +41,7 @@ import {
 import { LiveMarkCell } from "@/components/terminal/LiveMarkCell";
 import { legTapeSymbol } from "@/lib/marketSymbols";
 import { LastUpdated, newestTimestamp } from "@/components/common/LastUpdated";
-import { OptionChartModal, type OptionChartContract } from "@/components/strategies/nse/OptionChartModal";
+import { OptionChartModal, type OptionChartContract } from "@/components/strategies/shared/OptionChartModal";
 import { SignalQualityTab } from "@/components/strategies/overview/SignalQualityTab";
 import { selectStrategySlice, useStrategyPositionsStream } from "@/hooks/useStrategyPositionsStream";
 
