@@ -708,3 +708,178 @@ export function buildStrategyBookSummaries(snapshot?: AppStrategyPortfolioSnapsh
 
   return summaries;
 }
+
+// ─── Lifetime closed-trade ledger (the Reports tab) ─────────────────────────
+//
+// The snapshot above is the LIVE book (open positions + recent closes, capped
+// per desk). Reports need the full closed-trade archive, so this section
+// re-fetches each desk with status=closed and a deep limit, normalizing into
+// the SAME AppStrategyPositionRow shape (status:"closed", realizedPnl set,
+// currentPrice = exit price). Absorbed from the former lib/reports-ledger.ts
+// so there is exactly one cross-desk normalizer and one row type.
+
+const str = (...vals: unknown[]): string => {
+  for (const v of vals) {
+    if (v != null && v !== "") return String(v);
+  }
+  return "";
+};
+
+const numOrNull = (v: unknown): number | null => {
+  if (v == null || v === "") return null;
+  const n = Number(v);
+  return Number.isFinite(n) ? n : null;
+};
+
+const firstNum = (row: Record<string, unknown>, keys: string[]): number | null => {
+  for (const k of keys) {
+    const n = numOrNull(row[k]);
+    if (n != null) return n;
+  }
+  return null;
+};
+
+/** Pull the closed-trade array out of whatever wrapper a desk returns. */
+function extractClosedRows(payload: unknown, deskKey: string): Record<string, unknown>[] {
+  if (!payload) return [];
+  const p = payload as Record<string, unknown>;
+  // NSE / commodity status endpoints expose split trade history.
+  if (deskKey === "nse" || deskKey === "commodity") {
+    const lane = deskKey === "nse"
+      ? ((p.strategies as Record<string, unknown>[] | undefined) || []).find(
+          (s) => (s as Record<string, unknown>).key === "macd_strategy",
+        ) || (p.strategies as Record<string, unknown>[] | undefined)?.[0]
+      : p;
+    const src = (lane as Record<string, unknown>) || {};
+    const hist = (src.trade_history || src.historical_trades || src.today_trades) as unknown[] | undefined;
+    return Array.isArray(hist) ? (hist as Record<string, unknown>[]) : [];
+  }
+  // Paper-position desks expose closed_positions.
+  const closed = (p.closed_positions || p.closed || p.positions) as unknown[] | undefined;
+  if (Array.isArray(closed)) return closed as Record<string, unknown>[];
+  if (Array.isArray(payload)) return payload as Record<string, unknown>[];
+  return [];
+}
+
+const LEDGER_GROUP: Record<string, InstrumentGroup> = {
+  nse: "options",
+  commodity: "futures",
+  directional: "options",
+  cbe: "other",
+  auction: "options",
+  fractal: "options",
+};
+
+function normalizeClosedRow(
+  row: Record<string, unknown>,
+  desk: string,
+  deskKey: string,
+  idx: number,
+): AppStrategyPositionRow | null {
+  const pnl = firstNum(row, ["pnl", "realized_pnl", "net_pnl", "realised_pnl"]);
+  const exitTime = str(row.exit_time, row.closed_at, row.recorded_at, row.updated_at) || null;
+  const entryTime = str(row.entry_time, row.opened_at, row.entered_at) || null;
+  // A row with neither a P&L nor an exit timestamp isn't a closed trade.
+  if (pnl == null && !exitTime) return null;
+
+  const symbolRaw = str(row.underlying, row.symbol, row.instrument, row.trading_symbol) || "—";
+  const symbol = symbolRaw.includes(":") ? symbolRaw.split(":").pop() || symbolRaw : symbolRaw;
+  const side = str(row.option_type, row.action, row.side, row.direction).toUpperCase() || "—";
+  const entryPrice = firstNum(row, ["entry_price", "entry_premium", "avg_entry", "avg_price"]);
+  const exitPrice = firstNum(row, ["exit_price", "exit_premium", "mark_price", "latest_close", "close_price"]);
+  const qty = firstNum(row, ["qty", "quantity", "lots"]);
+  let returnPct = firstNum(row, ["return_pct", "return_percent", "pnl_pct"]);
+  if (returnPct == null && pnl != null && entryPrice != null && qty != null && entryPrice * qty !== 0) {
+    returnPct = (pnl / Math.abs(entryPrice * qty)) * 100;
+  }
+  const reason = str(row.close_reason, row.exit_reason, row.reason, row.signal_reason, row.pending_close_reason) || "—";
+
+  const strike = str(row.strike);
+  const optType = str(row.option_type);
+  const expiry = str(row.expiry);
+  const contract = [optType, strike, expiry].filter(Boolean).join(" ") || symbol;
+
+  return {
+    id: `${deskKey}-${symbol}-${exitTime || entryTime || idx}-${idx}`,
+    desk,
+    strategy: desk,
+    source: deskKey,
+    venue: deskKey === "commodity" ? "MCX" : "NSE",
+    underlying: symbol,
+    symbol,
+    contract: contract.replaceAll("_", " "),
+    instrumentGroup: LEDGER_GROUP[deskKey] || "other",
+    action: side,
+    qty: qty ?? 0,
+    entryPrice: entryPrice ?? 0,
+    currentPrice: exitPrice ?? 0,
+    unrealizedPnl: 0,
+    realizedPnl: pnl,
+    returnPct,
+    updatedAt: exitTime,
+    enteredAt: entryTime,
+    closedAt: exitTime,
+    expiry: expiry || null,
+    signalReason: reason.replaceAll("_", " "),
+    status: "closed",
+  };
+}
+
+type LedgerDeskAdapter = {
+  key: string;
+  label: string;
+  fetch: () => Promise<{ data: unknown }>;
+};
+
+const LEDGER_DESKS: LedgerDeskAdapter[] = [
+  { key: "nse", label: "NSE S1", fetch: () => getStrategyAgentStatus() },
+  { key: "commodity", label: "Commodity", fetch: () => getCommodityStrategyStatus() },
+  { key: "directional", label: "Directional", fetch: () => getDirectionalOptionsPaperPositions(undefined, "closed", 500) },
+  { key: "cbe", label: "CBE", fetch: () => getCBEPaperPositions("closed", 500) },
+  { key: "auction", label: "Auction IQ", fetch: () => getAuctionIntelligencePaperPositions(undefined, "closed", 500) },
+  { key: "fractal", label: "Fractal MP", fetch: () => getFractalMarketProfilePaperPositions(undefined, "closed", 500) },
+];
+
+export const REPORT_DESKS = LEDGER_DESKS.map((d) => ({ key: d.key, label: d.label }));
+
+export async function fetchClosedTradeLedger(): Promise<{
+  rows: AppStrategyPositionRow[];
+  errors: Record<string, string>;
+}> {
+  const errors: Record<string, string> = {};
+  const settled = await Promise.allSettled(
+    LEDGER_DESKS.map(async (desk) => {
+      const res = await desk.fetch();
+      const raw = extractClosedRows(res.data, desk.key);
+      return raw
+        .map((row, idx) => normalizeClosedRow(row, desk.label, desk.key, idx))
+        .filter((r): r is AppStrategyPositionRow => r !== null);
+    }),
+  );
+
+  const rows: AppStrategyPositionRow[] = [];
+  settled.forEach((result, i) => {
+    if (result.status === "fulfilled") {
+      rows.push(...result.value);
+    } else {
+      errors[LEDGER_DESKS[i].label] = String((result.reason as Error | undefined)?.message || result.reason || "fetch failed");
+    }
+  });
+
+  rows.sort((a, b) => String(b.closedAt || "").localeCompare(String(a.closedAt || "")));
+  return { rows, errors };
+}
+
+export function closedRowsToCsv(rows: AppStrategyPositionRow[]): string {
+  const header = ["Desk", "Symbol", "Contract", "Side", "Qty", "Entry", "Exit", "P&L", "Return%", "Entered", "Exited", "Reason"];
+  const escape = (v: unknown) => {
+    const s = v == null ? "" : String(v);
+    return /[",\n]/.test(s) ? `"${s.replaceAll('"', '""')}"` : s;
+  };
+  const lines = rows.map((r) =>
+    [r.desk, r.symbol, r.contract, r.action, r.qty, r.entryPrice, r.currentPrice, r.realizedPnl, r.returnPct, r.enteredAt, r.closedAt, r.signalReason]
+      .map(escape)
+      .join(","),
+  );
+  return [header.join(","), ...lines].join("\n");
+}

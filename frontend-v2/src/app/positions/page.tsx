@@ -5,6 +5,7 @@ import { clsx } from "clsx";
 import {
   Activity,
   Boxes,
+  FileText,
   Filter,
   RefreshCw,
   Search,
@@ -23,7 +24,8 @@ import {
   normalizePositionsOverview,
 } from "@/lib/strategy-position-ledger";
 import { PortfolioReconciliation } from "@/components/strategies/overview/PortfolioReconciliation";
-import { MetricTile } from "@/components/desk-ui";
+import { MetricTile, useUrlTab } from "@/components/desk-ui";
+import ClosedTradeLedger from "@/components/reports/ClosedTradeLedger";
 
 type PositionScope = "all" | "options" | "futures";
 
@@ -413,6 +415,7 @@ const ClosedPositionsTable = memo(function ClosedPositionsTable({ rows }: { rows
 });
 
 export default function PositionsPage() {
+  const [tab, setTab] = useUrlTab("live");
   const [scope, setScope] = useState<PositionScope>("all");
   const [search, setSearch] = useState("");
   const deferredSearch = useDeferredValue(search.trim().toLowerCase());
@@ -507,11 +510,35 @@ export default function PositionsPage() {
             Portfolio Positions
           </div>
           <p className="mt-2 max-w-4xl text-sm leading-6 text-text-secondary line-clamp-2">
-            One app-owned book for every strategy. Open exposure stays first, closed trades are separated with realized totals and entry/exit timestamps.
+            One app-owned book for every strategy. The Live book holds current exposure and recent closes; Reports is the full lifetime closed-trade archive (the old /reports).
           </p>
         </div>
       </section>
 
+      <nav className="flex flex-wrap items-center gap-1 border-b border-bg-border/40">
+        {[
+          { key: "live", label: "Live book", icon: TrendingUp },
+          { key: "reports", label: "Reports", icon: FileText },
+        ].map(({ key, label, icon: Icon }) => (
+          <button
+            key={key}
+            type="button"
+            onClick={() => setTab(key)}
+            className={clsx(
+              "inline-flex items-center gap-1.5 rounded-t-lg border-b-2 px-3 py-2 text-[12.5px] font-semibold transition-colors",
+              tab === key ? "border-accent-blue text-text-primary" : "border-transparent text-text-muted hover:text-text-secondary",
+            )}
+          >
+            <Icon size={14} />
+            {label}
+          </button>
+        ))}
+      </nav>
+
+      {tab === "reports" ? <ClosedTradeLedger /> : null}
+
+      {tab === "live" ? (
+      <>
       <section className="rounded-[24px] border border-bg-border bg-bg-secondary/20 p-4">
         <div className="flex flex-wrap items-start justify-between gap-4">
           <div>
@@ -643,6 +670,8 @@ export default function PositionsPage() {
 
         <ClosedPositionsTable rows={filteredClosedRows} />
       </section>
+      </>
+      ) : null}
     </div>
   );
 }

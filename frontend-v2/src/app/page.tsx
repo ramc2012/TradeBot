@@ -230,7 +230,12 @@ export default function LandingPage() {
           />
         </div>
         <p className="mt-2 text-[11px] text-text-muted">
-          Summed over DISTINCT ₹-denominated book endpoints, so Long Premium — which is listed at two horizons — is
+          These tiles sum each lane&apos;s lightweight summary endpoint — the row-level authority is the{" "}
+          <Link href="/positions" className="font-semibold text-accent-blue hover:underline">
+            positions ledger
+          </Link>
+          , and the two can briefly disagree between refreshes.
+          {" "}Summed over DISTINCT ₹-denominated book endpoints, so Long Premium — which is listed at two horizons — is
           counted once. A field a payload does not carry is counted as missing above, never summed as zero.
           {NON_INR_DESKS.length > 0 ? (
             <>

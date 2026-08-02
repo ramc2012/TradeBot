@@ -3,6 +3,7 @@
 import { useMemo } from "react";
 import type { ReactNode } from "react";
 import { useQuery } from "@tanstack/react-query";
+import Link from "next/link";
 import { clsx } from "clsx";
 import {
   Activity,
@@ -104,67 +105,6 @@ function SectionTitle({
   );
 }
 
-function OpenPositionsTable({ rows }: { rows: AppStrategyPositionRow[] }) {
-  return (
-    <div className="mt-4 overflow-x-auto">
-      <table className="w-full min-w-[1320px] text-left text-xs">
-        <thead>
-          <tr className="border-b border-bg-border text-text-muted">
-            <th className="pb-2 pr-3">Desk</th>
-            <th className="pb-2 pr-3">Strategy</th>
-            <th className="pb-2 pr-3">Contract</th>
-            <th className="pb-2 pr-3">Side</th>
-            <th className="pb-2 pr-3">Qty</th>
-            <th className="pb-2 pr-3">Entry</th>
-            <th className="pb-2 pr-3">Mark</th>
-            <th className="pb-2 pr-3">Open P&amp;L</th>
-            <th className="pb-2 pr-3">Updated</th>
-            <th className="pb-2">Reason</th>
-          </tr>
-        </thead>
-        <tbody>
-          {rows.length ? rows.map((row) => (
-            <tr key={row.id} className="border-b border-bg-border/40 align-top">
-              <td className="py-3 pr-3">
-                <div className="font-medium text-text-primary">{row.desk}</div>
-                <div className="mt-1 text-[11px] text-text-muted">{row.venue} · {row.source}</div>
-              </td>
-              <td className="py-3 pr-3 text-text-secondary">{row.strategy}</td>
-              <td className="py-3 pr-3">
-                <div className="font-mono text-text-primary">{row.underlying} · {row.contract}</div>
-                <div className="mt-1 text-[11px] text-text-muted">{row.symbol}</div>
-              </td>
-              <td className={clsx("py-3 pr-3 font-semibold", row.action.includes("SELL") ? "text-accent-red" : "text-accent-green")}>
-                {row.action}
-              </td>
-              <td className="py-3 pr-3 font-mono text-text-secondary">
-                <div>{row.qty}</div>
-                {row.lots ? <div className="mt-1 text-[11px] text-text-muted">{row.lots} lot · {row.lotSize || "--"}</div> : null}
-              </td>
-              <td className="py-3 pr-3 font-mono text-text-primary">{row.entryPrice.toFixed(2)}</td>
-              <td className="py-3 pr-3 font-mono text-text-primary">{row.currentPrice.toFixed(2)}</td>
-              <td className={clsx("py-3 pr-3 font-mono font-semibold", tone(row.unrealizedPnl))}>
-                {fmtSigned(row.unrealizedPnl, 0)}
-                {row.returnPct != null ? <div className="mt-1 text-[11px] text-text-muted">{fmtSigned(row.returnPct, 1, "%")}</div> : null}
-              </td>
-              <td className="py-3 pr-3 text-[11px] text-text-muted">{formatTimestamp(row.updatedAt || row.enteredAt)}</td>
-              <td className="max-w-[240px] py-3 text-[11px] text-text-secondary" title={shortReason(row.signalReason)}>
-                {shortReason(row.signalReason)}
-              </td>
-            </tr>
-          )) : (
-            <tr>
-              <td colSpan={10} className="py-10 text-center text-sm text-text-muted">
-                No open strategy positions right now.
-              </td>
-            </tr>
-          )}
-        </tbody>
-      </table>
-    </div>
-  );
-}
-
 export default function AnalyticsPage() {
   const portfolioQuery = useLiveSnapshotQuery<AppStrategyPortfolioSnapshot>({
     queryKey: ["appStrategyPortfolioSnapshot"],
@@ -241,7 +181,7 @@ export default function AnalyticsPage() {
               Portfolio & Analytics
             </div>
             <p className="mt-2 max-w-4xl text-sm leading-6 text-text-secondary">
-              Strategy-owned portfolio view with open positions first, followed by P&amp;L verification and strategy book summaries.
+              Curves, verification, and book summaries. Row-level position ledgers live on /positions (Live book + Reports).
             </p>
           </div>
           <button
@@ -258,9 +198,13 @@ export default function AnalyticsPage() {
       <section className="rounded-lg border border-bg-border bg-bg-secondary/20 p-4">
         <SectionTitle
           icon={<Layers3 size={16} className="text-accent-green" />}
-          title="Open Positions"
-          detail="Positions from every app strategy are shown before charts or history. Non-strategy execution rows are excluded from this portfolio design."
-          right={<div className="text-xs text-text-muted">{openRows.length} open · {portfolioQuery.isFetching ? "refreshing" : "loaded"}</div>}
+          title="Portfolio Summary"
+          detail="Roll-up across every app strategy book. The row-level ledgers live on /positions (Live book + Reports) — this page keeps the curves and verification."
+          right={
+            <Link href="/positions" className="text-xs font-semibold text-accent-blue hover:underline">
+              Open positions ledger →
+            </Link>
+          }
         />
 
         <div className="mt-4 grid gap-3 md:grid-cols-2 xl:grid-cols-5">
@@ -276,8 +220,6 @@ export default function AnalyticsPage() {
             {sourceErrors.map(([key, value]) => `${key}: ${value}`).join(" · ")}
           </div>
         ) : null}
-
-        <OpenPositionsTable rows={openRows} />
       </section>
 
       <section className="grid gap-6 xl:grid-cols-[0.92fr,1.08fr]">
@@ -394,35 +336,23 @@ export default function AnalyticsPage() {
         <div className="rounded-lg border border-bg-border bg-bg-secondary/20 p-4">
           <SectionTitle
             icon={<Activity size={16} className="text-accent-blue" />}
-            title="Recent Strategy Exits"
-            detail="Closed strategy rows are retained for audit, but the page stays open-position first."
-            right={<div className="text-xs text-text-muted">{closedRows.length} closed rows</div>}
+            title="Strategy Exits"
+            detail="The exit tables were consolidated onto /positions — the Live book shows recent closes and the Reports tab holds the full lifetime archive with filters and CSV export."
+            right={<div className="text-xs text-text-muted">{closedRows.length} closed rows in the current snapshot</div>}
           />
-          <div className="mt-4 max-h-[360px] overflow-auto">
-            <table className="w-full min-w-[960px] text-left text-xs">
-              <thead className="sticky top-0 bg-bg-card">
-                <tr className="border-b border-bg-border text-text-muted">
-                  <th className="py-2 pr-3">Desk</th>
-                  <th className="py-2 pr-3">Contract</th>
-                  <th className="py-2 pr-3">Entry</th>
-                  <th className="py-2 pr-3">Exit</th>
-                  <th className="py-2 pr-3">P&L</th>
-                  <th className="py-2">Closed</th>
-                </tr>
-              </thead>
-              <tbody>
-                {closedRows.slice(0, 40).map((row) => (
-                  <tr key={row.id} className="border-b border-bg-border/40">
-                    <td className="py-2 pr-3 text-text-secondary">{row.desk}</td>
-                    <td className="py-2 pr-3 font-mono text-text-primary">{row.underlying} · {row.contract}</td>
-                    <td className="py-2 pr-3 font-mono text-text-secondary">{row.entryPrice.toFixed(2)}</td>
-                    <td className="py-2 pr-3 font-mono text-text-secondary">{row.currentPrice.toFixed(2)}</td>
-                    <td className={clsx("py-2 pr-3 font-mono font-semibold", tone(row.realizedPnl))}>{fmtSigned(row.realizedPnl, 0)}</td>
-                    <td className="py-2 text-text-muted">{formatTimestamp(row.closedAt || row.updatedAt)}</td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
+          <div className="mt-4 flex flex-wrap gap-2">
+            <Link
+              href="/positions"
+              className="rounded-lg border border-accent-blue/35 bg-accent-blue/10 px-3 py-2 text-xs font-semibold text-accent-blue hover:border-accent-blue/55"
+            >
+              Live book →
+            </Link>
+            <Link
+              href="/positions?tab=reports"
+              className="rounded-lg border border-accent-blue/35 bg-accent-blue/10 px-3 py-2 text-xs font-semibold text-accent-blue hover:border-accent-blue/55"
+            >
+              Reports (lifetime archive) →
+            </Link>
           </div>
         </div>
 
