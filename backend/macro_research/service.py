@@ -2,8 +2,6 @@
 from __future__ import annotations
 
 import asyncio
-import csv
-import io
 import json
 import math
 import os
@@ -345,27 +343,15 @@ class MacroResearchService:
             "as_of": _now_iso(),
             "source": "offline_seed",
         }
-        symbol = item.get("stooq_symbol")
-        if symbol and self._live_commodities:
-            url = f"https://stooq.com/q/l/?{urlencode({'s': symbol, 'f': 'sd2t2ohlcv', 'h': '', 'e': 'csv'})}"
-            try:
-                async with httpx.AsyncClient(timeout=2.0) as client:
-                    response = await client.get(url)
-                if response.status_code == 200 and "N/D" not in response.text:
-                    reader = csv.DictReader(io.StringIO(response.text))
-                    row = next(reader, None)
-                    if row:
-                        close = _safe_float(row.get("Close"), quote["price"])
-                        open_px = _safe_float(row.get("Open"), close)
-                        change_pct = ((close / open_px) - 1.0) * 100 if open_px else 0.0
-                        quote = {
-                            "price": round(close, 3),
-                            "change_pct": round(change_pct, 3),
-                            "as_of": f"{row.get('Date', '')}T{row.get('Time', '')}".strip("T"),
-                            "source": "stooq_delayed",
-                        }
-            except Exception as exc:
-                logger.debug(f"[MacroResearch] Stooq fetch failed for {item['code']}: {exc}")
+        mcx_root = item.get("mcx_root")
+        if mcx_root and self._live_commodities:
+            # Internal read of the desk's own MCX 1-minute candle store —
+            # replaces the retired Stooq endpoint (404 since ~2026-08).
+            from .internal_commodities import fetch_mcx_quote
+
+            internal = await fetch_mcx_quote(mcx_root)
+            if internal is not None:
+                quote = internal
 
         pressure = "rising" if quote["change_pct"] > 0.25 else "falling" if quote["change_pct"] < -0.25 else "flat"
         return {

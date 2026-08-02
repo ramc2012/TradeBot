@@ -116,6 +116,26 @@ def get_registry() -> tuple[LaneSpec, ...]:
             ),
         ),
         LaneSpec(
+            key="sector_ingestion",
+            label="Sector-Interaction Durable Ingestion",
+            kind="data",
+            execution_mode="none",
+            status_source="supervisor",
+            cadence_seconds=3600.0,
+            broker_profile="default",
+            exchange_session=nse,
+            enabled_flag_name="SECTOR_INGESTION_AUTO_ENABLED",
+            runner_keys=("sector_ingestion",),
+            status_endpoint="/api/system/automation-status",
+            notes=(
+                "Post-close (once/session) durable sector-interaction ingestion: "
+                "IN public open-data collectors (PPAC; NPCI bot-blocked upstream) "
+                "+ live-market sector observations + niftyindices constituent "
+                "CSV sync. Fills the 24-distinct-date runtime handoff that flips "
+                "/api/sector-interaction/signals off synthetic. No broker REST."
+            ),
+        ),
+        LaneSpec(
             key="token_readiness",
             label="Pre-open Broker Token Readiness",
             kind="monitor",
@@ -612,7 +632,11 @@ def supervisor_runner_keys() -> set[str]:
 # 2026-07-27: 32 -> 33 with preopen_spot_snapshot, the post-auction pre-open
 # spot + activeness recorder (owner spec). Observation only, default OFF, and
 # it makes no broker call.
-EXPECTED_LANE_TOTAL = 33
+# 2026-08-02: 33 -> 34 with sector_ingestion, the post-close sector-interaction
+# durable ingestion + NSE constituent sync (data lane, no broker call) — the
+# manual ingestion endpoints were never scheduled, so the 24-date runtime
+# handoff could never be reached.
+EXPECTED_LANE_TOTAL = 34
 
 
 def registry_counts() -> dict[str, int]:

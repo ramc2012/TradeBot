@@ -46,9 +46,25 @@ _TEST_STATE_DIR = Path(tempfile.mkdtemp(prefix="tradebot-test-state-"))
 _TEST_NSE_STATE_FILE = _TEST_STATE_DIR / "nse_strategy_state.json"
 os.environ["NSE_STRATEGY_STATE_FILE"] = str(_TEST_NSE_STATE_FILE)
 
+# Point the sector-interaction ingestion store at a throwaway dir: the REAL
+# store (backend/runtime/sector_interaction, bind-mounted) holds live
+# observations since 2026-08-02, so without this the suite both READS
+# production data (flipping runtime-handoff assertions) and could WRITE test
+# observations into the live store.
+os.environ["SECTOR_INGESTION_ROOT"] = str(_TEST_STATE_DIR / "sector_interaction")
+
 # NOTE: must be set before numpy is first imported anywhere in the process —
 # OpenBLAS reads it once, when the shared library initialises (see docstring #3).
 os.environ.setdefault("OPENBLAS_NUM_THREADS", "1")
+
+# The suite is written against the single-process default (ALL supervisor
+# runners scheduled). Since the Phase-1 process split went live (2026-07-28)
+# the repo-root .env pins LANESET=core for the deployed core container, and
+# pydantic-settings reads that .env on the host too — which silently dropped
+# every strategy-plane runner from the supervisor tests. A real env var beats
+# the .env file, so pin the suite back to the all-plane default here; the
+# laneset-split tests monkeypatch settings.LANESET themselves.
+os.environ["LANESET"] = "all"
 
 import numpy as _np
 import pytest

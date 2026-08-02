@@ -406,9 +406,12 @@ def test_get_expiries_prefers_live_fyers_ladders_over_saved_catalog_when_upstox_
     assert payload["index_monthlies"]["BANKNIFTY"] == "2026-05-26"
     assert payload["index_monthlies"]["FINNIFTY"] == "2026-05-26"
     assert payload["index_monthlies"]["MIDCPNIFTY"] == "2026-05-26"
-    # SENSEX monthly expiry moved Friday -> Thursday (commit 92743411), so May 2026
-    # resolves to 2026-05-28 (last Thursday), not the old 2026-05-29.
-    assert payload["index_monthlies"]["SENSEX"] == "2026-05-28"
+    # SENSEX monthly expiry moved Friday -> Thursday (commit 92743411). The last
+    # Thursday of May 2026 (05-28) is Bakri Id on both exchanges, so the
+    # calendar-driven policy (core.expiry_policy) walks back one session to
+    # Wednesday 2026-05-27 — this was one of the dates the old hand-maintained
+    # holiday set got wrong (see the expiry_policy module docstring).
+    assert payload["index_monthlies"]["SENSEX"] == "2026-05-27"
     assert payload["detail"] is None
 
 
@@ -446,9 +449,12 @@ def test_get_expiries_uses_common_nse_monthlies_even_when_live_ladders_are_stale
     assert payload["index_monthlies"]["BANKNIFTY"] == "2026-05-26"
     assert payload["index_monthlies"]["FINNIFTY"] == "2026-05-26"
     assert payload["index_monthlies"]["MIDCPNIFTY"] == "2026-05-26"
-    # SENSEX monthly expiry moved Friday -> Thursday (commit 92743411), so May 2026
-    # resolves to 2026-05-28 (last Thursday), not the old 2026-05-29.
-    assert payload["index_monthlies"]["SENSEX"] == "2026-05-28"
+    # SENSEX monthly expiry moved Friday -> Thursday (commit 92743411). The last
+    # Thursday of May 2026 (05-28) is Bakri Id on both exchanges, so the
+    # calendar-driven policy (core.expiry_policy) walks back one session to
+    # Wednesday 2026-05-27 — this was one of the dates the old hand-maintained
+    # holiday set got wrong (see the expiry_policy module docstring).
+    assert payload["index_monthlies"]["SENSEX"] == "2026-05-27"
 
 
 def test_get_watchlist_returns_building_payload_on_first_load(monkeypatch) -> None:

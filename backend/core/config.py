@@ -793,6 +793,11 @@ class Settings(BaseSettings):
     COMMODITY_HIGH_CONVICTION_MAX_POC_DISTANCE_ATR: float = 3.0
     COMMODITY_HIGH_CONVICTION_MIN_STOP_DISTANCE_ATR: float = 3.0
     SECTOR_INTERACTION_DURABLE_STATE_ENABLED: bool = False
+    # Post-close (once/session) sector-interaction ingestion runner: IN public
+    # open-data collectors + live-market sector observations + NSE constituent
+    # CSV sync. Fills the durable ingestion store toward the 24-distinct-date
+    # runtime handoff that flips /api/sector-interaction/signals off synthetic.
+    SECTOR_INGESTION_AUTO_ENABLED: bool = True
 
     # Security
     SECRET_KEY: str = "change-me-to-a-random-secret-key"

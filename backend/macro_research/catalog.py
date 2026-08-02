@@ -80,35 +80,40 @@ MACRO_INDICATORS: list[dict[str, Any]] = [
 
 
 COMMODITY_WATCHLIST: list[dict[str, Any]] = [
+    # mcx_root: read internally from underlying_spot_candles (MCX futures,
+    # INR exchange units) — Stooq retired its quote endpoint in 2026. Names
+    # without MCX coverage stay on offline seeds: no reachable keyless
+    # external source exists for them from this host (Stooq 404, GDELT
+    # unreachable, World Bank v2 has no GEM commodity series).
     {
         "code": "CRUDE",
-        "label": "Crude oil",
-        "stooq_symbol": "cl.f",
-        "unit": "USD/bbl",
-        "fallback_price": 82.4,
-        "fallback_change_pct": -0.6,
+        "label": "Crude oil (MCX)",
+        "mcx_root": "CRUDEOIL",
+        "unit": "INR/bbl",
+        "fallback_price": 8108.0,
+        "fallback_change_pct": 0.0,
         "beneficiaries": ["UPSTREAM_ENERGY"],
         "hurt_by_rise": ["AUTO", "FMCG", "CEMENT", "PAINTS", "AVIATION", "OMC"],
         "why": "Fuel, freight, packaging, and petrochemical input costs.",
     },
     {
         "code": "GOLD",
-        "label": "Gold",
-        "stooq_symbol": "gc.f",
-        "unit": "USD/oz",
-        "fallback_price": 2320.0,
-        "fallback_change_pct": 0.4,
+        "label": "Gold (MCX)",
+        "mcx_root": "GOLD",
+        "unit": "INR/10g",
+        "fallback_price": 141623.0,
+        "fallback_change_pct": 0.0,
         "beneficiaries": ["JEWELLERY", "GOLD_FINANCE"],
         "hurt_by_rise": ["DISCRETIONARY_CONSUMPTION"],
         "why": "Risk hedge, jewellery affordability, and collateral value for gold-loan books.",
     },
     {
         "code": "COPPER",
-        "label": "Copper",
-        "stooq_symbol": "hg.f",
-        "unit": "US cents/lb",
-        "fallback_price": 456.0,
-        "fallback_change_pct": 0.9,
+        "label": "Copper (MCX)",
+        "mcx_root": "COPPER",
+        "unit": "INR/kg",
+        "fallback_price": 1341.35,
+        "fallback_change_pct": 0.0,
         "beneficiaries": ["METALS", "MINING"],
         "hurt_by_rise": ["CONSUMER_DURABLES", "CAPITAL_GOODS", "AUTO"],
         "why": "Electrification demand proxy and input cost for cables, motors, white goods, and EVs.",
@@ -116,7 +121,7 @@ COMMODITY_WATCHLIST: list[dict[str, Any]] = [
     {
         "code": "STEEL",
         "label": "Steel basket",
-        "stooq_symbol": None,
+        "mcx_root": None,
         "unit": "index",
         "fallback_price": 100.0,
         "fallback_change_pct": 0.2,
@@ -127,7 +132,7 @@ COMMODITY_WATCHLIST: list[dict[str, Any]] = [
     {
         "code": "PALM_OIL",
         "label": "Palm oil",
-        "stooq_symbol": None,
+        "mcx_root": None,
         "unit": "index",
         "fallback_price": 100.0,
         "fallback_change_pct": -0.4,
@@ -541,7 +546,11 @@ SOURCE_REGISTRY: list[dict[str, Any]] = [
         "docs": "https://blog.gdeltproject.org/gdelt-doc-2-0-api-debuts/",
         "cadence": "near_real_time",
         "requires_key": False,
-        "status": "connected_with_timeout_fallback",
+        # 2026-08-02: api.gdeltproject.org is unreachable from this host
+        # (ConnectTimeout from both the container and the Mac). The connector
+        # stays flag-gated OFF (MACRO_RESEARCH_LIVE_TRENDS) so theme signals
+        # serve deterministic offline seeds.
+        "status": "network_unreachable_offline_seed",
     },
     {
         "id": "arxiv",
@@ -554,14 +563,14 @@ SOURCE_REGISTRY: list[dict[str, Any]] = [
         "status": "connected_with_fallback",
     },
     {
-        "id": "stooq",
-        "label": "Stooq delayed quotes",
-        "kind": "commodity_market_proxy",
-        "url": "https://stooq.com/q/l/",
-        "docs": "https://stooq.com/db/h/",
-        "cadence": "delayed_intraday",
+        "id": "mcx_internal",
+        "label": "Internal MCX 1-minute candles (underlying_spot_candles)",
+        "kind": "commodity_market_internal",
+        "url": "internal://underlying_spot_candles",
+        "docs": "backend/macro_research/internal_commodities.py",
+        "cadence": "intraday_1m",
         "requires_key": False,
-        "status": "connected_where_symbol_available",
+        "status": "connected_where_mcx_root_available",
     },
     {
         "id": "rbi_mospi_pib",

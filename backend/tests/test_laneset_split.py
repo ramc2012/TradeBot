@@ -86,6 +86,7 @@ def test_planned_runner_inventory_matches_supervisor(monkeypatch):
         "token_readiness",
         "market_intelligence",
         "stock_spot_sweep",
+        "sector_ingestion",
         "macd_preopen_watchlist",
         "preopen_spot_snapshot",
     }
@@ -103,7 +104,10 @@ def test_supervisor_runner_partition_by_laneset(monkeypatch):
     # 20 = 19 + preopen_spot_snapshot (pre-open spot record + activeness flag,
     # 2026-07-27). Also CORE-plane data: it takes no position and makes no
     # broker call — it reads ticks already committed to Postgres.
-    assert len(all_keys) == 20
+    # 21 = 20 + sector_ingestion (post-close sector-interaction durable
+    # ingestion + NSE constituent sync, 2026-08-02). CORE-plane data: public
+    # HTTP + internal reads, no broker REST, no position.
+    assert len(all_keys) == 21
 
     monkeypatch.setattr(settings, "LANESET", "core", raising=False)
     core_keys = set(MarketHoursPaperSupervisor(enabled=False)._runners)
@@ -112,6 +116,7 @@ def test_supervisor_runner_partition_by_laneset(monkeypatch):
         "token_readiness",
         "market_intelligence",
         "stock_spot_sweep",
+        "sector_ingestion",
         "macd_preopen_watchlist",
         "preopen_spot_snapshot",
     }

@@ -6,13 +6,22 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 import json
+import os
 import uuid
 
 from core.config import settings
 
 
 BACKEND_ROOT = Path(__file__).resolve().parents[1]
-DEFAULT_ROOT = BACKEND_ROOT / "runtime" / "sector_interaction"
+# Test isolation (mirrors NSE_STRATEGY_STATE_FILE): the suite points this at a
+# throwaway dir so host test runs never read or write the REAL bind-mounted
+# runtime store. Since the first real ingestion (2026-08-02) the production
+# JSONL genuinely satisfies the runtime handoff, which would silently flip
+# every "handoff inactive" test assertion without this override.
+_ROOT_OVERRIDE = os.environ.get("SECTOR_INGESTION_ROOT")
+DEFAULT_ROOT = (
+    Path(_ROOT_OVERRIDE) if _ROOT_OVERRIDE else BACKEND_ROOT / "runtime" / "sector_interaction"
+)
 _DURABLE_STATE_KEY = "sector_interaction_ingestion_v1"
 
 

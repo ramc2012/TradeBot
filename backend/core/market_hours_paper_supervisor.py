@@ -1014,6 +1014,71 @@ class MarketHoursPaperSupervisor:
                 "volume_baselines": baseline_report,
             }
 
+        async def _sector_ingestion_runner() -> dict[str, Any]:
+            """Durable sector-interaction ingestion (IN) + NSE constituent sync.
+
+            The manual POST endpoints (/api/sector-interaction/run-ingestion,
+            /india/run-live-market-ingestion, /nse-constituents/sync) existed
+            but nothing ever scheduled them, so the durable ingestion store
+            stayed at 0 observation dates and every /signals payload fell back
+            to synthetic. One post-close pass per session appends a dated
+            batch of real observations so the 24-distinct-date runtime handoff
+            can actually be reached. Three isolated sub-steps:
+            1) IN public open-data collectors (PPAC crude works; NPCI UPI is
+               bot-blocked upstream as of 2026-08-02, partial is expected),
+            2) IN live-market sector observations from the internal overview,
+            3) niftyindices.com constituent CSVs (runtime taxonomy overlay).
+            All writes are append-only JSONL / idempotent runtime-state saves.
+            """
+            from sector_interaction import sector_interaction_service
+            from sector_interaction.nse_constituents import nse_constituent_service
+
+            failures: dict[str, str] = {}
+            meta: dict[str, Any] = {}
+            stored_total = 0
+            try:
+                report = await asyncio.wait_for(
+                    asyncio.to_thread(
+                        sector_interaction_service.run_ingestion, "IN", dry_run=False
+                    ),
+                    timeout=90.0,
+                )
+                stored = int(report.get("stored_observations") or 0)
+                stored_total += stored
+                meta["india_public"] = {
+                    "stored": stored,
+                    "blocked": len(report.get("blocked_connectors") or []),
+                }
+            except Exception as exc:  # noqa: BLE001 — isolate each sub-step
+                failures["india_public"] = str(exc)[:200]
+            try:
+                report = await asyncio.wait_for(
+                    sector_interaction_service.run_india_live_market_ingestion(dry_run=False),
+                    timeout=120.0,
+                )
+                stored = int(report.get("stored_observations") or 0)
+                stored_total += stored
+                meta["india_live_market"] = {"stored": stored}
+            except Exception as exc:  # noqa: BLE001
+                failures["india_live_market"] = str(exc)[:200]
+            try:
+                sync = await asyncio.wait_for(nse_constituent_service.sync(), timeout=60.0)
+                meta["nse_constituents"] = {
+                    "stored": bool(sync.get("stored")),
+                    "sectors": len(sync.get("successful_sources") or []),
+                    "failed": len(sync.get("failed_sources") or []),
+                }
+            except Exception as exc:  # noqa: BLE001
+                failures["nse_constituents"] = str(exc)[:200]
+            return {
+                "status": "ok" if not failures else ("error" if len(failures) >= 3 else "partial"),
+                "result_count": stored_total,
+                "actionable_count": stored_total,
+                "failure_count": len(failures),
+                "failures": failures,
+                **meta,
+            }
+
         async def _macd_refined_runner() -> dict[str, Any]:
             """Fetch current + next monthly expiry chains, persist per-contract
             volume/turnover, and sync the MACD Refined paper book. This runner
@@ -1280,6 +1345,28 @@ class MarketHoursPaperSupervisor:
                 # broker slowness. The sweep also self-limits via deadline_seconds.
                 timeout_seconds=1200.0,
                 # Spot ingestion belongs to the core data plane.
+                plane="core",
+            ),
+            RunnerConfig(
+                key="sector_ingestion",
+                label="Sector-Interaction Durable Ingestion",
+                # Never reached in-session (same _never_in_session pattern as
+                # stock_spot_sweep): the ONLY dispatch path is the once-per-
+                # session post-close catch-up, so the public-site fetches and
+                # store writes never compete with live decision traffic.
+                # interval_seconds is therefore inert.
+                interval_seconds=3600,
+                callback=_sector_ingestion_runner,
+                enabled=getattr(settings, "SECTOR_INGESTION_AUTO_ENABLED", True),
+                # broker_profile left DEFAULT: no broker REST at all — public
+                # HTTP (PPAC/NPCI/niftyindices) + internal overview reads.
+                market_hours_fn=_never_in_session,
+                next_open_fn=_next_nse_market_open,
+                post_close_catchup=True,
+                post_close_force_daily=True,
+                # Three bounded sub-steps (90 + 120 + 60) + slack.
+                timeout_seconds=300.0,
+                # Data ingestion, not a decision lane.
                 plane="core",
             ),
             RunnerConfig(

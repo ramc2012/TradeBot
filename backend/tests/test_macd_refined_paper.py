@@ -184,10 +184,16 @@ def test_live_forced_close_flag_is_off_by_default(monkeypatch) -> None:
     from datetime import date
 
     from macd_refined.live import _forced_close_flag
-
-    assert _forced_close_flag("RELIANCE", "2026-07-28", date(2026, 7, 24)) is False
-
     from core.config import settings
+
+    # The CODE default for both flags is False, but the deployed backend/.env
+    # turned the expiry policy ON (2026-07-22) and pydantic-settings reads that
+    # .env on host test runs too. Pin the flags down explicitly so this test
+    # keeps asserting the flags-down contract ("mark payload byte-identical
+    # with the feature off") independent of deployment config.
+    monkeypatch.setattr(settings, "EXPIRY_POLICY_ENABLED", False, raising=False)
+    monkeypatch.setattr(settings, "EXPIRY_POLICY_FORCED_CLOSE_ENABLED", False, raising=False)
+    assert _forced_close_flag("RELIANCE", "2026-07-28", date(2026, 7, 24)) is False
 
     monkeypatch.setattr(settings, "EXPIRY_POLICY_ENABLED", True, raising=False)
     monkeypatch.setattr(settings, "EXPIRY_POLICY_FORCED_CLOSE_ENABLED", True, raising=False)
