@@ -1,20 +1,18 @@
 "use client";
 
 /**
- * /research — consolidates v1's /analysis (validation reports +
- * backtests), /backtester (manual backtest runner), and /data (F&O
- * data ingest console) into a single tabbed surface.
- *
- * The v1 routes redirect into this page with ?tab=… preselected.
+ * /research — the canonical home of the backtest runner, the F&O data
+ * ingest console, and the validation/research monitor. The old
+ * /backtester, /data and /analysis routes redirect here with ?tab=…
+ * preselected; the tab bodies import the components directly.
  */
-import { useState } from "react";
 import { clsx } from "clsx";
 import { Database, FlaskConical, GitCompare } from "lucide-react";
 
-import { Section, useUrlTab } from "@/components/desk-ui";
-import BacktesterEmbed from "@/app/backtester/page";
-import ValidationEmbed from "@/app/analysis/page";
-import DataIngestEmbed from "@/app/data/page";
+import { useUrlTab } from "@/components/desk-ui";
+import BacktesterDesk from "@/components/backtester/BacktesterDesk";
+import DataIngestConsole from "@/components/data/DataIngestConsole";
+import ResearchMonitorBoard from "@/components/research-monitor/ResearchMonitorBoard";
 
 const TABS = [
   { key: "backtests",  label: "Backtests",  icon: GitCompare },
@@ -52,9 +50,9 @@ export default function ResearchPage() {
         ))}
       </nav>
 
-      {tab === "backtests" ? <BacktesterEmbed /> : null}
-      {tab === "data" ? <DataIngestEmbed /> : null}
-      {tab === "validation" ? <ValidationEmbed /> : null}
+      {tab === "backtests" ? <BacktesterDesk /> : null}
+      {tab === "data" ? <DataIngestConsole /> : null}
+      {tab === "validation" ? <ResearchMonitorBoard /> : null}
     </div>
   );
 }

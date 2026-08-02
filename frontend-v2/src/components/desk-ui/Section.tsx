@@ -24,7 +24,7 @@ export function Section({
 }: {
   title?: React.ReactNode;
   icon?: React.ReactNode;
-  description?: string;
+  description?: React.ReactNode;
   rightSlot?: React.ReactNode;
   /** Panel-level data provenance — rendered as a compact caption. */
   provenance?: Provenance | null;

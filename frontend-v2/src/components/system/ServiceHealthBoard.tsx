@@ -159,7 +159,7 @@ function ServiceCard({ svc }: { svc: SystemHealthService }) {
   );
 }
 
-export default function ServiceHealthBoard() {
+export default function ServiceHealthBoard({ showBudget = true }: { showBudget?: boolean } = {}) {
   const q = useQuery({
     queryKey: ["system-health"],
     queryFn: async () => (await api.get("/api/system/health")).data as SystemHealthResponse,
@@ -270,8 +270,8 @@ export default function ServiceHealthBoard() {
         )}
       </Section>
 
-      {/* Upstox API budget */}
-      <UpstoxBudgetCard />
+      {/* Upstox API budget — suppressed when /system renders it on its own tab */}
+      {showBudget ? <UpstoxBudgetCard /> : null}
 
       {/* Strategy lanes */}
       <Section

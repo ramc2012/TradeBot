@@ -1,28 +1,28 @@
 "use client";
 
 /**
- * /system — consolidates v1's /health and /lane-health into one
- * tabbed surface. The v1 redirect map sends both old URLs here.
+ * /system — the single system surface. The old /health and /lane-health
+ * routes redirect here (?tab=services / ?tab=lanes).
  *
  * Tabs:
- *   - services: live system services health (broker, db, redis, paper engines)
- *   - lanes:    invariants table (data integrity, replay parity, gate attribution)
- *   - brokers:  broker connectivity status (per-broker tokens, rate limits)
+ *   - services: risk/blocker overview (/api/system/overview) + the full
+ *               ServiceHealthBoard (/api/system/health). The board is the
+ *               ONE services table — the previous second table rendered
+ *               from /api/system/overview was dropped as a duplicate.
+ *   - lanes:    lane-audit invariants (LaneHealthBoard)
+ *   - brokers:  managed under /settings; this tab links there
  *   - budgets:  Upstox API budget card
- *
- * Each tab here renders a thin client that calls the same backend
- * endpoints v1 used (/api/system/overview, /api/lane-health, etc.).
- * Until those clients are written we stub with links into v1.
  */
 import { useQuery } from "@tanstack/react-query";
 import { Link as LinkIcon, ServerCog, ShieldAlert, TrendingUp, Wallet } from "lucide-react";
 import Link from "next/link";
 import { clsx } from "clsx";
 
-import { MetricTile, REFRESH_MS, Section, formatIST, serviceStateTone, useUrlTab } from "@/components/desk-ui";
+import { MetricTile, REFRESH_MS, Section, formatIST, useUrlTab } from "@/components/desk-ui";
 import { api as apiClient } from "@/lib/api";
-import LaneHealthEmbed from "@/app/lane-health/page";
-import HealthEmbed from "@/app/health/page";
+import ServiceHealthBoard from "@/components/system/ServiceHealthBoard";
+import LaneHealthBoard from "@/components/system/LaneHealthBoard";
+import UpstoxBudgetCard from "@/components/system/UpstoxBudgetCard";
 
 const TABS = [
   { key: "services", label: "Services", icon: ServerCog },
@@ -53,10 +53,10 @@ export default function SystemPage() {
     },
     refetchInterval: REFRESH_MS.snapshot,
     refetchOnWindowFocus: false,
+    enabled: tab === "services",
   });
 
   const overview = overviewQuery.data;
-  const services = overview?.health?.services || [];
   const blockers = overview?.blockers || [];
 
   return (
@@ -65,7 +65,7 @@ export default function SystemPage() {
         <h1 className="text-2xl font-semibold text-text-primary">System</h1>
         <p className="mt-1 text-sm text-text-muted">
           Health, lane invariants, broker connectivity, and API budgets.
-          v1's <code>/health</code> and <code>/lane-health</code> both redirect into this page.
+          <code>/health</code> and <code>/lane-health</code> both redirect into this page.
         </p>
       </header>
 
@@ -97,35 +97,6 @@ export default function SystemPage() {
             </div>
           </Section>
 
-          <Section title="Services">
-            {services.length === 0 ? (
-              <div className="rounded-lg border border-bg-border/40 bg-bg-primary/15 p-3 text-sm text-text-muted">
-                No service detail available — backend `/api/system/overview` returned no health block.
-              </div>
-            ) : (
-              <table className="w-full text-[12px]">
-                <thead className="text-[10.5px] uppercase tracking-wide text-text-muted">
-                  <tr className="border-b border-bg-border/60">
-                    <th className="px-2 py-2 text-left">Service</th>
-                    <th className="px-2 py-2 text-left">Status</th>
-                    <th className="px-2 py-2 text-left">Detail</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {services.map((s, i) => (
-                    <tr key={s.key ?? i} className="border-b border-bg-border/30">
-                      <td className="px-2 py-2 font-semibold text-text-primary">{s.label ?? s.key ?? "—"}</td>
-                      <td className="px-2 py-2">
-                        <span className={clsx("rounded-full border px-2 py-0.5 text-[10.5px] font-semibold uppercase", serviceStateTone(s.status))}>{s.status ?? "—"}</span>
-                      </td>
-                      <td className="px-2 py-2 text-[11px] text-text-secondary">{s.detail ?? "—"}</td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
-            )}
-          </Section>
-
           {blockers.length > 0 ? (
             <Section title="Blockers" icon={<ShieldAlert size={16} />}>
               <ul className="space-y-1.5">
@@ -138,10 +109,12 @@ export default function SystemPage() {
               </ul>
             </Section>
           ) : null}
+
+          <ServiceHealthBoard showBudget={false} />
         </div>
       ) : null}
 
-      {tab === "lanes" ? <LaneHealthEmbed /> : null}
+      {tab === "lanes" ? <LaneHealthBoard /> : null}
       {tab === "brokers" ? (
         <Section title="Broker connectivity">
           <p className="text-sm text-text-secondary">Brokers are managed under Settings.</p>
@@ -150,7 +123,7 @@ export default function SystemPage() {
           </Link>
         </Section>
       ) : null}
-      {tab === "budgets" ? <HealthEmbed /> : null}
+      {tab === "budgets" ? <UpstoxBudgetCard /> : null}
     </div>
   );
 }
