@@ -834,10 +834,12 @@ type LedgerDeskAdapter = {
 const LEDGER_DESKS: LedgerDeskAdapter[] = [
   { key: "nse", label: "NSE S1", fetch: () => getStrategyAgentStatus() },
   { key: "commodity", label: "Commodity", fetch: () => getCommodityStrategyStatus() },
-  { key: "directional", label: "Directional", fetch: () => getDirectionalOptionsPaperPositions(undefined, "closed", 500) },
+  // directional + fractal cap limit at 200 (422 above it) — the old
+  // reports-ledger asked for 500 and silently dropped both desks.
+  { key: "directional", label: "Directional", fetch: () => getDirectionalOptionsPaperPositions(undefined, "closed", 200) },
   { key: "cbe", label: "CBE", fetch: () => getCBEPaperPositions("closed", 500) },
   { key: "auction", label: "Auction IQ", fetch: () => getAuctionIntelligencePaperPositions(undefined, "closed", 500) },
-  { key: "fractal", label: "Fractal MP", fetch: () => getFractalMarketProfilePaperPositions(undefined, "closed", 500) },
+  { key: "fractal", label: "Fractal MP", fetch: () => getFractalMarketProfilePaperPositions(undefined, "closed", 200) },
 ];
 
 export const REPORT_DESKS = LEDGER_DESKS.map((d) => ({ key: d.key, label: d.label }));
