@@ -285,7 +285,12 @@ class MacroResearchService:
         try:
             if not self._live_macro:
                 raise RuntimeError("live macro connector disabled")
-            async with httpx.AsyncClient(timeout=1.8) as client:
+            # 2026-08-02: api.worldbank.org answers in ~7-8s from this network;
+            # the old 1.8s timeout meant 5 of 6 indicators fell back to their
+            # 2024 offline seeds on EVERY refresh. Indicators fetch
+            # concurrently and sit behind the 900s overview cache, so a longer
+            # timeout costs one slow refresh per 15 minutes, not per request.
+            async with httpx.AsyncClient(timeout=12.0) as client:
                 response = await client.get(url)
             if response.status_code == 200:
                 payload = response.json()
