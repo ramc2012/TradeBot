@@ -31,9 +31,12 @@ Safety
 """
 from __future__ import annotations
 
+from datetime import datetime, timedelta, timezone
 from typing import Any, Iterable, Optional
 
 from loguru import logger
+
+IST = timezone(timedelta(hours=5, minutes=30))
 
 
 # position identity (its `symbol` field, e.g. "OPT:NIFTY:2026-06-30:24000:PE"
@@ -186,6 +189,12 @@ async def overlay_live_marks(
         )
         pos["notional_value"] = round(live * qty, 2)
         pos["mark_source"] = "live_tick"
+        # Stamp WHEN this mark was taken. Without it the payload carried a
+        # live current_price next to the LAST SCAN's price_updated_at, so a
+        # tick-fresh mark read as minutes old (observed 2026-08-03: prices
+        # advancing every poll while the stamp sat frozen at 09:17). The mark
+        # is at most `max_age_seconds` old by get_live_mark's own contract.
+        pos["price_updated_at"] = datetime.now(IST).isoformat()
     return positions
 
 
