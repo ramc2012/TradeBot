@@ -100,6 +100,9 @@ type WatchRow = {
   atm_strike?: number | null;
   strike?: number | null;
   ltp?: number | null;
+  /** When ltp was last refreshed, when the payload reports it. */
+  ltp_at?: string | null;
+  updated_at?: string | null;
   iv_pct?: number | null;
   macd?: number | null;
   previous_macd?: number | null;
@@ -129,6 +132,8 @@ type PositionRow = {
   signal_reason?: string | null;
   regime?: string | null;
   entered_at?: string | null;
+  /** When current_price was last refreshed — drives the mark's age chip. */
+  price_updated_at?: string | null;
 };
 
 type TradeRow = {
@@ -640,7 +645,7 @@ function OverviewTab({
             s.underlying || "—",
             <DirBadge key="d" direction={s.direction} />,
             formatNumber(s.strike ?? s.atm_strike, 0),
-            <LiveMarkCell key="ltp" symbol={legTapeSymbol(s)} fallback={s.ltp} decimals={1} />,
+            <LiveMarkCell key="ltp" symbol={legTapeSymbol(s)} fallback={s.ltp} fallbackAt={s.ltp_at ?? s.updated_at} decimals={1} showAge={false} />,
             <StatusBadge key="s" label={prettify(s.status)} variant={statusVariant(s.status)} />,
             formatNumber(s.priority_score, 1),
             <span key="r" className="text-text-secondary">{s.reason ? prettify(s.reason) : "—"}</span>,
@@ -924,7 +929,7 @@ function WatchRowItem({ r, onOpen, dim }: { r: WatchRow; onOpen: (r: WatchRow) =
       <td className="px-2.5 py-2"><DirBadge direction={r.direction} /></td>
       <td className="px-2.5 py-2 text-right font-mono text-text-secondary">{formatNumber(r.strike ?? r.atm_strike, 0)}</td>
       <td className="px-2.5 py-2 text-right text-text-primary">
-        <LiveMarkCell symbol={legTapeSymbol(r)} fallback={r.ltp} decimals={1} />
+        <LiveMarkCell symbol={legTapeSymbol(r)} fallback={r.ltp} fallbackAt={r.ltp_at ?? r.updated_at} decimals={1} showAge={false} />
       </td>
       <td className="px-2.5 py-2 text-right font-mono text-text-secondary">{formatNumber(r.iv_pct, 1)}</td>
       <td className="px-2.5 py-2 text-right font-mono text-text-secondary">{formatNumber(r.rsi, 1)}</td>
@@ -1078,7 +1083,7 @@ function PositionsTab({ rows }: { rows: PositionRow[] }) {
                 <td className="px-2.5 py-2 text-right font-mono text-text-secondary">{p.qty ?? "—"}</td>
                 <td className="px-2.5 py-2 text-right font-mono text-text-primary">{formatNumber(p.entry_price, 2)}</td>
                 <td className="px-2.5 py-2 text-right text-text-primary">
-                  <LiveMarkCell symbol={legTapeSymbol(p)} fallback={p.current_price} decimals={2} />
+                  <LiveMarkCell symbol={legTapeSymbol(p)} fallback={p.current_price} fallbackAt={p.price_updated_at} decimals={2} />
                 </td>
                 <td className={clsx("px-2.5 py-2 text-right font-mono font-semibold", tone(p.unrealized_pnl))}>
                   {formatSignedMoney(p.unrealized_pnl)}

@@ -130,15 +130,30 @@ export const LiveMarkCell = memo(function LiveMarkCell({
       : "stored snapshot · no mark time reported"
     : `${live ? "live tape" : "stored snapshot"} · marked ${formatIST(new Date(markMs).toISOString())} IST · ${formatAge(ageMs ?? 0)} ago`;
 
+  // Absolute clock time of the mark (HH:MM), the second line's main content —
+  // the age alone can't tell you WHICH 15:29 close you are looking at.
+  const clock = markMs == null
+    ? null
+    : new Date(markMs).toLocaleTimeString("en-IN", {
+        hour: "2-digit", minute: "2-digit", hour12: false, timeZone: "Asia/Kolkata",
+      });
+  const sameDay = markMs != null && new Date(markMs).toDateString() === new Date(now || Date.now()).toDateString();
+  const dayPart = markMs == null || sameDay
+    ? ""
+    : ` ${new Date(markMs).toLocaleDateString("en-IN", { day: "2-digit", month: "short", timeZone: "Asia/Kolkata" })}`;
+
   return (
-    <span
-      className={`inline-flex items-center justify-end gap-1 rounded px-1 font-mono tabular-nums transition-colors ${flashBg}`}
-      title={title}
-    >
-      {value != null ? `${prefix}${formatNumber(value, decimals)}` : "—"}
-      {live ? <span className="h-1.5 w-1.5 shrink-0 rounded-full bg-accent-green" /> : null}
+    <span className="inline-flex flex-col items-end leading-tight" title={title}>
+      <span
+        className={`inline-flex items-center justify-end gap-1 rounded px-1 font-mono tabular-nums transition-colors ${flashBg}`}
+      >
+        {value != null ? `${prefix}${formatNumber(value, decimals)}` : "—"}
+        {live ? <span className="h-1.5 w-1.5 shrink-0 rounded-full bg-accent-green" /> : null}
+      </span>
       {showAge && value != null ? (
-        <span className={`shrink-0 text-[9.5px] ${ageTone}`}>{ageMs == null ? "no time" : formatAge(ageMs)}</span>
+        <span className={`px-1 font-mono text-[9.5px] ${ageTone}`}>
+          {ageMs == null ? "no time" : `${clock}${dayPart} · ${formatAge(ageMs)}`}
+        </span>
       ) : null}
     </span>
   );
