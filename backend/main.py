@@ -296,6 +296,7 @@ async def lifespan(app: FastAPI):
     # ── CORE plane: WS subscription managers + data-maintenance daemons ─────
     option_ws_task = None
     held_position_ws_task = None
+    held_position_candle_task = None
     commodity_mark_task = None
     if boots_core():
         # P2 streaming: option WS subscription manager. Computes the ATM
@@ -327,6 +328,24 @@ async def lifespan(app: FastAPI):
         except Exception as e:
             logger.warning(f"Held-position subscription refresh start skipped: {e}")
             held_position_ws_task = None
+
+        # Premium CANDLES for held legs. Subscribing a leg (above) only gives
+        # it live ticks; its option_premium_candles series was still collected
+        # by the S1 scan, i.e. only while the leg was the CURRENT ATM strike.
+        # Once spot drifted the held leg stopped being collected entirely
+        # (2026-08-03: 16 of 21 open positions had marks up to 6 days old and
+        # ZERO candles for their expiry). Held positions are maintained for
+        # candle data alongside the ATM options, for as long as they are open.
+        try:
+            from market_data.held_position_candles import run_held_position_candle_loop
+            held_position_candle_task = asyncio.create_task(
+                run_held_position_candle_loop(),
+                name="held-position-candle-refresh",
+            )
+            logger.info("✓ Held-position candle refresh started")
+        except Exception as e:
+            logger.warning(f"Held-position candle refresh start skipped: {e}")
+            held_position_candle_task = None
 
         # MCX futures have no WS feed; bridge a fast REST LTP poll into the tick
         # hot-cache so commodity position marks stream at ~12s instead of 60s.
@@ -450,6 +469,7 @@ async def lifespan(app: FastAPI):
     for _name, _task in (
         ("option-ws", option_ws_task),
         ("held-position-ws", held_position_ws_task),
+        ("held-position-candles", held_position_candle_task),
         ("commodity-mark", commodity_mark_task),
     ):
         if _task is not None:
