@@ -635,7 +635,7 @@ function OpenBookTable({
                       <td className="px-3 py-2 text-right font-mono">{formatNumber(displayQty(p, true), 0)}</td>
                       <td className="px-3 py-2 text-right font-mono">{formatNumber(finiteNumber(p.entry_premium), 2)}</td>
                       <td className="px-3 py-2 text-right text-accent-blue">
-                        <LiveMarkCell symbol={legTapeSymbol(p)} fallback={liveMark} decimals={2} />
+                        <LiveMarkCell symbol={legTapeSymbol(p)} fallback={liveMark} fallbackAt={p.updated_at ?? p.opened_at} decimals={2} />
                       </td>
                       <td className={`px-3 py-2 text-right font-mono ${tone(pnl)}`}>{formatSignedMoney(pnl)}</td>
                       <td className="px-3 py-2 font-mono text-[12px] text-text-muted">{formatIST(p.opened_at)}</td>

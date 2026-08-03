@@ -999,7 +999,7 @@ function SleeveTable({
                     <td className="px-3 py-2 text-right font-mono text-[12px] text-text-secondary">{formatNumber(cbeQuantity(p), 0)}</td>
                     <td className="px-3 py-2 text-right font-mono text-[12px] text-text-secondary">{formatNumber(cbeEntryPrice(p), 1)}</td>
                     <td className="px-3 py-2 text-right text-[12px] text-text-primary">
-                      <LiveMarkCell symbol={rowTapeSymbol(p)} fallback={cbeMarkPrice(p)} decimals={1} />
+                      <LiveMarkCell symbol={rowTapeSymbol(p)} fallback={cbeMarkPrice(p)} fallbackAt={p.updated_at ?? p.marked_at ?? p.opened_at} decimals={1} />
                     </td>
                     <td className="px-3 py-2 text-right">
                       <div className="font-mono text-[12px] text-text-primary">{formatMoney(cbeCurrentValue(p))}</div>

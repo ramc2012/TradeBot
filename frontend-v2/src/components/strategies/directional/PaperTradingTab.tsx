@@ -153,7 +153,7 @@ export default function PaperTradingTab({ symbol, paper }: { symbol?: string; pa
               { th: "Contract", render: (p: OpenPos) => `${p.option_type ?? ""} ${p.strike ?? ""} · ${p.expiry ?? ""}` },
               { th: "Regime", render: (p: OpenPos) => p.regime ?? "—" },
               { th: "Lots", render: (p: OpenPos) => p.quantity_lots ?? 0, align: "right" },
-              { th: "Entry → Mark", render: (p: OpenPos) => (<span className="font-mono">{formatNumber(p.entry_premium, 2)} → <LiveMarkCell symbol={legTapeSymbol(p)} fallback={p.latest_premium} decimals={2} /></span>), align: "right" },
+              { th: "Entry → Mark", render: (p: OpenPos) => (<span className="font-mono">{formatNumber(p.entry_premium, 2)} → <LiveMarkCell symbol={legTapeSymbol(p)} fallback={p.latest_premium} fallbackAt={p.updated_at ?? p.opened_at} decimals={2} /></span>), align: "right" },
               { th: "Unrealized", render: (p: OpenPos) => formatSignedMoney(p.unrealized_pnl), align: "right", tone: (p: OpenPos) => tone(p.unrealized_pnl) },
               { th: "Size mult", render: (p: OpenPos) => p.policy_size_multiplier != null ? `${p.policy_size_multiplier.toFixed(2)}×` : "—", align: "right" },
               { th: "Opened", render: (p: OpenPos) => formatIST(p.opened_at), align: "right" },

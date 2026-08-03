@@ -26,6 +26,11 @@ import {
 import { PortfolioReconciliation } from "@/components/strategies/overview/PortfolioReconciliation";
 import { MetricTile, useUrlTab } from "@/components/desk-ui";
 import ClosedTradeLedger from "@/components/reports/ClosedTradeLedger";
+import { LiveMarkCell } from "@/components/terminal/LiveMarkCell";
+// legTapeSymbol, NOT rowTapeSymbol: this ledger is mostly option legs, and
+// rowTapeSymbol's underlying fallback would stream the INDEX SPOT as the
+// option's mark (~24,383 in place of a ~106 premium).
+import { legTapeSymbol } from "@/lib/marketSymbols";
 
 type PositionScope = "all" | "options" | "futures";
 
@@ -169,7 +174,9 @@ const PositionsLedgerTable = memo(function PositionsLedgerTable({ rows }: { rows
             <th className="pb-2 pr-3">Side</th>
             <th className="pb-2 pr-3">Qty / Lots</th>
             <th className="pb-2 pr-3">Entry Price</th>
-            <th className="pb-2 pr-3">Last Price</th>
+            <th className="pb-2 pr-3 text-right" title="Live tape price when streaming, else the stored mark. The chip is the age of that rate; hover for the exact IST time and source.">
+              Last Price · age
+            </th>
             <th className="pb-2 pr-3">Risk</th>
             <th className="pb-2 pr-3">Open P&amp;L</th>
             <th className="pb-2 pr-3">Reason</th>
@@ -246,7 +253,14 @@ const PositionsLedgerTable = memo(function PositionsLedgerTable({ rows }: { rows
                     {row.lots ? <div className="mt-1 text-[11px] text-text-muted">{row.lots} lot · {row.lotSize || "--"} size</div> : null}
                   </td>
                   <td className="py-3 pr-3 font-mono text-text-primary">{formatNumber(row.entryPrice)}</td>
-                  <td className="py-3 pr-3 font-mono text-text-primary">{formatNumber(row.currentPrice)}</td>
+                  <td className="py-3 pr-3 text-right font-mono text-text-primary">
+                    <LiveMarkCell
+                      symbol={legTapeSymbol(row)}
+                      fallback={row.currentPrice}
+                      fallbackAt={row.updatedAt}
+                      decimals={2}
+                    />
+                  </td>
                   <td className="py-3 pr-3 font-mono text-[11px] leading-5">
                     {hasRisk ? (
                       <div className="space-y-0.5">

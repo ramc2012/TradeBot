@@ -92,6 +92,9 @@ export default function UniverseWatchlist({
           <tbody>
             {symbols.map((sym, i) => {
               const d = queries[i].data || {};
+              // The snapshot payload carries no mark time, so the honest
+              // stamp for a non-live spot is when this fetch landed.
+              const snapAt = queries[i].dataUpdatedAt || null;
               const feat = d.feature_snapshot || {};
               const reg = d.regime || {};
               const sig = d.signal || {};
@@ -116,7 +119,7 @@ export default function UniverseWatchlist({
                       <StatusBadge label={(ds.degraded_reason || "stale").replaceAll("_", " ")} variant="warn" className="ml-2" />
                     ) : null}
                   </td>
-                  <td className="px-2 py-2 text-right"><LiveMarkCell symbol={underlyingToTapeSymbol(sym)} fallback={d.spot_price} decimals={2} /></td>
+                  <td className="px-2 py-2 text-right"><LiveMarkCell symbol={underlyingToTapeSymbol(sym)} fallback={d.spot_price} fallbackAt={snapAt} decimals={2} /></td>
                   <td className="px-2 py-2 text-right font-mono">{formatNumber(feat.adx, 1)}</td>
                   <td className={clsx("px-2 py-2 text-right font-mono", (feat.ema_spread_pct ?? 0) >= 0 ? "text-accent-green" : "text-accent-red")}>
                     {formatPct(feat.ema_spread_pct, 3)}

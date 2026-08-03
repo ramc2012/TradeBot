@@ -162,6 +162,7 @@ export function TradeBook({
                       <LiveMarkCell
                         symbol={legTapeSymbol(p)}
                         fallback={p.latest_premium ?? p.exit_premium}
+                        fallbackAt={p.updated_at ?? p.marked_at ?? p.opened_at}
                         decimals={2}
                       />
                     </td>
