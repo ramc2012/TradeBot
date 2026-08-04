@@ -22,6 +22,42 @@ def _resolve_calendar_file() -> Path:
 
 _CALENDAR_FILE = _resolve_calendar_file()
 
+# ─── NSE session structure, effective 2026-08-03 ────────────────────────────
+#
+# NSE circular (2026-05-30) changed two things from 03 Aug 2026:
+#
+#   1. EQUITY DERIVATIVES now close at 15:40 (was 15:30) — index AND stock
+#      F&O. Options keep trading for ten minutes after the cash close.
+#   2. A CLOSING AUCTION SESSION (CAS) replaced the VWAP closing-price method
+#      for F&O-eligible STOCKS: continuous cash trading in those names stops
+#      at 15:15, the auction runs 15:15–15:35, and the auction price is the
+#      official close.
+#
+# Consequences this codebase must respect:
+#   * anything that collects DERIVATIVE data or marks/exits option positions
+#     must stay awake until 15:40, not 15:30 — on 2026-08-03 (day one of the
+#     change) option premium bars died out around 15:20 and the app captured
+#     none of the final, most important twenty minutes of F&O trading;
+#   * F&O-stock cash quotes GO QUIET 15:15–15:35 by design. That is the
+#     auction, not a stale feed — freshness guards must not read it as one.
+#     (Observed 2026-08-03: 1-minute spot keys fell 92 → 15 across that
+#     window, then recovered to ~80 once CAS concluded.)
+#   * NON-F&O cash equities are unchanged at 15:30.
+#
+# The morning pre-open auction rework lands 2026-09-07 and is NOT modelled
+# here yet.
+# DELIBERATELY NOT added to _DEFAULT_SESSIONS: `is_exchange_open` returns True
+# if ANY session covers `now`, so listing a 15:40 derivatives session there
+# would silently extend the NSE session for all ~18 `is_exchange_open` callers
+# at once — including cash-equity lanes that must still stop at 15:30. The new
+# windows are exposed as explicit constants + helpers instead, so a caller
+# opts in to the derivatives clock rather than inheriting it by accident.
+NSE_OPEN = "09:15"
+NSE_CASH_CLOSE = "15:30"
+NSE_DERIVATIVES_CLOSE = "15:40"
+NSE_CAS_OPEN = "15:15"
+NSE_CAS_CLOSE = "15:35"
+
 _DEFAULT_SESSIONS: dict[str, list[dict[str, str]]] = {
     "NSE": [{"key": "regular", "label": "Regular", "open": "09:15", "close": "15:30"}],
     "MCX": [
@@ -306,3 +342,57 @@ class TradingCalendar:
 
 
 trading_calendar = TradingCalendar()
+
+
+# ─── NSE derivatives / CAS helpers (2026-08-03 regime) ──────────────────────
+#
+# Explicit opt-in clocks for the post-2026-08-03 structure. All of these still
+# require a real trading day — they compose `has_exchange_session` so exchange
+# holidays and the weekend are honoured exactly as before.
+
+def _minute_of_day(now: datetime | None = None) -> tuple[datetime, int]:
+    current = (now or datetime.now(IST)).astimezone(IST)
+    return current, current.hour * 60 + current.minute
+
+
+def _hhmm(value: str) -> int:
+    parsed = _parse_time(value)
+    return parsed.hour * 60 + parsed.minute
+
+
+def nse_derivatives_open(now: datetime | None = None, *, slack_minutes: int = 0) -> bool:
+    """True while NSE EQUITY DERIVATIVES are tradeable (09:15–15:40 IST).
+
+    Use this for anything that collects option/future data or marks and exits
+    derivative positions. `slack_minutes` widens both ends for collectors that
+    want to catch the opening and closing prints.
+    """
+    current, minute = _minute_of_day(now)
+    if not trading_calendar.has_exchange_session("NSE", current.date()):
+        return False
+    return (_hhmm(NSE_OPEN) - slack_minutes) <= minute <= (_hhmm(NSE_DERIVATIVES_CLOSE) + slack_minutes)
+
+
+def nse_in_closing_auction(now: datetime | None = None) -> bool:
+    """True during the F&O-stock Closing Auction Session (15:15–15:35 IST).
+
+    F&O-eligible cash names do not trade continuously in this window, so their
+    quotes legitimately stop updating. Staleness guards should treat a quiet
+    feed here as EXPECTED, never as a dead feed.
+    """
+    current, minute = _minute_of_day(now)
+    if not trading_calendar.has_exchange_session("NSE", current.date()):
+        return False
+    return _hhmm(NSE_CAS_OPEN) <= minute <= _hhmm(NSE_CAS_CLOSE)
+
+
+def nse_session_over(now: datetime | None = None) -> bool:
+    """True once EVERYTHING on NSE is done for the day (after 15:40 IST).
+
+    Post-close jobs must key off this rather than the old 15:30/15:35 marks —
+    those now fire while derivatives are still trading.
+    """
+    current, minute = _minute_of_day(now)
+    if not trading_calendar.has_exchange_session("NSE", current.date()):
+        return True
+    return minute > _hhmm(NSE_DERIVATIVES_CLOSE)

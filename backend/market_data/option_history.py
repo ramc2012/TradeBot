@@ -732,7 +732,10 @@ class OptionHistoryService:
         # corrupt MACD; persisted candle + broker rows are session-only. NSE/BSE
         # F&O = 09:15-15:30 IST, MCX commodity = 09:00-23:30 IST (by instrument).
         key_up = str(instrument_key or "").upper()
-        sess_lo, sess_hi = ("09:00", "23:30") if "MCX" in key_up else ("09:15", "15:30")
+        # NSE/BSE F&O upper bound is the DERIVATIVES close (15:40 since
+        # 2026-08-03), not the 15:30 cash close — at 15:30 this filter threw
+        # away the last ten minutes of legitimate option bars.
+        sess_lo, sess_hi = ("09:00", "23:30") if "MCX" in key_up else ("09:15", "15:40")
         candles = sorted(
             (r for r in canon.values() if sess_lo <= str(r.get("time", ""))[11:16] <= sess_hi),
             key=lambda row: row["time"],

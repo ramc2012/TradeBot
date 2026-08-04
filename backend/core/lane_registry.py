@@ -77,7 +77,7 @@ def _flag(name: str | None, default: bool = False) -> bool | None:
 def get_registry() -> tuple[LaneSpec, ...]:
     """Build the declarative registry. Values that mirror settings are read
     fresh on every call so the snapshot reflects the current process config."""
-    nse = "NSE 09:15-15:30 IST"
+    nse = "NSE 09:15-15:30 IST (cash) · derivatives to 15:40"
     mcx = "MCX 09:00-23:30 IST"
 
     supervisor_runners: list[LaneSpec] = [

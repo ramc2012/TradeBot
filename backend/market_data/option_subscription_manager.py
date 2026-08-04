@@ -81,7 +81,9 @@ def _market_hours_now() -> bool:
     if now.weekday() >= 5:
         return False
     minute_of_day = now.hour * 60 + now.minute
-    return 9 * 60 <= minute_of_day <= 15 * 60 + 35
+    # 15:45 = the 15:40 derivatives close (2026-08-03 regime) + 5m slack, so
+    # held option legs stay subscribed through the closing prints.
+    return 9 * 60 <= minute_of_day <= 15 * 60 + 45
 
 
 def _next_session_open_pick() -> datetime:
@@ -428,7 +430,16 @@ def _build_fyers_monthly_option_symbol(
 
     Format (confirmed against the broker-resolved index leg
     ``NSE:MIDCPNIFTY26JUN14400PE``): ``NSE:{SYM}{YY}{MON}{STRIKE}{CE|PE}``
-    where YY = 2-digit year, MON = 3-letter uppercase month, STRIKE = integer.
+    where YY = 2-digit year, MON = 3-letter uppercase month.
+
+    STRIKE is rendered EXACTLY, decimals included. It used to be
+    ``int(round(float(strike)))``, which silently produced a symbol for a
+    contract that does not exist on every x.50 rung — 19 NSE underlyings list
+    them (ITC, JIOFIN, POWERGRID, ONGC, WIPRO, TATASTEEL, ...), so a held ITC
+    287.5 PE asked the WS for ``NSE:ITC26AUG288PE`` and never ticked. Fyers
+    itself uses decimal strikes: ``NSE:ONGC26JUL247.5CE`` and
+    ``NSE:CANBK26JUL125.8PE`` are real broker-fed symbols captured in this
+    repo's own option data.
 
     Used for NSE STOCK options, which are monthly-only and which the Fyers
     *index* option-chain endpoint can't resolve. Avoids a REST call entirely.
@@ -436,6 +447,8 @@ def _build_fyers_monthly_option_symbol(
     route weekly index contracts through the chain resolver instead.
     """
     from datetime import date as _date
+
+    from market_data.strike_ladder import format_strike
 
     if option_type not in ("CE", "PE") or not underlying or not expiry or not strike:
         return None
@@ -446,10 +459,10 @@ def _build_fyers_monthly_option_symbol(
     yy = d.strftime("%y")
     mon = d.strftime("%b").upper()  # JAN..DEC
     try:
-        strike_int = int(round(float(strike)))
+        strike_token = format_strike(strike)
     except (TypeError, ValueError):
         return None
-    return f"NSE:{underlying.upper()}{yy}{mon}{strike_int}{option_type}"
+    return f"NSE:{underlying.upper()}{yy}{mon}{strike_token}{option_type}"
 
 
 async def _resolve_held_option_app_symbol(

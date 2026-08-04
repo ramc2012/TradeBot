@@ -67,9 +67,10 @@ def _market_hours_now() -> bool:
     if now.weekday() >= 5:
         return False
     minute_of_day = now.hour * 60 + now.minute
-    # 09:10–15:40 IST: a little slack each side of the NSE session so the
-    # first and last bars of the day are captured.
-    return 9 * 60 + 10 <= minute_of_day <= 15 * 60 + 40
+    # 09:10–15:45 IST: slack each side of the NSE DERIVATIVES session, which
+    # closes at 15:40 under the 2026-08-03 regime (was 15:30), so the closing
+    # option bars are captured.
+    return 9 * 60 + 10 <= minute_of_day <= 15 * 60 + 45
 
 
 async def _newest_bar(underlying: str, expiry: date, strike: float, option_type: str, interval: str) -> datetime | None:

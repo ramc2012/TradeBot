@@ -460,14 +460,20 @@ class DataRouter:
 
     @staticmethod
     def _is_index_market_open(now: Optional[datetime] = None) -> bool:
-        """True during NSE index regular session (Mon–Fri, 09:15–15:30 IST)."""
+        """True while NSE index/derivative instruments stream (09:15–15:40 IST).
+
+        Extended from 15:30 on 2026-08-03: NSE equity derivatives now trade
+        until 15:40, and this gate governs the tick stream that feeds option
+        marks. Leaving it at 15:30 silently dropped the final ten minutes of
+        F&O trading — the closing prints — off the tape.
+        """
         if now is None:
             now = datetime.now(IST)
         now_ist = now.astimezone(IST)
         if now_ist.weekday() >= 5:  # Saturday / Sunday
             return False
         minute_of_day = now_ist.hour * 60 + now_ist.minute
-        return (9 * 60 + 15) <= minute_of_day <= (15 * 60 + 30)
+        return (9 * 60 + 15) <= minute_of_day <= (15 * 60 + 40)
 
     @staticmethod
     def _stream_window_open(now: Optional[datetime] = None) -> bool:
