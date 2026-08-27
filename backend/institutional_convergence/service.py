@@ -79,7 +79,14 @@ def configured_indices() -> list[str]:
 
 
 def select_diversified_stocks(payload: dict[str, Any] | None, limit: int = 10) -> list[dict[str, Any]]:
-    """Select the strongest actionable name per sector, never duplicating sectors."""
+    """Select the strongest actionable name per sector, never duplicating sectors.
+
+    ``limit <= 0`` means an INDICES-ONLY universe (owner directive 2026-08-14).
+    This must short-circuit here: the selection loop below breaks on
+    ``max(1, limit)``, so a 0 limit would otherwise still return one stock.
+    """
+    if int(limit) <= 0:
+        return []
     watchlist = list((payload or {}).get("watchlist") or [])
     results = list((payload or {}).get("results") or [])
     watchlist_symbols = {str(row.get("instrument") or "").strip().upper() for row in watchlist}

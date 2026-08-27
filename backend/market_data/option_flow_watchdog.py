@@ -21,6 +21,7 @@ schedules.
 """
 from __future__ import annotations
 
+from datetime import datetime, timedelta, timezone
 from typing import Any, Optional
 
 from loguru import logger
@@ -88,8 +89,20 @@ async def _newest_premium_persist_age_seconds() -> Optional[float]:
             row = await session.execute(
                 text(
                     "SELECT EXTRACT(EPOCH FROM (NOW() - MAX(synced_at))) "
-                    "FROM option_premium_candles"
-                )
+                    "FROM option_premium_candles "
+                    # Bound the PARTITIONING column. Unbounded, this aggregate
+                    # scanned all 530 chunks of the hypertable every 60s and was
+                    # caught taking 10.2s in the live session — a watchdog that
+                    # cost more than the thing it watched. `synced_at` is not the
+                    # partitioning key, so only a bound on `time` prunes chunks.
+                    # A frozen feed still reports staleness: rows inside the
+                    # window keep their old synced_at. Past the window there are
+                    # no rows at all, which returns None = UNKNOWN, and the
+                    # caller already treats UNKNOWN as "no alert" rather than
+                    # inventing a healthy answer.
+                    "WHERE time >= :since"
+                ),
+                {"since": datetime.now(timezone.utc) - timedelta(days=7)},
             )
             value = row.scalar()
             return float(value) if value is not None else None

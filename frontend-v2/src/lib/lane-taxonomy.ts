@@ -126,7 +126,7 @@ export type LaneHorizonEntry = {
 
 /**
  * Lane key → horizon. Keys are exactly those emitted by
- * backend/core/lane_registry.py `get_registry()` (32 as of 2026-07-19).
+ * backend/core/lane_registry.py `get_registry()` (34 as of 2026-08-27; preopen_spot_snapshot is still absent).
  */
 export const LANE_HORIZON: Record<string, LaneHorizonEntry> = {
   // ── strategy engines ──
@@ -192,6 +192,14 @@ export const LANE_HORIZON: Record<string, LaneHorizonEntry> = {
   },
   // us_macd_refined RETIRED 2026-07-20 (owner: MACD + MACD-refined only).
   // ── everything that never takes a position ──
+  candidate_capture: {
+    horizon: "not_a_trading_lane",
+    evidence: "research observer: records every evaluated contract to candidate_snapshots; execution_mode=\"none\", takes no position and makes no broker call",
+  },
+  candidate_labelling: {
+    horizon: "not_a_trading_lane",
+    evidence: "post-close outcome resolution for candidate_capture; reads committed rows only and writes candidate_outcomes",
+  },
   market_intelligence: {
     horizon: "not_a_trading_lane",
     evidence: "data plane: builds the ATM watchlist every other lane reads",

@@ -89,6 +89,9 @@ def test_planned_runner_inventory_matches_supervisor(monkeypatch):
         "sector_ingestion",
         "macd_preopen_watchlist",
         "preopen_spot_snapshot",
+        "candidate_capture",
+        "candidate_labelling",
+        "candidate_training",
     }
 
 
@@ -107,7 +110,14 @@ def test_supervisor_runner_partition_by_laneset(monkeypatch):
     # 21 = 20 + sector_ingestion (post-close sector-interaction durable
     # ingestion + NSE constituent sync, 2026-08-02). CORE-plane data: public
     # HTTP + internal reads, no broker REST, no position.
-    assert len(all_keys) == 21
+    # 22 = 21 + candidate_capture (prospective training-set capture,
+    # 2026-08-26). CORE-plane data: reads the Redis-cached option chain, makes
+    # no broker call and holds no position.
+    # 23 = 22 + candidate_labelling (post-close outcome resolution for the
+    # capture lane, 2026-08-27). CORE-plane data: reads committed rows only.
+    # 24 = 23 + candidate_training (post-close model fit + promotion gates,
+    # 2026-08-27). CORE-plane data: reads the labelled set, holds no position.
+    assert len(all_keys) == 24
 
     monkeypatch.setattr(settings, "LANESET", "core", raising=False)
     core_keys = set(MarketHoursPaperSupervisor(enabled=False)._runners)
@@ -119,6 +129,9 @@ def test_supervisor_runner_partition_by_laneset(monkeypatch):
         "sector_ingestion",
         "macd_preopen_watchlist",
         "preopen_spot_snapshot",
+        "candidate_capture",
+        "candidate_labelling",
+        "candidate_training",
     }
 
     monkeypatch.setattr(settings, "LANESET", "strategies", raising=False)

@@ -424,7 +424,21 @@ class SwingAgent(StrategyAgent):
                 rl_state=_rl_state,
             )
             return self._flat(rationale, confidence=confidence, metadata=metadata)
-        if stop is None or stop == entry:
+        # Direction-sanity, not just equality. `stop == entry` alone let stops sit
+        # on the WRONG SIDE of entry: 12 of 17 `stop_loss` positions in the index
+        # sleeve were ALREADY BREACHED at open and fired on the first refresh
+        # (~3 min) at roughly entry — which is why `stop_loss` booked a POSITIVE
+        # average P&L, an incoherence that flagged the bug. `stop` here is a
+        # structural profile level (prior.vah / poc / val / IB), a session
+        # constant, so it can easily land the wrong side of the fill anchor;
+        # `abs(entry - stop)` in agents/base.py then hides the sign, exactly as it
+        # did in the institutional_convergence blow-up. The MCX futures path
+        # already has this check (`_valid_levels`, auction_intelligence/
+        # commodity.py:452); the index options path never did.
+        _wrong_side = (action == "LONG" and stop is not None and stop >= entry) or (
+            action == "SHORT" and stop is not None and stop <= entry
+        )
+        if stop is None or stop == entry or _wrong_side:
             rationale.append("Swing stop placement was invalid for the candidate setup.")
             blockers = blockers + ["invalid_stop"]
             metadata = self._decision_metadata(

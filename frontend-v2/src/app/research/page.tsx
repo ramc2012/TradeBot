@@ -7,17 +7,19 @@
  * preselected; the tab bodies import the components directly.
  */
 import { clsx } from "clsx";
-import { Database, FlaskConical, GitCompare } from "lucide-react";
+import { Database, FlaskConical, GitCompare, ScanSearch } from "lucide-react";
 
 import { useUrlTab } from "@/components/desk-ui";
 import BacktesterDesk from "@/components/backtester/BacktesterDesk";
 import DataIngestConsole from "@/components/data/DataIngestConsole";
+import CandidateCaptureDesk from "@/components/candidate-capture/CandidateCaptureDesk";
 import ResearchMonitorBoard from "@/components/research-monitor/ResearchMonitorBoard";
 
 const TABS = [
   { key: "backtests",  label: "Backtests",  icon: GitCompare },
   { key: "data",       label: "Data ingest", icon: Database },
   { key: "validation", label: "Validation", icon: FlaskConical },
+  { key: "capture",    label: "Capture",    icon: ScanSearch },
 ];
 
 export default function ResearchPage() {
@@ -28,8 +30,8 @@ export default function ResearchPage() {
       <header>
         <h1 className="text-2xl font-semibold text-text-primary">Research</h1>
         <p className="mt-1 text-sm text-text-muted">
-          Non-live surfaces. Backtests, F&O data ingestion, and
-          validation reports — one page instead of three routes.
+          Non-live surfaces. Backtests, F&O data ingestion, validation
+          reports, and the candidate-capture training set.
         </p>
       </header>
 
@@ -53,6 +55,7 @@ export default function ResearchPage() {
       {tab === "backtests" ? <BacktesterDesk /> : null}
       {tab === "data" ? <DataIngestConsole /> : null}
       {tab === "validation" ? <ResearchMonitorBoard /> : null}
+      {tab === "capture" ? <CandidateCaptureDesk /> : null}
     </div>
   );
 }

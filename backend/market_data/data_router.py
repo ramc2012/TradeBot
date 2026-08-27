@@ -299,6 +299,20 @@ class DataRouter:
         if broker_name == "fyers":
             broker_symbols = [to_fyers_symbol(symbol) for symbol in full_set]
         else:
+            # Resolve futures app-symbols to Upstox instrument keys BEFORE
+            # translating. Upstox subscribes by key (NSE_FO|58072), so an
+            # unresolved futures symbol subscribes INERT — no error, no ticks —
+            # which is why market_ticks has carried only the 5 index symbols
+            # since 2026-08-07 and both convergence lanes have been unable to
+            # pass tick_fresh / real_tick_cvd. Best-effort and bounded: on any
+            # failure we fall through to the previous (inert) behaviour rather
+            # than breaking the index subscriptions that already work.
+            try:
+                from market_data.futures_instrument_keys import resolve_and_register
+
+                await asyncio.wait_for(resolve_and_register(full_set), timeout=45.0)
+            except Exception as exc:  # noqa: BLE001
+                logger.debug(f"[DataRouter] futures key resolution skipped: {exc}")
             broker_symbols = [to_broker_symbol(symbol) for symbol in full_set]
         if broker_name == "fyers":
             # Fyers adapter accepts an optional depth callback for the 5-level
@@ -717,6 +731,7 @@ class DataRouter:
             )
             return
         self._tick_buffer[tick.symbol] = tick
+        self._note_tick_for_recovery(tick.symbol)
         # WS-0.2 instrumentation — tick throughput + age at ingest. Fully
         # isolated: a metrics fault must never disturb the tick hot path.
         try:
@@ -1050,6 +1065,18 @@ class DataRouter:
             "source_policy": source_policy,
         }
 
+    def _note_tick_for_recovery(self, symbol: str) -> None:
+        """Clear the reconnect backoff streak once a REQUIRED symbol proves life.
+
+        A required-symbol tick is the ONLY real evidence a reconnect worked —
+        `subscribe()` returning without raising is not (see _reconnect_if_stale).
+        Keeping the reset here means a genuine recovery still retries fast while
+        a silently-dead socket keeps backing off. Attribute assignment is atomic,
+        so this is safe to call from the broker's WS thread (same rationale as
+        _on_ws_reconnected)."""
+        if self._reconnect_failures and symbol in self._required_symbols:
+            self._reconnect_failures = 0
+
     def _current_reconnect_backoff(self) -> timedelta:
         """WS-1.3b: exponential backoff (base·2^failures, capped) + up to 50% jitter.
         ``_reconnect_failures`` is 0 after a success, so the first retry waits only
@@ -1097,7 +1124,16 @@ class DataRouter:
             # watchlist-driven subscription changes.
             self._subscribed_symbols = []
             await self.subscribe(list(self._desired_primary_symbols))
-            self._reconnect_failures = 0  # success → reset backoff to fast-retry
+            # UNPROVEN, not success. A rebuilt socket that never delivers a tick
+            # raises nothing, so resetting the streak here pinned the backoff at
+            # base forever: on 2026-08-13 that produced ~40 reconnects/hour for
+            # 4 straight hours (05:00-08:59 UTC) while market_ticks stayed empty,
+            # and the same 4h blind pattern hit 05-Aug, 06-Aug and 2026-07-08.
+            # Hammering a silently-dead socket every 30s plausibly sustains the
+            # outage via upstream connect throttling. Count the attempt so the
+            # exponential backoff actually engages; the streak is cleared in the
+            # tick path below the moment a REQUIRED symbol proves life.
+            self._reconnect_failures = min(self._reconnect_failures + 1, 8)
         except Exception as exc:
             self._reconnect_failures = min(self._reconnect_failures + 1, 8)  # escalate (cap exponent)
             logger.warning(

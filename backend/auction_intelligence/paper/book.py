@@ -478,8 +478,26 @@ class PaperPositionBook:
                 closed_positions=closed_positions,
             )
             return
+        # A confirmed flip used to close unconditionally as "signal_flip", never
+        # asking WHY the position is being closed. When a protective level has
+        # already been breached, that mislabels a stop-out as a strategy
+        # rotation — which is how the 2026-08-19 BANKNIFTY PE booked -Rs 285,345
+        # (a -72% premium move) under a label implying an orderly flip, while its
+        # -25% stop and its spot stop had both been passed. Attribution matters:
+        # `signal_flip` totals were being read as a strategy problem when the
+        # underlying event was an unbounded stop breach.
+        #
+        # This does NOT change the fill - the close happens now at market either
+        # way. It changes the recorded reason so exit-path P&L means something.
+        # The loss BOUND comes from the mark being correct on the earlier cycle,
+        # which `_resolve_premium`'s contract guard restores.
+        breached = self._exit_reason_for_position(primary, bundle=bundle)
         await self._close_position(
-            position=primary, bundle=bundle, now=now, reason="signal_flip", execution=None
+            position=primary,
+            bundle=bundle,
+            now=now,
+            reason=breached or "signal_flip",
+            execution=None,
         )
         if primary in open_positions:
             open_positions.remove(primary)
@@ -789,7 +807,9 @@ class PaperPositionBook:
         reason: str,
         execution: Any | None,
     ) -> None:
-        exit_premium = await self._resolve_premium(position=position, execution=execution)
+        exit_premium = await self._resolve_premium(
+            position=position, execution=execution, for_close=True
+        )
         exit_spot = self._spot_from_execution_or_bundle(bundle=bundle, execution=execution, fallback=position.get("latest_spot_price"))
         entry_premium = float(position.get("entry_premium") or exit_premium or 0.0)
         quantity = int(position.get("quantity") or 0)
@@ -934,32 +954,83 @@ class PaperPositionBook:
         )
         return asdict(record)
 
-    async def _resolve_premium(self, *, position: dict[str, Any], execution: Any | None) -> float:
-        execution_premium = float(getattr(execution, "premium", None) or getattr(execution, "limit_price", None) or 0.0) if execution is not None else 0.0
-        if execution_premium > 0:
-            return round(execution_premium, 2)
+    async def _resolve_premium(
+        self, *, position: dict[str, Any], execution: Any | None, for_close: bool = False
+    ) -> float:
+        """Mark ``position`` — using ONLY this position's own contract.
+
+        The execution short-circuit below used to fire for ANY execution, with no
+        check that it belonged to this position. Callers pass the cycle's chosen
+        execution, which on a flip is the OPPOSITE leg and on a hold can be a
+        different strike after the ATM selector rolls — so a held leg got marked
+        at another contract's price.
+
+        Measured 2026-08-21: **33 of 65 closes (51%) booked an exit_premium
+        exactly equal to a different contract's execution premium at the same
+        timestamp**, worth -Rs 736,100 = 54% of the sleeve's lifetime P&L, and
+        including 25 of 26 `hard_stop` closes. It does not merely evade stops, it
+        FABRICATES P&L in both directions: BANKNIFTY 57500 CE booked -Rs 38,903 at
+        189.10 (the 58000 CE's price) when its real close was 467.70, a true
+        +Rs 2,888; and a headline "+Rs 382,168" NIFTY 24000 PE winner was marked at
+        the 24300 PE's price, true value ~+Rs 28,957.
+
+        Because the poison is sticky (the `latest_premium` fallback at the end),
+        one bad mark persists across cycles.
+
+        The flip path passes execution=None, so `signal_flip` exits were never
+        poisoned - those numbers are real.
+
+        Mark vs close: marking reads the **30-minute** series that
+        `market_data/held_position_candles.py` already maintains for held legs,
+        with NO broker refresh, so this costs nothing extra against the
+        Upstox budget (option candles are REST-only). Only `_close_position`
+        (`for_close=True`) may hit the broker for a precise 1-minute exit price.
+        """
+        if execution is not None and _same_contract(position, execution):
+            execution_premium = float(
+                getattr(execution, "premium", None) or getattr(execution, "limit_price", None) or 0.0
+            )
+            if execution_premium > 0:
+                return round(execution_premium, 2)
 
         expiry = position.get("expiry")
         option_type = position.get("option_type")
         strike = position.get("strike")
         underlying = position.get("underlying_symbol")
         instrument_key = position.get("instrument_key")
+        # Interval preference. Marking must NOT assume 30-minute rows exist —
+        # they are NOT maintained for every held leg. On 2026-08-21 the BANKNIFTY
+        # 58000 CE had 1-minute rows only, so a 30m-only mark found nothing, fell
+        # through to the stale `latest_premium`, and missed a breach live for 10+
+        # minutes (premium under its 155.93 stop line continuously from 06:28).
+        # The position closed at 141.2 labelled `signal_flip` because
+        # `_exit_reason_for_position` never saw a breached mark.
+        #
+        # Prefer the finer series, fall back to the coarser. BOTH read the DB
+        # only — this costs nothing against the Upstox budget; only `for_close`
+        # is allowed to refresh from the broker.
+        intervals = ("1minute",) if for_close else ("1minute", "30minute")
         if expiry and option_type and strike and underlying:
-            try:
-                candles = await option_history_service.load_candles(
-                    underlying=str(underlying),
-                    expiry=date.fromisoformat(str(expiry)),
-                    strike=float(strike),
-                    option_type=str(option_type),
-                    instrument_key=str(instrument_key) if instrument_key else None,
-                    interval="1minute",
-                    limit=1,
-                    allow_broker_refresh=not (settings.MARKET_INTELLIGENCE_STRATEGY_LOCAL_ONLY or settings.PAPER_TRADING_ONLY),
-                )
-                if candles and candles[-1].get("close") is not None:
-                    return round(float(candles[-1]["close"]), 2)
-            except Exception:
-                pass
+            for interval in intervals:
+                try:
+                    candles = await option_history_service.load_candles(
+                        underlying=str(underlying),
+                        expiry=date.fromisoformat(str(expiry)),
+                        strike=float(strike),
+                        option_type=str(option_type),
+                        instrument_key=str(instrument_key) if instrument_key else None,
+                        interval=interval,
+                        limit=1,
+                        allow_broker_refresh=for_close
+                        and not (
+                            settings.MARKET_INTELLIGENCE_STRATEGY_LOCAL_ONLY
+                            or settings.PAPER_TRADING_ONLY
+                        ),
+                    )
+                    if candles and candles[-1].get("close") is not None:
+                        return round(float(candles[-1]["close"]), 2)
+                except Exception:
+                    continue
 
         fallback = float(position.get("latest_premium") or position.get("entry_premium") or 0.0)
         return round(fallback, 2)

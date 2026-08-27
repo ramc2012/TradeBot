@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import asyncio
 from dataclasses import asdict, dataclass
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 import json
 from pathlib import Path
 from typing import Any, Iterable
@@ -261,7 +261,8 @@ async def _load_chain_max_pain(limit_underlyings: int = 30) -> list[dict[str, An
                             underlying, expiry, strike, option_type,
                             oi, time
                         FROM option_premium_candles
-                        WHERE expiry >= CURRENT_DATE
+                        WHERE time >= :since
+                          AND expiry >= CURRENT_DATE
                           AND interval = '30minute'
                           AND oi IS NOT NULL
                           AND option_type IN ('CE', 'PE')
@@ -270,7 +271,16 @@ async def _load_chain_max_pain(limit_underlyings: int = 30) -> list[dict[str, An
                     SELECT underlying, expiry, strike, option_type, oi
                     FROM ranked
                     """
-                )
+                ),
+                # `time` is the partitioning column, and without a bound on it
+                # this DISTINCT ON scanned EVERY chunk of the hypertable (530 of
+                # them) to find rows it then threw away — 1.1s of planning plus
+                # 2.7s of execution for a "latest OI per strike" read. A literal
+                # timestamptz (not NOW() - interval, which is STABLE and so
+                # defers exclusion to startup) lets the planner prune at plan
+                # time. 10 days covers the longest exchange holiday stretch, so
+                # the freshest row per strike is still found after a long break.
+                {"since": _utc_now() - timedelta(days=10)},
             )
             rows = list(result.mappings().all())
     except Exception as exc:
@@ -396,7 +406,18 @@ def _commodity_option_contract_from_watch_row(row: dict[str, Any], option_type: 
     )
 
 
-async def _load_mcx_snapshot(timeout_seconds: float = 8.0) -> tuple[dict[str, Any], dict[str, Any]]:
+async def _load_mcx_snapshot(timeout_seconds: float = 2.0) -> tuple[dict[str, Any], dict[str, Any]]:
+    """MCX catalog + ATM watchlist, preferring cache, then saved state, then live.
+
+    ``timeout_seconds`` is deliberately SHORT. 2026-08-06: the live
+    ``get_watchlist`` build does not merely run slow — it does not return at
+    all (measured: still running at 45s, with the commodity agent reporting
+    zero selected option expiries), so every poll of this endpoint burned the
+    full 8s ceiling and then served the saved snapshot regardless. A shorter
+    ceiling returns byte-identical data; it just stops paying 8s to discover a
+    hang on a read path the dashboard polls every 60s. The hang itself is a
+    commodity-lane bug and is tracked separately.
+    """
     symbols = commodity_strategy_agent.get_symbols()
     selected_expiries = commodity_strategy_agent.get_selected_option_expiries()
     selected_lookup_symbols = commodity_strategy_agent.get_selected_option_lookup_symbols()
@@ -1234,26 +1255,40 @@ def _nse_straddle_summary(fno_360: dict[str, Any] | None, limit: int) -> list[di
 async def build_fno_analytics(*, fno_360: dict[str, Any] | None = None, limit: int = 20) -> dict[str, Any]:
     # Load the active contract master broadly; the UI limit only applies to
     # watchlists/signal rows, not to data-quality and universe counts.
-    nse_contracts, nse_source = await _load_nse_contracts(limit=max(limit * 100, 10_000))
-    contract_catalog, atm_watchlist = await _load_mcx_snapshot()
+    # These four reads share no state, so they run CONCURRENTLY. Serially they
+    # summed to 15-24s wall-clock — and _load_mcx_snapshot alone can sit on two
+    # 8s broker timeouts — while the UI polls this endpoint every 60s, so the
+    # endpoint was effectively never idle and permanently held a pool slot.
+    async def _fo_risk() -> dict[str, Any]:
+        try:
+            from market_data.fo_risk_ingest import latest_fo_risk_snapshot
+
+            return await latest_fo_risk_snapshot()
+        except Exception as exc:
+            logger.debug(f"[FNOAnalytics] FO risk snapshot read failed: {exc}")
+            return {}
+
+    (
+        (nse_contracts, nse_source),
+        (contract_catalog, atm_watchlist),
+        # Max-pain and chain-wide PCR-OI from option_premium_candles. This
+        # joins all available strikes per (underlying, expiry), not just ATM,
+        # so the resistance / support reads pick up the strikes where market
+        # makers are most exposed.
+        chain_max_pain,
+        # F&O risk snapshot: MWPL utilisation + ban list. Daily file; cheap
+        # to read every cycle (single SELECT).
+        fo_risk,
+    ) = await asyncio.gather(
+        _load_nse_contracts(limit=max(limit * 100, 10_000)),
+        _load_mcx_snapshot(),
+        _load_chain_max_pain(limit_underlyings=max(limit * 5, 500)),
+        _fo_risk(),
+    )
     mcx = _analyze_mcx(contract_catalog, atm_watchlist)
     nse_oi_signals = _nse_oi_price_signals(fno_360, limit)
     nse_greeks = _nse_option_greeks(fno_360, limit)
     nse_straddles = _nse_straddle_summary(fno_360, limit)
-    # Max-pain and chain-wide PCR-OI from option_premium_candles. This
-    # joins all available strikes per (underlying, expiry), not just ATM,
-    # so the resistance / support reads pick up the strikes where market
-    # makers are most exposed.
-    chain_max_pain = await _load_chain_max_pain(limit_underlyings=max(limit * 5, 500))
-    # F&O risk snapshot: MWPL utilisation + ban list. Daily file; cheap
-    # to read every cycle (single SELECT).
-    fo_risk: dict[str, Any] = {}
-    try:
-        from market_data.fo_risk_ingest import latest_fo_risk_snapshot
-
-        fo_risk = await latest_fo_risk_snapshot()
-    except Exception as exc:
-        logger.debug(f"[FNOAnalytics] FO risk snapshot read failed: {exc}")
     nse = {
         "status": "ready" if nse_contracts or (fno_360 or {}).get("status") == "ready" else "missing",
         "source": nse_source,

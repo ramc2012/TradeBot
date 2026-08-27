@@ -512,9 +512,19 @@ async def _build_strategy1_snapshot_watchlist_signals(limit: int = 500) -> list[
                     """
                     SELECT MAX(timezone('Asia/Kolkata', time)::date)
                     FROM atm_option_watchlist_snapshots
-                    WHERE ltp IS NOT NULL
+                    WHERE time >= :since
+                      AND ltp IS NOT NULL
                     """
-                )
+                ),
+                # Unbounded, this seq-scanned every chunk of the hypertable —
+                # and it was caught running SIX-deep concurrently during a live
+                # session. The bound is on raw `time` (a literal, so pruning
+                # happens at plan time); the tz-wrapped date stays in the
+                # projection where it costs nothing. 30 days is far longer than
+                # any exchange break, so "the most recent session with marks"
+                # is unchanged in every real case; if nothing has been written
+                # for a month, returning no signals is the honest answer.
+                {"since": datetime.now(timezone.utc) - timedelta(days=30)},
             )
             if latest_day is None:
                 return []

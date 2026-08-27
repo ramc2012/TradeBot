@@ -1098,11 +1098,66 @@ class CommodityStrategyAgent(BaseStrategyAgent):
         self._loop_heartbeat_at: Optional[str] = None
         self._apply_saved_state(saved_state)
         self._state_synced_at = saved_updated_at
-        self._persist_state()
+        # Persist ONLY when a real stored row was actually read.
+        #
+        # This constructor used to persist unconditionally, which destroys the
+        # live config: `_load_saved_state()` falls back to NORMALIZED DEFAULTS
+        # (symbols=[]) whenever both the DB and disk reads come back empty, and
+        # `load_runtime_state` returns (None, None) SILENTLY when the pool can't
+        # be built. `commodity_runtime_history.load_commodity_history_rows`
+        # builds a THROWAWAY agent on every call, so a single transient DB
+        # hiccup was enough to write empty defaults over a good universe.
+        #
+        # Observed twice: 2026-08-06 (8 -> [] during a PG "too many clients"
+        # storm) and again 2026-08-14 07:58 IST, six minutes after a deploy,
+        # which silently emptied the 8-root universe while `watchlist` and the
+        # open position survived — the signature of a defaults-overwrite rather
+        # than a deliberate clear.
+        #
+        # `saved_updated_at` is non-None only for a row we genuinely read, so it
+        # separates "loaded real state" from both "read failed" and "first boot".
+        # On a true first boot the row is simply created by the first real
+        # mutation (update_symbols / the scan loop) instead.
+        if saved_updated_at is not None:
+            self._persist_state()
 
     def _apply_saved_state(self, saved_state: dict[str, Any], *, preserve_runtime: bool = False) -> None:
         saved_config = saved_state["config"]
-        self._symbols = list(saved_config["symbols"])
+        incoming_symbols = list(saved_config["symbols"])
+        # Never let a REFRESH silently drain a live, running loop's universe to
+        # empty. `preserve_runtime=True` means the local task is alive and this
+        # instance is the authority on its own trading state — exactly like the
+        # positions guard below, just for config.
+        #
+        # Observed 2026-08-27 11:34 IST: config.symbols went 8 -> 0 with the
+        # loop heartbeat still advancing (so this was NOT the restart race
+        # already fixed), no restart on either container, and NO HTTP request
+        # to PUT /strategy-agent/config on nomadcurie_backend OR
+        # nomadcurie_backend_strategies in the prior 8 hours (ruled out via
+        # uvicorn access logs) — so it did not go through the now-guarded
+        # `update_symbols`. The DB row itself had already gone empty, meaning
+        # some OTHER instance persisted `_symbols=[]` first; this method's old
+        # unconditional assignment then faithfully propagated that corruption
+        # into the authoritative, actively-running loop. PG OOM-crashed and
+        # recovered earlier the same session (2026-08-26 17:03 UTC) - a
+        # plausible trigger for the stale/bad read that started the chain, same
+        # defect FAMILY as the 2026-08-06 PG-storm wipe, different DB disruption.
+        #
+        # This does not block a legitimate NON-empty update from another worker
+        # (e.g. widening the universe while the loop runs, which the comment
+        # below is written for) - only the specific "was configured, now empty"
+        # regression, which no stated design goal calls for; a deliberate stop
+        # already has an explicit, auditable path (kill_switch / stop()).
+        if preserve_runtime and self._symbols and not incoming_symbols:
+            logger.warning(
+                "[CommodityStrategy] refresh saw config.symbols go "
+                f"{len(self._symbols)} -> 0 while the loop is alive; REFUSING "
+                "the regression and keeping the current universe. If this "
+                "clear is genuinely intended, use update_symbols([]) directly "
+                "(it logs explicitly) or stop the loop first."
+            )
+        else:
+            self._symbols = incoming_symbols
         self._lots_per_trade = max(1, int(saved_config.get("lots_per_trade") or DEFAULT_COMMODITY_LOTS_PER_TRADE))
 
         saved_control = saved_state["control"]
@@ -1426,9 +1481,22 @@ class CommodityStrategyAgent(BaseStrategyAgent):
         # Split boot only: the CORE plane (no local task) derives loop_active
         # from the strategy plane's persisted heartbeat. Never consulted when
         # LANESET=all — legacy local-task semantics stay byte-identical.
+        from core.laneset import boots_strategies as _boots_strategies
         from core.laneset import is_split as _laneset_is_split
 
         if not _laneset_is_split():
+            return False
+        # The plane that OWNS the loop must never infer liveness from the blob.
+        # On restart the persisted heartbeat is only seconds old, so this
+        # returned True before the new task existed; `start()` then bailed at
+        # `if self._loop_active(): return` — which force=True does NOT bypass —
+        # and the task was never created. The heartbeat then went stale with
+        # nothing re-checking, so the lane stayed dead until an operator start.
+        # That killed the commodity scan for the whole of 18 and 19 Aug 2026
+        # (restart landed ~1 min after the last heartbeat, well inside the
+        # 2 x scan_interval window) and silently dropped MCX collection from 8
+        # roots to the auction sleeve's 3. Here, no local task == not active.
+        if _boots_strategies():
             return False
         heartbeat = _parse_iso_timestamp(self._loop_heartbeat_at)
         if heartbeat is None:
@@ -1523,7 +1591,41 @@ class CommodityStrategyAgent(BaseStrategyAgent):
         selected_option_expiries: Optional[dict[str, str]] = None,  # legacy arg, ignored
     ) -> dict[str, Any]:
         self._refresh_state_from_store()
-        self._symbols = _normalize_symbols(symbols)
+        normalized = _normalize_symbols(symbols)
+        # Reject "no-op wipes": a caller-supplied NON-EMPTY list that normalizes
+        # to nothing is almost certainly a format bug — e.g. token-format
+        # instrument keys ("MCX_FO|483079") instead of the "MCX:...FUT" symbol
+        # string; `_normalize_symbols` silently drops anything without a ":".
+        # Observed 2026-08-27 00:01 IST: the universe went 8 -> 0 with no
+        # restart, no PG storm, and no internal caller anywhere in the codebase
+        # besides this method (`grep update_symbols(` has exactly one call
+        # site: the PUT /strategy-agent/config endpoint) — so it can only have
+        # been an external HTTP call, and the collapse-to-empty shape matches a
+        # malformed body more than a deliberate clear. An operator asking to
+        # clear the universe passes `symbols: []` explicitly, which still
+        # works below — only a non-empty input that normalizes to nothing is
+        # now refused, loudly, with the raw input preserved in the log line so
+        # a recurrence is actually diagnosable (the commentary trail that
+        # would otherwise carry this rotates out within the hour).
+        if symbols and not normalized:
+            logger.error(
+                "[CommodityStrategy] update_symbols rejected: input had "
+                f"{len(symbols)} entries but none normalized to a valid "
+                f"'EXCHANGE:...FUT' symbol (raw input: {symbols!r}). Universe "
+                f"left UNCHANGED at {len(self._symbols)} symbols. This is the "
+                "signature of a caller passing instrument-key tokens "
+                "(MCX_FO|...) instead of symbol strings."
+            )
+            return {
+                "symbols": list(self._symbols),
+                "error": "no_valid_symbols_in_request",
+                "detail": (
+                    f"{len(symbols)} symbol(s) supplied but none were valid "
+                    "'EXCHANGE:...FUT' strings — universe left unchanged. "
+                    "Pass an explicit empty list to intentionally clear it."
+                ),
+            }
+        self._symbols = normalized
         if self._symbols:
             self._append_commentary(
                 "success",
@@ -1533,6 +1635,14 @@ class CommodityStrategyAgent(BaseStrategyAgent):
         else:
             self._append_commentary("warning", "Commodity symbol list cleared.")
             self._last_message = "Configure MCX symbols to start the commodity agent."
+            # Durable trail for a genuinely-empty request (symbols=[] or all-
+            # invalid raw input already handled above). The commentary array
+            # this mirrors is capped and rotates out within the hour, so a
+            # bare-Docker-log line is the only copy that survives long enough
+            # to diagnose a wipe reported after the fact.
+            logger.warning(
+                f"[CommodityStrategy] symbols cleared to [] (raw input: {symbols!r})"
+            )
         self._persist_state()
         return {
             "symbols": list(self._symbols),
@@ -2656,7 +2766,7 @@ class CommodityStrategyAgent(BaseStrategyAgent):
                             FROM underlying_spot_candles
                             WHERE underlying = :underlying
                               AND interval = :interval
-                              AND time >= NOW() - (:lookback_days * INTERVAL '1 day')
+                              AND time >= :since
                         )
                         SELECT time, open, high, low, close, volume, oi
                         FROM ranked
@@ -2667,7 +2777,16 @@ class CommodityStrategyAgent(BaseStrategyAgent):
                     {
                         "underlying": underlying,
                         "interval": source_interval,
-                        "lookback_days": int(lookback_days),
+                        # Was NOW() - (:lookback_days * INTERVAL '1 day'). NOW()
+                        # is STABLE, so the planner could not prune and had to
+                        # open all 1330 chunks of underlying_spot_candles before
+                        # ChunkAppend discarded 1324 of them at STARTUP:
+                        # measured 3065ms planning against 103ms execution. This
+                        # query was active in 30 of 30 samples during the live
+                        # session — it is the single largest Postgres CPU
+                        # consumer. A literal timestamptz restores plan-time
+                        # exclusion; the window itself is unchanged.
+                        "since": datetime.now(timezone.utc) - timedelta(days=int(lookback_days)),
                     },
                 )
                 db_rows = result.fetchall()

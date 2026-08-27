@@ -39,10 +39,24 @@ def test_builder_uppercases_symbol() -> None:
     )
 
 
-def test_builder_rounds_strike_to_int() -> None:
+def test_builder_renders_whole_strike_without_decimal() -> None:
     assert (
         osm._build_fyers_monthly_option_symbol("WAAREEENER", "2026-06-30", 3100.0, "CE")
         == "NSE:WAAREEENER26JUN3100CE"
+    )
+
+
+def test_builder_preserves_fractional_strike() -> None:
+    """Half-rung strikes must NOT be rounded (2026-08-04).
+
+    The builder used to do ``int(round(float(strike)))``, so a held ITC 287.5
+    PE asked the WS for ``NSE:ITC26AUG288PE`` — a contract that does not exist
+    — and the leg never ticked. 19 NSE underlyings list x.50 strikes. Fyers
+    itself uses decimals: ``NSE:ONGC26JUL247.5CE`` is broker-fed.
+    """
+    assert (
+        osm._build_fyers_monthly_option_symbol("ITC", "2026-08-25", 287.5, "PE")
+        == "NSE:ITC26AUG287.5PE"
     )
 
 

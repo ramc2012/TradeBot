@@ -32,6 +32,7 @@ from api.routers import orderflow as orderflow_router
 from api.routers import charts as charts_router
 from api.routers import system as system_router
 from api.routers import audit as audit_router
+from api.routers import candidate_capture as candidate_capture_router
 from api.routers import data_quality as data_quality_router
 from api.routers import lane_health as lane_health_router
 from api.routers import notifications as notifications_router
@@ -69,6 +70,43 @@ try:
     faulthandler.register(signal.SIGUSR1, file=sys.stderr, all_threads=True)
 except Exception:
     pass
+
+
+# Apply LOG_LEVEL. Until 2026-08-06 nothing ever did: loguru installs its own
+# stderr sink at DEBUG on import and reads no settings, so `settings.LOG_LEVEL`
+# was dead config and production ran at DEBUG throughout (264 of 474 lines in a
+# 10-minute sample, including a per-write "Credentials saved to ..." line).
+# diagnose=False keeps variable values — tokens among them — out of tracebacks.
+logger.remove()
+logger.add(
+    sys.stderr,
+    level=(settings.LOG_LEVEL or "INFO").upper(),
+    backtrace=False,
+    diagnose=False,
+)
+
+# Silence high-frequency polled-endpoint access logs. Docker's log driver here
+# is capped at 250MB (5 x 50m) total; on 2026-08-26 41% of a container's
+# retained log (30,906 of 75,132 lines) was "GET /health" access-log noise,
+# which evicted the actual commodity-strategy decision lines needed to
+# diagnose why a real 1.5-2.4% GOLD/SILVERM move produced no trade — by the
+# time it was investigated, the log had already rotated past the relevant
+# window. This does not touch loguru (the business-log sink above); it only
+# filters the SEPARATE stdlib `uvicorn.access` logger, and only for the
+# specific noisy paths, so a genuine access-log anomaly on any other route
+# still surfaces normally.
+import logging as _logging
+
+
+class _QuietPolledEndpoints(_logging.Filter):
+    _QUIET_PATHS = ("GET /health", "GET /api/system/pools")
+
+    def filter(self, record: _logging.LogRecord) -> bool:
+        message = record.getMessage()
+        return not any(path in message for path in self._QUIET_PATHS)
+
+
+_logging.getLogger("uvicorn.access").addFilter(_QuietPolledEndpoints())
 
 
 OAUTH_CALLBACK_PATHS = {"/api/auth/fyers/callback", "/api/auth/upstox/callback"}
@@ -143,6 +181,10 @@ async def lifespan(app: FastAPI):
             name="event-loop-lag-monitor",
         )
         logger.info("✓ Event-loop lag monitor started")
+        # The monitor reports THAT the loop stalled; this reports WHAT stalled
+        # it, by sampling the main thread's stack from an OS thread mid-stall.
+        app_metrics.start_loop_stall_sampler()
+        logger.info("✓ Loop-stall stack sampler started")
     except Exception as e:
         logger.warning(f"Event-loop lag monitor start skipped: {e}")
 
@@ -617,6 +659,7 @@ app.include_router(orderflow_router.router)
 app.include_router(charts_router.router)
 app.include_router(system_router.router)
 app.include_router(audit_router.router)
+app.include_router(candidate_capture_router.router)
 app.include_router(data_quality_router.router)
 app.include_router(lane_health_router.router)
 app.include_router(notifications_router.router)

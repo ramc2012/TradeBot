@@ -68,11 +68,60 @@ SECTOR_INDEX_APP_SYMBOLS: tuple[str, ...] = (
 )
 
 
+# Dynamically-registered broker keys for instruments that are NOT in the static
+# maps above — index futures and MCX futures, whose Upstox instrument keys are
+# token-based (``NSE_FO|58072``, ``MCX_FO|483079``) and roll every month, so they
+# cannot be hardcoded.
+#
+# Without this, ``to_broker_symbol`` fell through to the RAW app symbol
+# (``return ... .get(app_symbol, normalized)`` below), handing Upstox a string
+# like ``NSE:NIFTY26AUGFUT`` or ``MCX:GOLD26OCTFUT``. MarketDataStreamerV3 needs
+# an instrument key, so those subscriptions were silently INERT: no error, no
+# ticks. Under Fyers the same passthrough happened to be native format, which is
+# why futures ticks existed until Fyers died on 2026-08-07 and `market_ticks`
+# has carried only the 5 index symbols ever since.
+#
+# That starves ``tick_fresh`` / ``real_tick_cvd`` / ``confirmation_2_of_3``,
+# which are ANDed into every direction's gate set — so BOTH convergence lanes
+# could never produce an actionable row, silent for 12+ days.
+#
+# Registration is BIDIRECTIONAL and that matters: ``_on_tick`` normalises every
+# inbound tick with ``to_app_symbol``, so without the reverse entry the ticks
+# would persist under the raw ``NSE_FO|58072`` key and the lanes — which query
+# ``market_ticks`` by the app symbol — would still find nothing.
+_DYNAMIC_APP_TO_BROKER: dict[str, str] = {}
+_DYNAMIC_BROKER_TO_APP: dict[str, str] = {}
+
+
+def register_broker_symbol(app_symbol: str, broker_key: str) -> None:
+    """Register a resolved app-symbol <-> broker instrument-key pair.
+
+    Idempotent. Static maps always win, so this can never shadow the five index
+    symbols that already work.
+    """
+    app = str(app_symbol or "").strip()
+    key = str(broker_key or "").strip()
+    if not app or not key or app in APP_TO_BROKER_SYMBOL:
+        return
+    _DYNAMIC_APP_TO_BROKER[app] = key
+    _DYNAMIC_BROKER_TO_APP[key] = app
+
+
+def registered_broker_symbols() -> dict[str, str]:
+    """Snapshot of the dynamic registry (diagnostics/tests)."""
+    return dict(_DYNAMIC_APP_TO_BROKER)
+
+
 def to_broker_symbol(symbol: str) -> str:
     """Translate an app symbol to the broker's instrument key when known."""
     normalized = str(symbol or "").strip()
     app_symbol = to_app_symbol(normalized)
-    return APP_TO_BROKER_SYMBOL.get(app_symbol, normalized)
+    if app_symbol in APP_TO_BROKER_SYMBOL:
+        return APP_TO_BROKER_SYMBOL[app_symbol]
+    dynamic = _DYNAMIC_APP_TO_BROKER.get(app_symbol)
+    if dynamic:
+        return dynamic
+    return normalized
 
 
 def to_fyers_symbol(symbol: str) -> str:
@@ -222,6 +271,10 @@ def to_app_symbol(symbol: str) -> str:
         return normalized
     if normalized in BROKER_TO_APP_SYMBOL:
         return BROKER_TO_APP_SYMBOL[normalized]
+    # Resolved futures keys (NSE_FO|58072 -> NSE:NIFTY26AUGFUT). Checked after
+    # the static maps so it can never shadow them.
+    if normalized in _DYNAMIC_BROKER_TO_APP:
+        return _DYNAMIC_BROKER_TO_APP[normalized]
     if normalized in FYERS_TO_APP_SYMBOL:
         return FYERS_TO_APP_SYMBOL[normalized]
     return DISPLAY_TO_APP_SYMBOL.get(normalized.upper(), normalized)

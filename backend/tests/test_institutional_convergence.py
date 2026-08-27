@@ -24,6 +24,8 @@ from institutional_convergence.engine import (
     _structural_setup,
     build_footprint,
     evaluate_rules,
+    MAX_NOTIONAL_MULTIPLE,
+    MIN_STOP_ATR_MULTIPLE,
     lots_for_risk,
     tick_clock_drift_ms,
 )
@@ -371,6 +373,98 @@ def test_two_of_three_confirmations_can_enter_at_reduced_risk(monkeypatch) -> No
 def test_risk_sizing_uses_one_percent_cap() -> None:
     assert lots_for_risk(1_000_000, 0.01, 20, 50) == 10
     assert lots_for_risk(1_000_000, 0.005, 20, 50) == 5
+
+
+def test_wrong_side_stop_is_refused() -> None:
+    """DIVISLAB 2026-07-28: LONG at 7391.0 with initial_stop 7391.0179 — 1.8 paise
+    ABOVE entry, the wrong side. The caller passed abs(entry-stop), hiding the
+    sign error, so it sized 3,123 lots x 100 = Rs 2,308 CRORE (2308x the Rs 10L
+    account) and stopped out on its first mark for -Rs 24,98,400 (r = -448).
+    The 2 wrong-side trades lost Rs 25.3L; the other 24 made +Rs 1.59L."""
+    entry, stop = 7391.0, 7391.017857142857
+    assert lots_for_risk(
+        1_000_000, 0.005, abs(entry - stop), 100,
+        entry_price=entry, stop_price=stop, direction="LONG",
+    ) == 0, "a long with its stop ABOVE entry must be refused"
+
+    # Same magnitude, correct side -> the sign check must not fire.
+    assert lots_for_risk(
+        1_000_000, 0.005, abs(entry - stop), 100,
+        entry_price=entry, stop_price=entry - 40.0, direction="LONG",
+    ) >= 0
+    # And a SHORT is mirrored.
+    assert lots_for_risk(
+        1_000_000, 0.005, 40.0, 100,
+        entry_price=entry, stop_price=entry - 40.0, direction="SHORT",
+    ) == 0, "a short with its stop BELOW entry must be refused"
+
+
+def test_sizing_uses_the_volatility_floor_not_the_raw_stop() -> None:
+    """Owner directive 2026-08-17: size per volatility, not a fixed price
+    fraction. The engine already published `atr_3m` and a VIX `size_multiplier`
+    per instrument and READ NEITHER — sizing was purely 1/structural-stop, which
+    is how a noise-width stop bought 2308x leverage.
+
+    NIFTY: a 5.42-point stop against a 12.57 ATR is 0.43x ATR — inside noise. It
+    must be sized off the 0.5x ATR floor (6.29), not off 5.42."""
+    entry, lot_size, atr = 24_024.0, 65, 12.574999999999948
+    raw_stop = 5.42
+    assert raw_stop < MIN_STOP_ATR_MULTIPLE * atr, "fixture invalid: stop should be inside noise"
+
+    sized = lots_for_risk(
+        1_000_000, 0.01, raw_stop, lot_size,
+        entry_price=entry, stop_price=entry - raw_stop, direction="LONG", atr=atr,
+    )
+    off_floor = lots_for_risk(
+        1_000_000, 0.01, MIN_STOP_ATR_MULTIPLE * atr, lot_size,
+        entry_price=entry, stop_price=entry - raw_stop, direction="LONG",
+    )
+    assert sized == off_floor
+    assert sized < lots_for_risk(1_000_000, 0.01, raw_stop, lot_size), "floor did not reduce size"
+
+
+def test_a_structural_stop_wider_than_the_floor_is_respected() -> None:
+    """The floor is a MINIMUM, never a resize. A genuine wide stop must size off
+    structure so the lane keeps taking real setups at their real risk."""
+    entry, lot_size, atr = 11_886.0, 50, 6.0
+    wide = 11.16  # > 0.5 x 6.0
+    assert lots_for_risk(
+        1_000_000, 0.01, wide, lot_size,
+        entry_price=entry, stop_price=entry - wide, direction="LONG", atr=atr,
+    ) == lots_for_risk(1_000_000, 0.01, wide, lot_size)
+
+
+def test_iv_size_multiplier_scales_the_risk_budget() -> None:
+    """The VIX-derived multiplier was computed and discarded. A 0.5 band must
+    halve exposure, and a bad feed must never scale exposure UP."""
+    kw = dict(entry_price=11_886.0, stop_price=11_886.0 - 11.16, direction="LONG", atr=6.0)
+    full = lots_for_risk(1_000_000, 0.01, 11.16, 50, size_multiplier=1.0, **kw)
+    half = lots_for_risk(1_000_000, 0.01, 11.16, 50, size_multiplier=0.5, **kw)
+    assert half == full // 2 and half > 0
+    # Clamped: a >1 multiplier cannot inflate risk.
+    assert lots_for_risk(1_000_000, 0.01, 11.16, 50, size_multiplier=4.0, **kw) == full
+
+
+def test_missing_atr_does_not_mute_the_lane() -> None:
+    """`atr_3m` is 0.0 for some instruments. A missing volatility read must fall
+    through to the other guards, not fail closed and silently stop trading."""
+    entry, lot_size = 11_886.0, 50
+    assert lots_for_risk(
+        1_000_000, 0.01, 11.16, lot_size,
+        entry_price=entry, stop_price=entry - 11.16, direction="LONG", atr=0.0,
+    ) > 0
+
+
+def test_notional_cap_binds_when_stop_side_and_vol_all_look_sane() -> None:
+    """Leverage backstop. HAVELLS cleared its side check and its ATR floor yet
+    still reached 57x capital."""
+    entry, lot_size, atr = 1_231.2, 500, 0.02
+    stop_pts = 0.1084
+    lots = lots_for_risk(
+        1_000_000, 0.005, stop_pts, lot_size,
+        entry_price=entry, stop_price=entry - stop_pts, direction="LONG", atr=atr,
+    )
+    assert lots * lot_size * entry <= 1_000_000 * MAX_NOTIONAL_MULTIPLE
 
 
 def test_paper_book_opens_and_moves_stop_to_break_even(tmp_path) -> None:

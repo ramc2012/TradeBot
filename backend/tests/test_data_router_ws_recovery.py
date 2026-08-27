@@ -209,3 +209,53 @@ def test_warmup_window_exceeds_watchdog_interval():
     otherwise a still-cold socket would be re-torn-down on the next tick."""
     dr = DataRouter()
     assert dr._post_resubscribe_warmup_seconds > dr._watchdog_interval_seconds
+
+
+@pytest.mark.asyncio
+async def test_silent_reconnect_escalates_backoff_until_a_tick_proves_life(monkeypatch):
+    """A rebuilt socket that delivers NO ticks must escalate the backoff.
+
+    The 2026-08-13 blackout (05:00-08:59 UTC, market_ticks empty for 4h): each
+    reconnect resubscribed without raising, the old code read that as success and
+    reset _reconnect_failures to 0, so the exponential backoff never engaged and
+    the router hammered a dead socket ~40x/hour. "subscribe() returned" is not
+    evidence of recovery — only a REQUIRED-symbol tick is.
+    """
+    dr = DataRouter()
+    dr._loop = asyncio.get_running_loop()
+    dr._broker = object()
+    dr._subscribed_symbols = ["NSE:NIFTY50-INDEX"]
+    dr._desired_primary_symbols = ["NSE:NIFTY50-INDEX"]
+    monkeypatch.setattr(dr, "_stream_window_open", lambda: True)
+
+    async def _silent_subscribe(symbols):
+        # Mirror the real subscribe(): it repopulates _subscribed_symbols, which
+        # is why the live router could keep re-entering this path 205 times.
+        dr._subscribed_symbols = list(symbols)
+        return None  # rebuilds fine, delivers nothing — never raises
+
+    monkeypatch.setattr(dr, "subscribe", _silent_subscribe)
+
+    before = dr._current_reconnect_backoff()
+    for _ in range(3):
+        await dr._reconnect_if_stale()
+
+    assert dr._reconnect_failures == 3, (
+        "silent reconnects were counted as success — backoff stays pinned at base "
+        "and the router storms a dead socket"
+    )
+    assert dr._current_reconnect_backoff() > before, "backoff did not escalate"
+
+
+def test_required_symbol_tick_clears_the_backoff_streak():
+    """Proof of life resets the streak, so genuine recovery is still fast."""
+    dr = DataRouter()
+    dr._reconnect_failures = 5
+    required = dr._required_symbols[0]
+
+    dr._note_tick_for_recovery(required)
+    assert dr._reconnect_failures == 0, "a required tick must clear the streak"
+
+    dr._reconnect_failures = 5
+    dr._note_tick_for_recovery("NSE:SOMEOTHERSTOCK")
+    assert dr._reconnect_failures == 5, "a non-required tick must not clear the streak"

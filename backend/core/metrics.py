@@ -26,7 +26,10 @@ Exposed at ``GET /metrics`` (Prometheus text format). Scrape it for p50/p95/p99 
 from __future__ import annotations
 
 import asyncio
+import sys
+import threading
 import time
+import traceback
 from contextlib import contextmanager
 from typing import Iterator, Optional, Tuple
 
@@ -189,3 +192,67 @@ async def run_loop_lag_monitor(interval: float = 0.1) -> None:
                 logger.warning(f"[loop-lag] event loop blocked ~{lag:.1f}s (sleep overshoot)")
         except Exception:
             pass
+        # Heartbeat for the stall sampler below. Must be wall-clock (not
+        # loop.time()) so a plain OS thread can compare against it.
+        globals()["_LOOP_HEARTBEAT"] = time.monotonic()
+
+
+# ── who is blocking the loop ─────────────────────────────────────────────────
+#
+# run_loop_lag_monitor above says the loop stalled but never what stalled it,
+# and by the time the overshoot is measured the culprit has already returned —
+# a stack dumped then shows nothing useful. This sampler runs on a plain OS
+# thread, so it keeps running WHILE the loop is wedged, and dumps the main
+# thread's stack mid-stall: the frame at the top is the blocking call itself.
+
+_LOOP_HEARTBEAT: float = 0.0
+_stall_sampler_started = False
+
+
+def start_loop_stall_sampler(threshold_seconds: float = 1.5, poll_seconds: float = 0.25) -> None:
+    """Log the main thread's stack while the event loop is stalled.
+
+    Observation only, and defensive throughout: a daemon thread doing a float
+    comparison every ``poll_seconds``, logging at most one traceback per stall
+    and never more than one per 30s. Cannot affect trading behaviour.
+    """
+    global _stall_sampler_started
+    if _stall_sampler_started:
+        return
+    _stall_sampler_started = True
+
+    main_thread_id = threading.main_thread().ident
+
+    def _watch() -> None:
+        reported_this_stall = False
+        last_report = 0.0
+        while True:
+            try:
+                time.sleep(poll_seconds)
+                beat = _LOOP_HEARTBEAT
+                if not beat:
+                    continue  # monitor has not started ticking yet
+                stalled_for = time.monotonic() - beat
+                if stalled_for < threshold_seconds:
+                    reported_this_stall = False
+                    continue
+                now = time.monotonic()
+                if reported_this_stall or (now - last_report) < 30.0:
+                    continue
+                frame = sys._current_frames().get(main_thread_id)
+                if frame is None:
+                    continue
+                stack = "".join(traceback.format_stack(frame)[-12:])
+                reported_this_stall = True
+                last_report = now
+                logger.warning(
+                    "[loop-stall] main thread has not yielded for ~{:.1f}s — "
+                    "stack captured DURING the stall:\n{}",
+                    stalled_for,
+                    stack,
+                )
+            except Exception:
+                # Never let the profiler take down the process it is watching.
+                pass
+
+    threading.Thread(target=_watch, name="loop-stall-sampler", daemon=True).start()

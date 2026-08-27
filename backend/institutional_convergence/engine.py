@@ -459,10 +459,101 @@ def evaluate_rules(
     }
 
 
-def lots_for_risk(capital: float, risk_fraction: float, stop_points: float, lot_size: int) -> int:
+# Volatility floor on the RISK DISTANCE used for sizing, as a multiple of the
+# instrument's own 3-minute ATR (owner directive 2026-08-17: "sizing as per IV",
+# not a fixed price fraction).
+#
+# A fixed bps floor was the wrong instrument: it is blind to both the instrument
+# and the regime — a Rs 319 stock and a 24,000 index share no noise scale, and the
+# same name in calm vs stressed vol needs a different floor. ATR is per-instrument
+# and per-regime by construction.
+#
+# 0.5x a 3-minute ATR is the "inside noise" line: a stop nearer than half a 3m bar's
+# average true range is not structure, it is tick noise, and sizing 1/stop against
+# it is what produced 2308x leverage on DIVISLAB.
+#
+# NOTE this widens only the SIZING denominator; the working stop stays where
+# structure put it. Sizing for volatility while stopping at structure means the
+# realised loss lands at or under the risk budget, never over.
+MIN_STOP_ATR_MULTIPLE = 0.5
+
+# Hard ceiling on ONE position's notional as a multiple of capital. F&O notional
+# legitimately exceeds capital (margin ~10-15%), so this must not clip normal
+# sizing: every trade with a stop >=2 bps sat at <=23.4x, so 25x passes the whole
+# sane cluster while making 57x / 222x / 2308x arithmetically impossible.
+MAX_NOTIONAL_MULTIPLE = 25.0
+
+
+def lots_for_risk(
+    capital: float,
+    risk_fraction: float,
+    stop_points: float,
+    lot_size: int,
+    *,
+    entry_price: float = 0.0,
+    atr: float = 0.0,
+    size_multiplier: float = 1.0,
+    stop_price: float | None = None,
+    direction: str = "",
+) -> int:
+    """Lots that keep a stop-out within ``capital * risk_fraction``.
+
+    Size is ``1/stop``, so a stop approaching zero approaches infinite leverage —
+    ``stop_points > 0`` is nowhere near a sufficient guard.
+
+    **DIVISLAB, 2026-07-28** (the lane's entire lifetime loss in one trade):
+    LONG at 7391.0 with ``initial_stop`` **7391.0179 — 1.8 paise ABOVE entry, the
+    WRONG SIDE for a long**. The caller passed ``abs(entry - stop)``, which hides
+    the sign error, so this sized 3,123 lots x 100 = **Rs 2,308 CRORE notional,
+    2308x the Rs 10L account**, and because ``stop_hit = price <= stop`` was
+    already true at entry it stopped out instantly (0.86 min) for
+    **-Rs 24,98,400** (r = -448). BPCL had the same inverted shape (-Rs 31,501).
+
+    Split cleanly: the **2 wrong-side trades lost Rs 25.3L; the other 24 made
+    +Rs 1.59L**. The strategy was fine — the stop side was not.
+
+    Three independent guards, none redundant (each catches what the others miss):
+
+    1. ``direction`` / ``stop_price`` — a stop on the wrong side of entry is an
+       upstream bug. Refuse it; never trade a stop that is already breached.
+    2. ``atr`` — size against VOLATILITY, not a raw structural stop. The engine
+       already computes ``atr_3m`` per instrument and a VIX-derived
+       ``size_multiplier``, and until now **read neither**; sizing was purely
+       1/structural-stop, which is what let a noise-width stop buy 2308x leverage.
+    3. ``MAX_NOTIONAL_MULTIPLE`` — a leverage backstop for when side and stop both
+       look sane (HAVELLS at 0.88 bps still reached 57x).
+
+    ``size_multiplier`` is the implied-vol scalar (VIX band today): it shrinks the
+    risk budget when volatility is unusual, so exposure falls as conditions widen.
+    """
     if capital <= 0 or risk_fraction <= 0 or stop_points <= 0 or lot_size <= 0:
         return 0
-    return max(0, floor((capital * risk_fraction) / (stop_points * lot_size)))
+    # (1) Wrong-side stop → upstream bug. A long's stop must sit BELOW entry and
+    # a short's ABOVE; otherwise the position is stopped out on its first mark.
+    if stop_price is not None and entry_price > 0 and direction:
+        side = str(direction).strip().upper()
+        if side in {"LONG", "BUY"} and stop_price >= entry_price:
+            return 0
+        if side in {"SHORT", "SELL"} and stop_price <= entry_price:
+            return 0
+    # (2) Volatility floor. Size off max(structural stop, 0.5 x ATR) so a stop
+    # inside the noise band cannot inflate the position. When ATR is unavailable
+    # (0), fall through rather than fail closed — a missing volatility read must
+    # not silently mute the lane; the side check and notional cap still apply.
+    if atr > 0:
+        stop_points = max(stop_points, MIN_STOP_ATR_MULTIPLE * atr)
+    # IV-scaled risk budget (VIX band). Clamped so a bad feed cannot scale UP.
+    risk_fraction *= max(0.0, min(1.0, float(size_multiplier)))
+    if risk_fraction <= 0:
+        return 0
+    lots = max(0, floor((capital * risk_fraction) / (stop_points * lot_size)))
+    # (3) Hard notional backstop, independent of the risk maths above.
+    if lots > 0 and entry_price > 0:
+        max_notional = capital * MAX_NOTIONAL_MULTIPLE
+        per_lot_notional = entry_price * lot_size
+        if per_lot_notional > 0:
+            lots = min(lots, int(floor(max_notional / per_lot_notional)))
+    return max(0, lots)
 
 
 # ── Status-payload compaction ────────────────────────────────────────────────

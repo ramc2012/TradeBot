@@ -381,6 +381,48 @@ class Settings(BaseSettings):
     # call, and touches no strategy math. Default OFF so the owner enables it
     # deliberately; see market_data/preopen_spot.py for the definition.
     PREOPEN_SPOT_SNAPSHOT_ENABLED: bool = False
+    # CANDIDATE_CAPTURE_ENABLED — record EVERY evaluated option contract, not
+    # only the ones a lane traded, into candidate_snapshots. Read-only observer:
+    # it reads the option chain already cached in Redis by OptionChainService,
+    # makes no broker call, and places no order of any kind. Default OFF.
+    # See candidate_capture/service.py.
+    CANDIDATE_CAPTURE_ENABLED: bool = False
+    # 300s, not 60s: one cycle writes a few hundred rows per underlying, so a
+    # 60s cadence would put ~90k rows/session into a hypertable whose purpose is
+    # a training set, not a tick tape. Five-minute decision granularity is ample
+    # for the collection phase and can be tightened once volume is observed.
+    CANDIDATE_CAPTURE_INTERVAL_SECONDS: int = 300
+    # Index chains only. greeks_enrichment covers indices alone, and the India
+    # breadth/VIX context is index-real — stock-monthly capture waits until
+    # stock-side coverage is confirmed rather than shipping rows that would be
+    # mostly missing_fields.
+    #
+    # SENSEX is BSE, not NSE, and is included deliberately: it is the only
+    # index here whose expiries fall on a different weekday, so it is the case
+    # that would break any expiry classifier built on an assumed weekday. This
+    # one reads the listed set instead, so it handles SENSEX without a special
+    # case — and having SENSEX in the universe is what keeps that true.
+    #
+    # Adding underlyings costs NOTHING on the broker budget: capture reads the
+    # Redis chain cache and never calls a broker. The only cost is rows.
+    CANDIDATE_CAPTURE_UNDERLYINGS: str = "NIFTY,BANKNIFTY,FINNIFTY,MIDCPNIFTY,SENSEX"
+    # Capture envelope. Bounds what is LOOKED AT (volume control) — quality is
+    # recorded on the row, never used to silently drop a contract.
+    CANDIDATE_CAPTURE_MAX_DTE: int = 45
+    CANDIDATE_CAPTURE_MAX_MONEYNESS_STEPS: float = 8.0
+    # CANDIDATE_LABELLING_ENABLED — the post-close pass that computes what
+    # actually happened to every captured candidate (spot barrier outcome from
+    # the tick tape, option outcome from the forward marks, net of costs) into
+    # candidate_outcomes. Pure read + write of its own table; no broker call,
+    # no position. Default OFF. See candidate_capture/labeller_io.py.
+    CANDIDATE_LABELLING_ENABLED: bool = False
+    # CANDIDATE_TRAINING_ENABLED — fit, gate and version the baseline ranker
+    # specialists from the labelled set. Reads candidate_snapshots +
+    # candidate_outcomes and writes only its own model/version tables; it takes
+    # no position and cannot place an order. Default OFF, and it refuses to
+    # train at all until enough labelled sessions exist. See
+    # candidate_capture/training.py.
+    CANDIDATE_TRAINING_ENABLED: bool = False
     # Pre-open sample window (IST). NSE's call auction runs 09:00-09:08; we
     # sample at 09:04+ so the book has actually built (sampling at 09:00 mostly
     # returns a carried previous close).

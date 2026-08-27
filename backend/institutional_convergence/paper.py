@@ -141,7 +141,23 @@ class ConvergencePaperBook:
                 risk = row.get("risk") or {}
                 entry, stop = float(risk.get("entry") or 0), float(risk.get("stop") or 0)
                 lot_size = int(risk.get("lot_size") or 0)
-                lots = lots_for_risk(capital, float(risk.get("risk_fraction") or 0.01), abs(entry - stop), lot_size)
+                lots = lots_for_risk(
+                    capital,
+                    float(risk.get("risk_fraction") or 0.01),
+                    abs(entry - stop),
+                    lot_size,
+                    # Size against VOLATILITY, not a raw structural stop. Both
+                    # `atr_3m` and the VIX `size_multiplier` were already computed
+                    # per instrument and thrown away here — sizing was purely
+                    # 1/stop, which is how a noise-width stop bought 2308x
+                    # leverage on DIVISLAB. Pass the SIGNED stop too: the
+                    # `abs(entry - stop)` above hides a wrong-side stop.
+                    entry_price=entry,
+                    atr=float(risk.get("atr_3m") or 0.0),
+                    size_multiplier=float((row.get("vix") or {}).get("size_multiplier") or 1.0),
+                    stop_price=stop,
+                    direction=row["action"],
+                )
                 if lots <= 0:
                     continue
                 position = {

@@ -1,9 +1,11 @@
 from __future__ import annotations
 
 import asyncio
+import time
 from datetime import date
 
 from brokers.base import OptionChain, OptionChainEntry
+from market_data import commodity_atm_watchlist as commodity_atm_module
 from market_data.commodity_atm_watchlist import (
     CommodityATMWatchlistService,
     _extract_commodity_root,
@@ -229,6 +231,11 @@ def test_contract_catalog_reuses_last_good_payload_on_rate_limit() -> None:
         return rate_adapter
 
     service._get_fyers_adapter = _get_rate_adapter  # type: ignore[method-assign]
+
+    # Cold the per-candidate probe memo. Warm probes are served without touching
+    # Fyers at all, so the rate limiter would never be reached and this
+    # cached-payload fallback would not be the path under test.
+    service._expiry_probe_memo.clear()
 
     second = asyncio.run(service.get_contract_catalog(["MCX:GOLD26JUNFUT"]))
 
@@ -761,3 +768,153 @@ def test_watchlist_prefers_nearest_liquid_contract_when_atm_is_thin(monkeypatch)
     assert row["ce"]["selection_mode"] == "nearest_liquid"
     assert row["pe"]["instrument_key"] == "MCX:GOLDLIQPE"
     assert row["pe"]["selection_mode"] == "nearest_liquid"
+
+
+# ── Hang regression (2026-08-06) ──────────────────────────────────────────────
+# get_watchlist() did not return: measured still running when a caller's 45s
+# wait_for fired. This module never received the un-timed-broker-await fix that
+# the NSE watchlist got on 2026-07-08, and its serial expiry ladder (11 month
+# offsets x N saved symbols, each call retried 5x/15s inside the Fyers adapter)
+# had no build-level ceiling either. These tests bind BOTH.
+
+
+def test_expiry_probe_is_bounded_when_the_broker_never_answers(monkeypatch) -> None:
+    """A single hung broker read must not wedge the whole build."""
+    monkeypatch.setattr(commodity_atm_module, "BROKER_EXPIRY_CALL_TIMEOUT_SECONDS", 0.05)
+
+    class _HangingAdapter(_FakeCommodityAdapter):
+        async def get_option_contracts(self, symbol: str) -> list[dict]:
+            await asyncio.sleep(30)
+            raise AssertionError("unreachable: the bound must fire first")
+
+    service = CommodityATMWatchlistService()
+    adapter = _HangingAdapter()
+
+    async def _get_adapter():
+        return adapter
+
+    service._get_fyers_adapter = _get_adapter  # type: ignore[method-assign]
+
+    async def _run():
+        # The outer bound is the assertion: pre-fix this ran until the caller
+        # gave up, so wait_for here would raise instead of returning.
+        return await asyncio.wait_for(
+            service.get_contract_catalog(["MCX:GOLD26JUNFUT"]), timeout=10
+        )
+
+    payload = asyncio.run(_run())
+    assert payload["summary"]["contracts_ready"] == 0
+
+
+def test_chain_build_is_bounded_when_the_broker_never_answers(monkeypatch) -> None:
+    monkeypatch.setattr(commodity_atm_module, "BROKER_CHAIN_CALL_TIMEOUT_SECONDS", 0.05)
+
+    async def _empty_upstox_quotes(_symbols: list[str]) -> dict[str, float]:
+        return {}
+
+    monkeypatch.setattr(commodity_atm_module, "load_upstox_mcx_quotes", _empty_upstox_quotes)
+    monkeypatch.setattr("core.runtime_state.load_runtime_state", lambda _key: (None, None))
+    monkeypatch.setattr("core.runtime_state.save_runtime_state", lambda _key, _payload: None)
+
+    class _HangingChainAdapter(_FakeCommodityAdapter):
+        async def get_option_chain(self, symbol: str, expiry: str):
+            await asyncio.sleep(30)
+            raise AssertionError("unreachable: the bound must fire first")
+
+    service = CommodityATMWatchlistService()
+    adapter = _HangingChainAdapter()
+
+    async def _get_adapter():
+        return adapter
+
+    service._get_fyers_adapter = _get_adapter  # type: ignore[method-assign]
+
+    async def _run():
+        return await asyncio.wait_for(
+            service.get_watchlist(["MCX:GOLD26JUNFUT"]), timeout=10
+        )
+
+    payload = asyncio.run(_run())
+    assert payload["rows"] == []
+    # The failure is attributed to the symbol, not swallowed.
+    assert "GOLD" in str(payload["detail"])
+
+
+def test_catalog_sweep_stops_at_its_budget_and_reports_partial(monkeypatch) -> None:
+    """The serial ladder must yield to its deadline rather than run to the end."""
+    monkeypatch.setattr(commodity_atm_module, "CATALOG_BUILD_BUDGET_SECONDS", 0.4)
+
+    class _SlowAdapter(_FakeCommodityAdapter):
+        async def get_option_contracts(self, symbol: str) -> list[dict]:
+            await asyncio.sleep(0.2)
+            return list(self._contracts.get(symbol, []))
+
+    service = CommodityATMWatchlistService()
+    adapter = _SlowAdapter()
+
+    async def _get_adapter():
+        return adapter
+
+    service._get_fyers_adapter = _get_adapter  # type: ignore[method-assign]
+
+    symbols = ["MCX:GOLD26JUNFUT", "MCX:CRUDEOIL26MAYFUT", "MCX:SILVERM26JUNFUT"]
+    started = time.monotonic()
+    payload = asyncio.run(service.get_contract_catalog(symbols))
+    elapsed = time.monotonic() - started
+
+    # Unbounded, this sweep is 3 symbols x 11 candidates x 0.2s = 6.6s+.
+    assert elapsed < 3.0
+    assert payload["partial"] is True
+    assert "partial" in str(payload["detail"])
+    # A partial ladder must never be cached as authoritative — get_cached_*
+    # has no TTL and would pin the unreached symbols out of the catalog.
+    assert service.get_cached_contract_catalog(symbols) is None
+
+
+def test_probe_memo_makes_a_truncated_sweep_resume_instead_of_restart() -> None:
+    """Probes survive truncation, so successive calls converge."""
+    calls: list[str] = []
+
+    class _CountingAdapter(_FakeCommodityAdapter):
+        async def get_option_contracts(self, symbol: str) -> list[dict]:
+            calls.append(symbol)
+            return list(self._contracts.get(symbol, []))
+
+    service = CommodityATMWatchlistService()
+    adapter = _CountingAdapter()
+
+    async def _get_adapter():
+        return adapter
+
+    service._get_fyers_adapter = _get_adapter  # type: ignore[method-assign]
+
+    first = asyncio.run(service.get_contract_catalog(["MCX:GOLD26JUNFUT"]))
+    assert first["summary"]["contracts_ready"] == 1
+    first_calls = len(calls)
+    assert first_calls > 1  # the ladder really was swept
+
+    calls.clear()
+    second = asyncio.run(service.get_contract_catalog(["MCX:GOLD26JUNFUT"]))
+    assert second["summary"]["contracts_ready"] == 1
+    # Fully memo-served: the second sweep costs the broker nothing.
+    assert calls == []
+
+
+def test_memo_served_sweep_does_not_clear_an_active_rate_limit_backoff() -> None:
+    """A sweep that never touches Fyers is not evidence the limit has lifted."""
+    service = CommodityATMWatchlistService()
+    adapter = _FakeCommodityAdapter()
+
+    async def _get_adapter():
+        return adapter
+
+    service._get_fyers_adapter = _get_adapter  # type: ignore[method-assign]
+
+    asyncio.run(service.get_contract_catalog(["MCX:GOLD26JUNFUT"]))  # warm the memo
+    service._mark_rate_limit("Fyers data API error 429: request limit reached")
+    assert service._in_backoff()
+
+    # Backoff short-circuits to cache; drop it so the live path runs memo-warm.
+    service._fyers_backoff_until = None
+    asyncio.run(service.get_contract_catalog(["MCX:GOLD26JUNFUT"]))
+    assert service._last_rate_limit_error is not None

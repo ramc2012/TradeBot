@@ -103,6 +103,16 @@ CORE_SUBSYSTEMS = frozenset(
         # plane: it is data recording, not a decision lane, and it reads only
         # rows already in Postgres.
         "runner:preopen_spot_snapshot",
+        # Candidate capture (research observer). Core plane: it records the
+        # evaluated contract set for training data, takes no position, and makes
+        # no broker call — it reads the chain already cached in Redis.
+        "runner:candidate_capture",
+        # Post-close outcome labelling for the capture lane. Core plane for the
+        # same reason: data resolution, no position, no broker call.
+        "runner:candidate_labelling",
+        # Post-close model fitting + promotion gates. Core plane: it reads the
+        # labelled set and writes model versions; it holds no position.
+        "runner:candidate_training",
     }
 )
 

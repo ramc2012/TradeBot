@@ -82,6 +82,7 @@ from api.routers.auth import (
 from db.database import AsyncSessionLocal
 from market_data import atm_watchlist_service, market_intelligence_runtime, market_profile_builder, option_history_service
 from market_data.fo_universe_bootstrap import ensure_fo_underlying_catalog
+from market_data.strike_ladder import format_strike, resolve_contract as resolve_catalog_contract
 from paper_engine import strategy_agent_state as strategy_state_module
 from paper_engine.base_strategy_agent import (
     BaseStrategyAgent,
@@ -142,7 +143,20 @@ def _looks_like_stale_blocking_message(message: Optional[str]) -> bool:
     )
 
 def _contract_symbol(underlying: str, expiry: str, strike: float, option_type: str) -> str:
-    return f"OPT:{underlying}:{expiry}:{int(round(strike))}:{option_type}"
+    """Build the internal position key.
+
+    The strike token is rendered LOSSLESSLY (``format_strike``). It used to be
+    ``int(round(strike))``, which destroyed every x.50 rung — 19 NSE
+    underlyings list them (ITC, JIOFIN, POWERGRID, ONGC, WIPRO, TATASTEEL,
+    ...). Python's round-half-to-even made it lossy in both directions
+    (287.5 -> 288, 282.5 -> 282), so the key named a contract the exchange
+    does not list. That is how ITC 287.5 PE entered the book as
+    ``OPT:ITC:2026-08-25:288:PE``: the position carried the true 287.5 in its
+    `strike` field and traded fine, but the 2026-08-03 historical recovery
+    re-parsed the strike back out of this symbol and wrote 288.0 over it,
+    stranding ~Rs 71.6k of notional at a frozen 0.0 P&L with no reachable exit.
+    """
+    return f"OPT:{underlying}:{expiry}:{format_strike(strike)}:{option_type}"
 
 
 def _coerce_date(value: Any) -> Optional[date]:
@@ -1264,6 +1278,18 @@ class PaperStrategyAgent(StrategyExitMixin, StrategyEntryMixin, BaseStrategyAgen
             await self._restore_from_historical_state(
                 latest_snapshot_day=latest_snapshot_day,
                 latest_position_day=latest_position_day,
+                # 2026-08-04: S1's open book is rebuilt ONLY when S1 itself is
+                # behind. It used to be rebuilt whenever recovery ran for any
+                # reason — so a stale S2 signal lane (needs_strategy2, routinely
+                # true since the S2 lane was retired) dragged a perfectly
+                # current S1 book through a journal replay on every boot. That
+                # replay is lossy: `positions` is a write-only journal with no
+                # phase, peak, IV, regime or MACD history, and it re-derives the
+                # mark from watchlist snapshots — so a leg whose strike is no
+                # longer in the ATM watchlist comes back marked at its ENTRY
+                # price, i.e. right back to a frozen 0.0 P&L. The blob is the
+                # authoritative book; when it is already current, it wins.
+                rebuild_strategy1=needs_strategy1,
             )
         except Exception as exc:
             logger.warning(f"[Strategy] Historical recovery skipped: {exc}")
@@ -1310,6 +1336,7 @@ class PaperStrategyAgent(StrategyExitMixin, StrategyEntryMixin, BaseStrategyAgen
         *,
         latest_snapshot_day: Optional[date] = None,
         latest_position_day: Optional[date] = None,
+        rebuild_strategy1: bool = True,
     ) -> None:
         strategy1_day = latest_position_day or latest_snapshot_day
         strategy2_day = latest_snapshot_day or latest_position_day
@@ -1319,7 +1346,17 @@ class PaperStrategyAgent(StrategyExitMixin, StrategyEntryMixin, BaseStrategyAgen
         recovered_positions = 0
         strategy1_signal_count = 0
         strategy1_last_seen: Optional[datetime] = None
-        if strategy1_day is not None:
+        if strategy1_day is not None and not rebuild_strategy1:
+            # S1's book is already current — keep it and let S2 recover alone.
+            # `strategy1_day` stays set so downstream date bookkeeping is
+            # unchanged; only the destructive journal rebuild is skipped.
+            recovered_positions = len(self._strategy1.positions)
+            logger.info(
+                "[Strategy] S1 book is current ({} open) — skipping the journal rebuild; "
+                "recovering S2 only.",
+                recovered_positions,
+            )
+        elif strategy1_day is not None:
             recovered_positions, strategy1_signal_count, strategy1_last_seen = await self._restore_strategy1_positions_from_db(
                 strategy1_day
             )
@@ -1868,8 +1905,16 @@ class PaperStrategyAgent(StrategyExitMixin, StrategyEntryMixin, BaseStrategyAgen
         # trade ledger or the event log — a stale qty>0 DB row (a swallowed
         # _persist_position failure days earlier) used to trigger this path and
         # silently erase the entire in-memory trade history.
-        runtime.positions.clear()
-        runtime.portfolio._positions.clear()
+        #
+        # 2026-08-04: the book is rebuilt into LOCAL maps and swapped in only
+        # once the rebuild has succeeded. It used to clear the live book up
+        # front, which made every rebuild failure destructive: on a transient
+        # DB fault the loop dropped all 15 legs and then persisted the empty
+        # book straight over the authoritative app_runtime_state blob. Clearing
+        # before you know you can refill is never safe for a risk book.
+        new_positions: dict[str, StrategyPosition] = {}
+        new_virtual: dict[str, VirtualPosition] = {}
+        new_events: list[StrategyEvent] = []
 
         async with AsyncSessionLocal() as session:
             rows = (
@@ -1917,6 +1962,66 @@ class PaperStrategyAgent(StrategyExitMixin, StrategyEntryMixin, BaseStrategyAgen
             if qty <= 0 or entry_price <= 0:
                 continue
 
+            # The strike parsed above comes OUT of the symbol string, so it is
+            # only as good as the symbol. Historic journal rows were written
+            # when `_contract_symbol` rendered the strike with int(round(...)),
+            # which flattened every x.50 rung onto a neighbouring integer — so
+            # replaying them verbatim writes a strike the exchange does not
+            # list over whatever the real book held. That is exactly how ITC
+            # 287.5 PE became a dead 288 on 2026-08-03, losing its
+            # instrument_key and lot_size in the same step.
+            #
+            # Re-anchor on fo_contract_catalog: snap to the real rung and take
+            # the catalog's instrument identity with it.
+            #
+            # A DEFINITIVE verdict (the ladder loaded and the strike is not on
+            # it) drops just that leg — an unresolvable leg is phantom notional
+            # that prices at 0.0 P&L forever with no reachable exit.
+            #
+            # A TRANSIENT verdict (catalog_unavailable / catalog_empty) means we
+            # could not check at all, and must ABORT the whole recovery. Treating
+            # "I couldn't ask" as "not listed" is what emptied the book on
+            # 2026-08-04: a Postgres connection storm made every lookup fail, all
+            # 15 legs were skipped as unverifiable, and the empty result was
+            # persisted over the authoritative blob. An unverifiable book is a
+            # reason to leave the existing one alone, never to replace it.
+            catalog = await resolve_catalog_contract(
+                underlying=underlying,
+                expiry=expiry_date,
+                strike=strike,
+                option_type=option_type,
+            )
+            if not catalog["ok"] and catalog["reason"] != "strike_not_in_catalog":
+                logger.error(
+                    "[Strategy] recovery ABORTED at {} — the contract catalog could not be "
+                    "read ({}). The existing open book is left untouched: an unverifiable "
+                    "rebuild must never replace a real risk book.",
+                    symbol,
+                    catalog["reason"],
+                )
+                return len(runtime.positions), 0, None
+            if not catalog["ok"]:
+                logger.error(
+                    "[Strategy] recovery SKIPPED {} — strike {} is not in fo_contract_catalog "
+                    "({}). The journal symbol cannot be trusted as the strike's source; "
+                    "reconcile against app_runtime_state before replaying this leg.",
+                    symbol,
+                    strike_raw,
+                    catalog["reason"],
+                )
+                continue
+            if catalog["strike"] != strike:
+                logger.warning(
+                    "[Strategy] recovery re-anchored {} strike {} -> {} from fo_contract_catalog "
+                    "(instrument_key={}). The journal symbol had a rounded strike.",
+                    symbol,
+                    strike_raw,
+                    format_strike(catalog["strike"]),
+                    catalog["instrument_key"],
+                )
+            strike = float(catalog["strike"])
+            symbol = _contract_symbol(underlying, expiry, strike, option_type)
+
             current_price = entry_price
             async with AsyncSessionLocal() as session:
                 latest_ltp = await session.scalar(
@@ -1954,8 +2059,12 @@ class PaperStrategyAgent(StrategyExitMixin, StrategyEntryMixin, BaseStrategyAgen
                 expiry=expiry,
                 strike=strike,
                 option_type=option_type,
-                instrument_key=None,
-                trading_symbol=None,
+                # Carry the catalog's instrument identity. These used to be
+                # hard-coded None, which left every recovered leg unable to
+                # resolve a WS/broker symbol even when the strike was fine.
+                instrument_key=catalog["instrument_key"],
+                trading_symbol=catalog["trading_symbol"],
+                lot_size=catalog["lot_size"],
                 qty=qty,
                 initial_qty=qty,
                 entry_price=entry_price,
@@ -1966,8 +2075,8 @@ class PaperStrategyAgent(StrategyExitMixin, StrategyEntryMixin, BaseStrategyAgen
                 signal_reason="macd_zero_cross",
                 phase=PHASE_1,
             )
-            runtime.positions[symbol] = position
-            runtime.portfolio._positions[symbol] = VirtualPosition(
+            new_positions[symbol] = position
+            new_virtual[symbol] = VirtualPosition(
                 symbol=symbol,
                 action="BUY",
                 qty=qty,
@@ -1979,7 +2088,7 @@ class PaperStrategyAgent(StrategyExitMixin, StrategyEntryMixin, BaseStrategyAgen
                 option_type=option_type,
                 opened_at=_parse_iso_timestamp(entered_at) or datetime.combine(trading_day, time(15, 20), tzinfo=IST),
             )
-            runtime.recent_events.append(
+            new_events.append(
                 StrategyEvent(
                     time=entered_at,
                     event="entry",
@@ -1994,6 +2103,27 @@ class PaperStrategyAgent(StrategyExitMixin, StrategyEntryMixin, BaseStrategyAgen
                 )
             )
             recovered += 1
+
+        # Swap-in gate. An empty rebuild NEVER replaces a non-empty book: if
+        # the journal produced nothing while positions are open, the journal is
+        # the thing that is wrong (it is a write-only log that strands rows),
+        # not the book. See the standing rule that app_runtime_state — not
+        # agent_positions/positions — is the authoritative S1 book.
+        if not new_positions and runtime.positions:
+            logger.error(
+                "[Strategy] recovery produced 0 positions from the {} journal while {} are "
+                "open in the book — REFUSING to replace it. The journal is not authoritative; "
+                "reconcile it against app_runtime_state.",
+                trading_day.isoformat(),
+                len(runtime.positions),
+            )
+            return len(runtime.positions), 0, None
+
+        runtime.positions.clear()
+        runtime.portfolio._positions.clear()
+        runtime.positions.update(new_positions)
+        runtime.portfolio._positions.update(new_virtual)
+        runtime.recent_events.extend(new_events)
 
         if runtime.positions:
             runtime.portfolio.update_prices({symbol: pos.current_price for symbol, pos in runtime.positions.items()})
@@ -2816,7 +2946,7 @@ class PaperStrategyAgent(StrategyExitMixin, StrategyEntryMixin, BaseStrategyAgen
 
     # ── Position Entry ───────────────────────────────────────────────────────
 
-    async def _open_position(self, runtime: StrategyRuntime, candidate: dict[str, Any]) -> None:
+    async def _open_position(self, runtime: StrategyRuntime, candidate: dict[str, Any]) -> bool:
         return await StrategyEntryMixin._open_position(self, runtime, candidate)
 
     def _get_sizing_mode(self, candidate: dict) -> str:
@@ -2878,7 +3008,7 @@ class PaperStrategyAgent(StrategyExitMixin, StrategyEntryMixin, BaseStrategyAgen
             qty=position.qty,
             partial=False,
         )
-        self._last_message = f"Operator closed {position.underlying} {position.option_type} {int(position.strike)} from {runtime.label}."
+        self._last_message = f"Operator closed {position.underlying} {position.option_type} {format_strike(position.strike)} from {runtime.label}."
         self._append_commentary("Operator", self._last_message, tone="warning")
         self._persist_state()
 
@@ -3323,8 +3453,8 @@ class PaperStrategyAgent(StrategyExitMixin, StrategyEntryMixin, BaseStrategyAgen
                 candidate.get("latest_macd_bucket") or candidate["latest_bar_time"]
             ):
                 continue
-            await self._open_position(runtime, candidate)
-            opened += 1
+            if await self._open_position(runtime, candidate):
+                opened += 1
 
         if opened:
             self._append_commentary(
@@ -5107,7 +5237,7 @@ class PaperStrategyAgent(StrategyExitMixin, StrategyEntryMixin, BaseStrategyAgen
                 f"open {open_count}; entries {runtime.entries}; exits {runtime.exits}"
             )
             for pos in list(runtime.positions.values())[:3]:
-                strike_label = f" {int(pos.strike)}" if getattr(pos, "strike", None) else ""
+                strike_label = f" {format_strike(pos.strike)}" if getattr(pos, "strike", None) else ""
                 nse_lines.append(
                     f"  · {pos.underlying} {pos.option_type or ''}{strike_label} "
                     f"@{pos.entry_price:.2f} → {pos.current_price:.2f} ({pos.return_pct:.1f}%)"
@@ -5393,7 +5523,7 @@ class PaperStrategyAgent(StrategyExitMixin, StrategyEntryMixin, BaseStrategyAgen
                     "reason": pos.signal_reason,
                     "freshness": "live",
                     "instruction": (
-                        f"{pos.underlying} {pos.option_type} {int(pos.strike)} "
+                        f"{pos.underlying} {pos.option_type} {format_strike(pos.strike)} "
                         f"entry {pos.entry_price:.2f}, last {pos.current_price:.2f}, "
                         f"return {pos.return_pct:+.2f}%"
                     ),

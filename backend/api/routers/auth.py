@@ -311,11 +311,25 @@ def _load_credentials_payload_from_database() -> tuple[dict, datetime | None]:
 
 
 def _save_credentials_to_disk(creds: dict) -> None:
-    """Persist broker credentials to disk."""
+    """Persist broker credentials to disk, but only when they actually changed.
+
+    This is called from refresh/status paths that run on a timer, so it fired
+    ~28x per 10 minutes (~4000 rewrites a day) rewriting byte-identical content.
+    Comparing first makes the steady state a cheap read instead of a write, and
+    keeps the file's mtime meaningful — it now marks the last real credential
+    change rather than the last time a poller happened to run.
+    """
     global _credentials_require_migration
     try:
+        payload = json.dumps(_encode_credentials_payload(creds), indent=2)
         _CREDS_FILE.parent.mkdir(parents=True, exist_ok=True)
-        _CREDS_FILE.write_text(json.dumps(_encode_credentials_payload(creds), indent=2))
+        if not _credentials_require_migration and _CREDS_FILE.exists():
+            try:
+                if _CREDS_FILE.read_text() == payload:
+                    return
+            except OSError:
+                pass  # unreadable — fall through and rewrite it
+        _CREDS_FILE.write_text(payload)
         _credentials_require_migration = False
         logger.debug(f"Credentials saved to {_CREDS_FILE}")
     except Exception as e:

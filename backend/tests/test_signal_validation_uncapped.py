@@ -312,6 +312,12 @@ def test_commodity_drawdown_entry_block_bypassed_when_flag_true(tmp_path: Path, 
 
     monkeypatch.setattr(settings, "SIGNAL_VALIDATION_UNCAPPED", True)
     agent = CommodityStrategyAgent()
+    # The constructor loads LIVE state from the DB, so any open production
+    # position inflates total_equity and shrinks the drawdown below the 15%
+    # this test needs — it failed at 13.38% once the live book held 2 open
+    # positions. Clear the loaded book so the fixture is hermetic.
+    agent._runtime.positions.clear()  # type: ignore[attr-defined]
+    agent._runtime.portfolio._positions.clear()  # type: ignore[attr-defined]
     # Deep drawdown vs peak — the 15% block would fire when capped.
     agent._runtime.portfolio.available_capital = 418_501.60  # type: ignore[attr-defined]
     agent._runtime.portfolio._peak_equity = 1_000_000.0  # type: ignore[attr-defined]

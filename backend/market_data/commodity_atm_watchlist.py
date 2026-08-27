@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import asyncio
+import time
 from copy import deepcopy
 import re
 from datetime import date, datetime, timedelta, timezone
@@ -34,9 +35,72 @@ _MCX_OPTION_ROOT_ALIASES: dict[str, tuple[str, ...]] = {
 # the last nearby future we happened to discover.
 _MCX_DISCOVERY_MONTH_OFFSETS = tuple(range(-1, 10))
 
+# ── Deadlines (2026-08-06) ───────────────────────────────────────────────────
+# This module shipped with ZERO bounds on its broker awaits — the defect class
+# fixed for the NSE watchlist on 2026-07-08 was never applied here. Measured
+# 2026-08-06 07:38 IST: get_watchlist() was still running when a caller's 45s
+# asyncio.wait_for fired.
+#
+# The arithmetic behind the hang: get_contract_catalog() probes a wide futures
+# ladder per saved symbol (11 month offsets x root aliases). For the live set of
+# 8 MCX symbols that is 99 SERIAL Fyers /options-chain-v3 calls, and each one
+# enters FyersAdapter._get_data_json, which retries 5 times with a 15s HTTP
+# timeout and exponential back-off — ~90s worst case for a SINGLE call, so ~2.5
+# hours worst case for one sweep. Even the happy path carries a 13.3s floor of
+# hard-coded anti-429 spacing sleeps before a single byte moves.
+#
+# Two bounds, because one is not enough:
+#   * per-await   — no single broker read can wedge the build (the 07-08 fix),
+#   * per-build   — the SERIAL ladder as a whole cannot outrun its caller, and
+#                   returns a partial payload instead of being cancelled.
+# Returning beats being cancelled: a cancelled build discards every probe it
+# completed, so the next poll starts from zero and the endpoint never converges.
+BROKER_EXPIRY_CALL_TIMEOUT_SECONDS = 12.0
+BROKER_CHAIN_CALL_TIMEOUT_SECONDS = 25.0
+BROKER_QUOTE_CALL_TIMEOUT_SECONDS = 12.0
+BROKER_SESSION_TIMEOUT_SECONDS = 15.0
+# Both budgets sit under the 45s prewarm bound in core.paper_bootstrap.
+CATALOG_BUILD_BUDGET_SECONDS = 40.0
+WATCHLIST_BUILD_BUDGET_SECONDS = 40.0
+# Don't start a broker call we cannot finish inside the remaining budget.
+_MIN_CALL_HEADROOM_SECONDS = 1.0
+
+# Per-candidate expiry-probe memo. Keyed by the *candidate* future symbol (not
+# the saved symbol) so it also dedupes the overlap between two saved contracts
+# sharing a root. This is what makes a deadline-truncated sweep resumable: the
+# memo is mutated synchronously as each probe lands, so even a caller that
+# cancels us at 2s (see fno_analytics._load_mcx_snapshot) leaves the probes it
+# did pay for behind, and the next poll continues from there.
+EXPIRY_PROBE_MEMO_TTL_SECONDS = 900.0
+EXPIRY_PROBE_NEGATIVE_MEMO_TTL_SECONDS = 120.0
+
+_MEMO_MISS = object()
+
 
 def _utc_now() -> datetime:
     return datetime.now(UTC)
+
+
+async def _bounded(awaitable: Any, *, timeout: float, label: str) -> Any:
+    """Run a single broker await under a hard ceiling.
+
+    Re-raised as a plain ``TimeoutError`` carrying the call label, because the
+    thing that made this class of hang expensive to diagnose was never the
+    absence of a stack trace — it was a bare timeout with nothing naming the
+    call that burned it. ``CancelledError`` still propagates untouched so an
+    outer deadline can cancel us.
+    """
+    try:
+        return await asyncio.wait_for(awaitable, timeout=timeout)
+    except asyncio.TimeoutError as exc:
+        raise TimeoutError(f"{label} exceeded {timeout:.0f}s") from exc
+
+
+def _remaining(deadline: Optional[float]) -> float:
+    """Seconds left before ``deadline`` (a ``time.monotonic()`` stamp)."""
+    if deadline is None:
+        return float("inf")
+    return deadline - time.monotonic()
 
 
 def _is_rate_limit_error(exc: Exception | str) -> bool:
@@ -412,6 +476,29 @@ class CommodityATMWatchlistService:
         self._fyers_backoff_until: datetime | None = None
         self._last_rate_limit_error: str | None = None
         self._durable_cache_restored = False
+        # candidate symbol -> (monotonic stamp, expiries | None on failure)
+        self._expiry_probe_memo: dict[str, tuple[float, Optional[list[str]]]] = {}
+
+    def _memoized_expiry_probe(self, candidate: str) -> Any:
+        entry = self._expiry_probe_memo.get(candidate)
+        if entry is None:
+            return _MEMO_MISS
+        stamp, expiries = entry
+        ttl = (
+            EXPIRY_PROBE_MEMO_TTL_SECONDS
+            if expiries is not None
+            else EXPIRY_PROBE_NEGATIVE_MEMO_TTL_SECONDS
+        )
+        if (time.monotonic() - stamp) > ttl:
+            self._expiry_probe_memo.pop(candidate, None)
+            return _MEMO_MISS
+        return list(expiries) if expiries is not None else None
+
+    def _store_expiry_probe(self, candidate: str, expiries: Optional[list[str]]) -> None:
+        self._expiry_probe_memo[candidate] = (
+            time.monotonic(),
+            list(expiries) if expiries is not None else None,
+        )
 
     def _restore_durable_cache(self) -> None:
         if self._durable_cache_restored:
@@ -657,6 +744,8 @@ class CommodityATMWatchlistService:
         symbols: list[str],
         selected_option_expiries: Optional[dict[str, str]] = None,
         selected_option_lookup_symbols: Optional[dict[str, str]] = None,
+        *,
+        deadline: Optional[float] = None,
     ) -> dict[str, Any]:
         normalized = _normalize_commodity_symbols(symbols)
         if not normalized:
@@ -718,35 +807,46 @@ class CommodityATMWatchlistService:
                 ),
                 source="fyers_rate_limit_static",
             )
+        if deadline is None:
+            deadline = time.monotonic() + CATALOG_BUILD_BUDGET_SECONDS
         symbol_contracts: list[dict[str, Any] | Exception] = []
         rate_limit_errors: list[str] = []
+        truncated = False
+        broker_probes: list[str] = []
         for index, symbol in enumerate(normalized):
-            if index:
+            if _remaining(deadline) <= _MIN_CALL_HEADROOM_SECONDS:
+                truncated = True
+                symbol_contracts.extend(
+                    TimeoutError("Expiry discovery budget exhausted before this symbol.")
+                    for _ in normalized[index:]
+                )
+                break
+            if broker_probes:
                 # Inter-call spacing for expiry discovery. Previously 0.15s
                 # — too aggressive; the 4 MCX symbols hit Fyers data API
                 # within ~0.6s and all four 429'd. 0.6s spreads to ~2.4s,
-                # well under Fyers burst budget.
+                # well under Fyers burst budget. Gated on probes actually sent,
+                # so a memo-warm symbol pays no spacing for traffic it never
+                # generated — that is what keeps a warm sweep near-instant.
                 await asyncio.sleep(0.6)
-            while True:
-                try:
-                    symbol_contracts.append(await self._load_symbol_contracts(adapter, symbol))
+            try:
+                result = await self._load_symbol_contracts(
+                    adapter, symbol, deadline=deadline, probed=broker_probes
+                )
+                truncated = truncated or bool(result.get("truncated"))
+                symbol_contracts.append(result)
+            except Exception as exc:
+                symbol_contracts.append(exc)
+                if isinstance(exc, TimeoutError):
+                    truncated = True
+                if _is_rate_limit_error(exc):
+                    rate_limit_errors.append(str(exc))
+                    # Skip remaining symbols this cycle — we're hard-limited
+                    # right now and further calls will also 429.
+                    symbol_contracts.extend(
+                        RuntimeError(str(exc)) for _ in normalized[index + 1 :]
+                    )
                     break
-                except Exception as exc:
-                    if _is_rate_limit_error(exc):
-                        rate_limit_errors.append(str(exc))
-                        symbol_contracts.append(exc)
-                        # Skip remaining symbols this cycle — we're hard-limited
-                        # right now and further calls will also 429.
-                        symbol_contracts.extend(
-                            RuntimeError(str(exc)) for _ in normalized[index + 1 :]
-                        )
-                        break
-                    symbol_contracts.append(exc)
-                    break
-            # If we broke out of the inner loop with a rate-limit cascade,
-            # the outer loop has also been hydrated with placeholders.
-            if rate_limit_errors and len(symbol_contracts) >= len(normalized):
-                break
 
         contracts: list[dict[str, Any]] = []
         unsupported_symbols: list[str] = []
@@ -833,6 +933,16 @@ class CommodityATMWatchlistService:
             chain_failures=[],
             row_count=sum(1 for item in contracts if item["has_options"]),
         )
+        if truncated:
+            detail = " ".join(
+                part
+                for part in [
+                    detail,
+                    "Expiry discovery hit its time budget; this catalog is partial "
+                    "and will fill in on the next call.",
+                ]
+                if part
+            )
         payload = {
             "contracts": contracts,
             "summary": {
@@ -842,13 +952,22 @@ class CommodityATMWatchlistService:
             },
             "source": "fyers",
             "detail": detail,
+            "partial": truncated,
             "timestamp": _utc_now().isoformat(),
         }
-        if payload["summary"]["contracts_ready"] > 0:
+        # A truncated sweep is returned but never cached: get_cached_contract_catalog
+        # has no TTL, so persisting a partial ladder would pin the symbols we never
+        # reached out of the catalog indefinitely. Per-candidate probes are already
+        # memoized, so the next call resumes cheaply and caches the complete result.
+        if payload["summary"]["contracts_ready"] > 0 and not truncated:
             self._store_cache(self._contract_catalog_cache, cache_key, payload)
             if rate_limit_errors:
                 self._mark_rate_limit(rate_limit_errors[-1])
-            else:
+            elif broker_probes:
+                # Only a real, successful broker round-trip is evidence the rate
+                # limit has lifted. A sweep served entirely from the probe memo
+                # touches Fyers zero times, so clearing the backoff on it would
+                # let the memo silently cancel an active cooldown.
                 self._clear_rate_limit()
         elif rate_limit_errors:
             self._mark_rate_limit(rate_limit_errors[-1])
@@ -920,6 +1039,10 @@ class CommodityATMWatchlistService:
             for symbol, lookup_symbol in dict(selected_option_lookup_symbols or {}).items()
             if str(symbol).strip() and str(lookup_symbol).strip()
         }
+        # ONE budget spanning both phases (expiry discovery + chain rows). The
+        # phases run back-to-back and each was independently unbounded, so a
+        # per-phase budget would still let the pair overrun every caller.
+        deadline = time.monotonic() + WATCHLIST_BUILD_BUDGET_SECONDS
         normalized_symbols = _normalize_commodity_symbols(symbols)
         cache_key = self._watchlist_cache_key(
             normalized_symbols,
@@ -943,6 +1066,7 @@ class CommodityATMWatchlistService:
             normalized_symbols,
             selected_option_expiries,
             selected_option_lookup_symbols,
+            deadline=deadline,
         )
         contracts = list(catalog.get("contracts") or [])
         if not contracts:
@@ -1048,7 +1172,18 @@ class CommodityATMWatchlistService:
         ]
         live_quote_map = await self._get_live_spot_quotes(adapter, active_lookup_symbols)
 
+        rows_truncated = False
         for index, item in enumerate(selected_contracts):
+            if _remaining(deadline) <= _MIN_CALL_HEADROOM_SECONDS:
+                # Out of budget: return the rows we did build. Partial beats
+                # being cancelled — a cancelled build banks nothing at all.
+                rows_truncated = True
+                logger.warning(
+                    f"[Commodity ATM] Watchlist budget "
+                    f"({WATCHLIST_BUILD_BUDGET_SECONDS:.0f}s) exhausted after "
+                    f"{index}/{len(selected_contracts)} contracts; returning partial rows"
+                )
+                break
             if index:
                 # Spread chain calls across ~2.4s for 4 commodities to keep
                 # well under the Fyers data-API burst limit (~10 req/sec but
@@ -1074,8 +1209,16 @@ class CommodityATMWatchlistService:
                     )
                     break
                 except Exception as exc:
-                    if _is_rate_limit_error(exc) and attempt < chain_attempts - 1:
-                        backoff = 0.75 * (2 ** attempt)
+                    backoff = 0.75 * (2 ** attempt)
+                    # Only retry if the back-off AND the retry itself still fit
+                    # in the budget; otherwise the retry ladder is just a slower
+                    # way to blow past the caller's timeout.
+                    can_retry = (
+                        _is_rate_limit_error(exc)
+                        and attempt < chain_attempts - 1
+                        and _remaining(deadline) > (backoff + _MIN_CALL_HEADROOM_SECONDS)
+                    )
+                    if can_retry:
                         logger.warning(
                             f"[Commodity ATM] 429 on {symbol} chain (attempt {attempt + 1}/{chain_attempts}); "
                             f"retrying in {backoff:.2f}s"
@@ -1115,6 +1258,24 @@ class CommodityATMWatchlistService:
                 )
 
         rows.sort(key=lambda item: str(item["underlying"]))
+        partial = rows_truncated or bool(catalog.get("partial"))
+        detail = _build_detail_message(
+            unsupported_symbols=unsupported_symbols,
+            skipped_symbols=skipped_symbols,
+            selected_expiry=expiry,
+            chain_failures=chain_failures,
+            row_count=len(rows),
+        )
+        if partial:
+            detail = " ".join(
+                part
+                for part in [
+                    detail,
+                    f"Build hit its {WATCHLIST_BUILD_BUDGET_SECONDS:.0f}s budget; "
+                    "these rows are partial and will fill in on the next call.",
+                ]
+                if part
+            )
         payload = {
             "expiry": expiry,
             "rows": rows,
@@ -1126,13 +1287,8 @@ class CommodityATMWatchlistService:
                 "configured_contracts": len(selected_contracts),
             },
             "source": "fyers",
-            "detail": _build_detail_message(
-                unsupported_symbols=unsupported_symbols,
-                skipped_symbols=skipped_symbols,
-                selected_expiry=expiry,
-                chain_failures=chain_failures,
-                row_count=len(rows),
-            ),
+            "detail": detail,
+            "partial": partial,
             "timestamp": _utc_now().isoformat(),
         }
         if rate_limit_errors and payload["summary"]["total_rows"] == 0:
@@ -1144,7 +1300,10 @@ class CommodityATMWatchlistService:
             )
             if cached_payload is not None:
                 return cached_payload
-        if payload["summary"]["total_rows"] > 0:
+        # Same rule as the catalog: never persist a budget-truncated row set as
+        # the cached watchlist — get_cached_watchlist has no TTL and would serve
+        # the short book indefinitely.
+        if payload["summary"]["total_rows"] > 0 and not partial:
             self._store_cache(self._watchlist_cache, cache_key, payload)
             if rate_limit_errors:
                 self._mark_rate_limit(rate_limit_errors[-1])
@@ -1158,12 +1317,25 @@ class CommodityATMWatchlistService:
         adapter = get_active_adapter("fyers")
         if adapter:
             return adapter
-        if await ensure_fyers_session(force_validate=True):
+        try:
+            validated = await _bounded(
+                ensure_fyers_session(force_validate=True),
+                timeout=BROKER_SESSION_TIMEOUT_SECONDS,
+                label="ensure_fyers_session",
+            )
+        except Exception as exc:
+            logger.warning(f"[Commodity ATM] Fyers session validation failed: {exc}")
+            return None
+        if validated:
             return get_active_adapter("fyers")
         return None
 
     async def _get_symbol_expiries(self, adapter: BrokerAdapter, symbol: str) -> list[str]:
-        contracts = await adapter.get_option_contracts(symbol)
+        contracts = await _bounded(
+            adapter.get_option_contracts(symbol),
+            timeout=BROKER_EXPIRY_CALL_TIMEOUT_SECONDS,
+            label=f"get_option_contracts({symbol})",
+        )
         return [str(item.get("expiry")) for item in contracts if item.get("expiry")]
 
     async def _get_live_spot_quotes(self, adapter: BrokerAdapter, symbols: list[str]) -> dict[str, dict[str, Any]]:
@@ -1172,7 +1344,15 @@ class CommodityATMWatchlistService:
             return {}
 
         quotes: dict[str, dict[str, Any]] = {}
-        upstox_quotes = await load_upstox_mcx_quotes(requested_symbols)
+        try:
+            upstox_quotes = await _bounded(
+                load_upstox_mcx_quotes(requested_symbols),
+                timeout=BROKER_QUOTE_CALL_TIMEOUT_SECONDS,
+                label="load_upstox_mcx_quotes",
+            )
+        except Exception as exc:
+            logger.warning(f"[Commodity ATM] Upstox MCX quote fetch failed: {exc}")
+            upstox_quotes = {}
         for symbol, value in upstox_quotes.items():
             if value > 0:
                 quotes[symbol] = {"price": value, "source": "upstox"}
@@ -1182,7 +1362,11 @@ class CommodityATMWatchlistService:
             return quotes
 
         try:
-            payload = await adapter.get_ltp(remaining_symbols)
+            payload = await _bounded(
+                adapter.get_ltp(remaining_symbols),
+                timeout=BROKER_QUOTE_CALL_TIMEOUT_SECONDS,
+                label="get_ltp(MCX spots)",
+            )
         except Exception as exc:
             logger.warning(f"[Commodity ATM] Live MCX quote fetch failed: {exc}")
             if _is_rate_limit_error(exc):
@@ -1200,20 +1384,55 @@ class CommodityATMWatchlistService:
             self._clear_rate_limit()
         return quotes
 
-    async def _load_symbol_contracts(self, adapter: BrokerAdapter, symbol: str) -> dict[str, Any]:
+    async def _load_symbol_contracts(
+        self,
+        adapter: BrokerAdapter,
+        symbol: str,
+        *,
+        deadline: Optional[float] = None,
+        probed: Optional[list[str]] = None,
+    ) -> dict[str, Any]:
+        """Resolve a saved MCX future's option-expiry ladder.
+
+        ``probed`` (optional) accumulates the candidate symbols we actually sent
+        to the broker, so the caller can tell a real round-trip apart from a
+        sweep served entirely out of the probe memo — the two must not be
+        treated alike when deciding whether a rate-limit backoff has lifted.
+        """
         failures: list[str] = []
         candidates = _build_contract_discovery_candidates(symbol)
         expiry_candidates: dict[str, list[dict[str, str]]] = {}
-        for index, candidate in enumerate(candidates):
-            if index:
-                await asyncio.sleep(0.1)
-            try:
-                expiries = await self._get_symbol_expiries(adapter, candidate)
-            except Exception as exc:
-                if _is_rate_limit_error(exc):
-                    raise
-                failures.append(str(exc))
-                continue
+        issued_calls = 0
+        truncated = False
+        for candidate in candidates:
+            memoized = self._memoized_expiry_probe(candidate)
+            if memoized is not _MEMO_MISS:
+                # Warm probe: no broker call, and no anti-429 spacing to pay.
+                if memoized is None:
+                    continue
+                expiries = memoized
+            else:
+                if _remaining(deadline) <= _MIN_CALL_HEADROOM_SECONDS:
+                    # Out of budget. Return what we resolved so far rather than
+                    # pushing the caller past its own timeout; the probes we did
+                    # land stay memoized, so the next call resumes here.
+                    truncated = True
+                    break
+                if issued_calls:
+                    await asyncio.sleep(0.1)
+                issued_calls += 1
+                if probed is not None:
+                    probed.append(candidate)
+                try:
+                    expiries = await self._get_symbol_expiries(adapter, candidate)
+                except Exception as exc:
+                    if _is_rate_limit_error(exc):
+                        # Transient by definition — never memoize a 429.
+                        raise
+                    failures.append(str(exc))
+                    self._store_expiry_probe(candidate, None)
+                    continue
+                self._store_expiry_probe(candidate, expiries)
             upcoming_expiries = _filter_upcoming_expiries(expiries)
             for expiry in upcoming_expiries:
                 expiry_candidates.setdefault(expiry, []).append(
@@ -1247,7 +1466,13 @@ class CommodityATMWatchlistService:
                 "expiries": [item["expiry"] for item in expiry_mappings],
                 "expiry_mappings": expiry_mappings,
                 "alias_note": alias_note,
+                "truncated": truncated,
             }
+        if truncated:
+            raise TimeoutError(
+                f"Expiry discovery for {symbol} ran out of budget before any "
+                "candidate resolved."
+            )
         if failures:
             raise ValueError(failures[-1])
         raise ValueError("There are no upcoming expiry contracts.")
@@ -1263,7 +1488,11 @@ class CommodityATMWatchlistService:
         live_spot_price: Optional[float] = None,
         live_quote_source: Optional[str] = None,
     ) -> Optional[dict[str, Any]]:
-        chain = await adapter.get_option_chain(lookup_symbol, expiry)
+        chain = await _bounded(
+            adapter.get_option_chain(lookup_symbol, expiry),
+            timeout=BROKER_CHAIN_CALL_TIMEOUT_SECONDS,
+            label=f"get_option_chain({lookup_symbol}, {expiry})",
+        )
         spec = get_commodity_contract_spec(symbol)
         ce_entries = [
             entry for entry in chain.entries if str(entry.option_type).upper() == "CE"

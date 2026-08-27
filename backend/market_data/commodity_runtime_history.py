@@ -12,16 +12,43 @@ from market_data.commodity_contract_specs import extract_commodity_root
 
 
 UTC = timezone.utc
+# MCX trades 09:00–23:30 IST, so the session date is the IST calendar date; using
+# the UTC date would roll the contract a day early during the evening session.
+IST = timezone(timedelta(hours=5, minutes=30))
 
+# DEPRECATED last-resort roots. Do NOT read the month in these values as a
+# contract choice — it is only a carrier for the commodity ROOT.
+#
+# These were pinned to the JUNE-2026 contracts and never updated. Once
+# ``config.symbols`` emptied (see commodity-symbols-wiped-jun-phantom-2026-08-06)
+# this map became the ONLY candidate in ``load_commodity_history_rows``, so every
+# write landed under an expired key — ``MCX:GOLD26JUNFUT`` was still receiving
+# bars on 12-Aug-2026, two months after that contract died.
+#
+# The failure was silent because a dead month still RESOLVES: ``_candidate_rank``
+# in upstox_commodity.py fuzzy-matches by |month distance|, so an expired symbol
+# is quietly rounded to the nearest live contract. Verified 13-Aug-2026 —
+# ``MCX:GOLD26JUNFUT`` and ``MCX:GOLD26OCTFUT`` hold byte-identical bars (spread
+# exactly 0.00 on every overlapping minute), both being the real 05-Oct contract
+# MCX_FO|483079. So the rows were CORRECT DATA UNDER A WRONG LABEL, which is
+# worse than an error: nothing failed loudly, and a symbol-keyed reader silently
+# splits one contract across two series.
+#
+# Note the fuzzy match is root-dependent, so a stale month is NOT a harmless
+# alias: JUN rounded to OCT for GOLD but to AUG for the other seven roots.
+#
+# Contract selection now comes from ``resolve_active_upstox_mcx_future``, which
+# reads the Upstox master and rolls on the first session reaching expiry. Keep
+# this map only so a catalog outage still yields a usable root.
 DEFAULT_COMMODITY_FUTURES: dict[str, str] = {
-    "CRUDEOIL": "MCX:CRUDEOIL26JUNFUT",
-    "GOLD": "MCX:GOLD26JUNFUT",
-    "SILVERM": "MCX:SILVERM26JUNFUT",
-    "NATURALGAS": "MCX:NATURALGAS26JUNFUT",
-    "COPPER": "MCX:COPPER26JUNFUT",
-    "ALUMINI": "MCX:ALUMINI26JUNFUT",
-    "ZINCMINI": "MCX:ZINCMINI26JUNFUT",
-    "NICKEL": "MCX:NICKEL26JUNFUT",
+    "CRUDEOIL": "MCX:CRUDEOIL26AUGFUT",
+    "GOLD": "MCX:GOLD26OCTFUT",
+    "SILVERM": "MCX:SILVERM26AUGFUT",
+    "NATURALGAS": "MCX:NATURALGAS26AUGFUT",
+    "COPPER": "MCX:COPPER26AUGFUT",
+    "ALUMINI": "MCX:ALUMINI26AUGFUT",
+    "ZINCMINI": "MCX:ZINCMINI26AUGFUT",
+    "NICKEL": "MCX:NICKEL26AUGFUT",
 }
 
 # Per-instrument lock so concurrent callers don't race on the same upsert.
@@ -230,6 +257,23 @@ async def load_commodity_history_rows(
         for symbol in agent.get_selected_option_lookup_symbols().values()
         if extract_commodity_root(symbol) == normalized_root
     )
+    # Catalog-derived front month BEFORE the static map, so a configured-symbol
+    # gap can never again pin writes to a dead contract key (the 26JUN phantoms).
+    # Best-effort: a catalog/broker outage must not take the history bridge down,
+    # so any failure just falls through to the deprecated root map below.
+    try:
+        from market_data.upstox_commodity import resolve_active_upstox_mcx_future
+
+        active_contract = await resolve_active_upstox_mcx_future(
+            normalized_root,
+            session_date=datetime.now(IST).date(),
+        )
+        active_symbol = str((active_contract or {}).get("symbol") or "")
+        if active_symbol:
+            candidate_symbols.append(active_symbol)
+    except Exception as exc:  # noqa: BLE001 - resolution is advisory, never fatal.
+        logger.debug(f"[commodity-history] active-contract resolve failed for {normalized_root}: {exc}")
+
     fallback_symbol = DEFAULT_COMMODITY_FUTURES.get(normalized_root, "")
     if fallback_symbol:
         candidate_symbols.append(fallback_symbol)

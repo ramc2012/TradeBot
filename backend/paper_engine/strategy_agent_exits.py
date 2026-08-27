@@ -1,7 +1,7 @@
 """Strategy exit management for the NSE paper strategy runtime."""
 from __future__ import annotations
 
-from datetime import date, datetime, timedelta
+from datetime import date, datetime, timedelta, timezone
 from typing import TYPE_CHECKING, Optional
 
 from loguru import logger
@@ -51,6 +51,7 @@ _MARK_STALE_SECONDS = int(getattr(settings, "MACD_STRATEGY_MARK_STALE_SECONDS", 
 # divergence. hard_stop / target / window_end still fire regardless.
 _MACD_REVERSAL_MIN_HOLD_SECONDS = int(getattr(settings, "MACD_STRATEGY_REVERSAL_MIN_HOLD_SECONDS", 1800))
 from market_data import option_history_service
+from market_data.strike_ladder import format_strike
 from paper_engine.base_strategy_agent import IST, _now_ist, _parse_iso_timestamp, _round_or_none
 from paper_engine.strategy_agent_state import StrategyEvent, StrategyPosition, StrategyRuntime
 from sqlalchemy import text
@@ -417,7 +418,8 @@ class StrategyExitMixin:
                                 FROM (
                                     SELECT ltp::float8 AS price, time
                                     FROM atm_option_watchlist_snapshots
-                                    WHERE underlying = :underlying
+                                    WHERE time >= :since
+                                      AND underlying = :underlying
                                       AND expiry = :expiry
                                       AND strike = :strike
                                       AND option_type = :option_type
@@ -425,7 +427,8 @@ class StrategyExitMixin:
                                     UNION ALL
                                     SELECT close::float8 AS price, time
                                     FROM option_premium_candles
-                                    WHERE underlying = :underlying
+                                    WHERE time >= :since
+                                      AND underlying = :underlying
                                       AND expiry = :expiry
                                       AND strike = :strike
                                       AND option_type = :option_type
@@ -440,6 +443,17 @@ class StrategyExitMixin:
                                 "expiry": date.fromisoformat(pos.expiry),
                                 "strike": pos.strike,
                                 "option_type": pos.option_type,
+                                # Neither branch bounded `time`, so finding ONE
+                                # freshest mark scanned every chunk of both
+                                # hypertables (39 + 530) — per position, inside
+                                # a loop, on every exit cycle. That is the bulk
+                                # of the observed Postgres CPU and it spawns
+                                # parallel workers per call. A literal bound
+                                # prunes at plan time. 10 days is far beyond any
+                                # usable mark: a leg whose freshest print is
+                                # older than that is stale by any definition and
+                                # is already handled by the staleness gate.
+                                "since": datetime.now(timezone.utc) - timedelta(days=10),
                             },
                         )
                     ).mappings().first()
@@ -556,13 +570,13 @@ class StrategyExitMixin:
         exit_type = "PARTIAL EXIT" if partial else "EXIT"
         self._append_commentary(
             runtime.label,
-            f"{exit_type} {position.underlying} {position.option_type} {int(position.strike)} "
+            f"{exit_type} {position.underlying} {position.option_type} {format_strike(position.strike)} "
             f"@{exit_price:.2f} | Qty={close_qty} | Return={ret_pct:.1f}% | "
             f"PnL=₹{pnl:.0f} | Reason={reason}",
             tone="trade",
         )
         await self._send_telegram_text(
-            f"{exit_type} | {position.underlying} {position.option_type} {int(position.strike)} "
+            f"{exit_type} | {position.underlying} {position.option_type} {format_strike(position.strike)} "
             f"@{exit_price:.2f}\nQty: {close_qty} | PnL: ₹{pnl:.0f} | Reason: {reason}"
         )
 

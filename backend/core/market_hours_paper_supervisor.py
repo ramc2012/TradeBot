@@ -591,6 +591,32 @@ class MarketHoursPaperSupervisor:
             from market_data.preopen_spot import run_preopen_spot_snapshot
             return await run_preopen_spot_snapshot()
 
+        async def _candidate_capture_runner() -> dict[str, Any]:
+            # Read-only observer for the prospective training set: records every
+            # evaluated contract (plus an explicit NO_TRADE candidate) into
+            # candidate_snapshots. Reads the Redis-cached option chain only —
+            # no broker call, no order path of any kind. Flag-gated OFF
+            # (CANDIDATE_CAPTURE_ENABLED). See candidate_capture/service.py.
+            from candidate_capture.service import run_candidate_capture
+            return await run_candidate_capture()
+
+        async def _candidate_labelling_runner() -> dict[str, Any]:
+            # Post-close outcome resolution for the day's captured candidates.
+            # Reads only rows already committed (tick tape + forward marks) and
+            # writes candidate_outcomes. Flag-gated OFF
+            # (CANDIDATE_LABELLING_ENABLED). See candidate_capture/labeller_io.py.
+            from candidate_capture.labeller_io import run_candidate_labelling
+            return await run_candidate_labelling()
+
+        async def _candidate_training_runner() -> dict[str, Any]:
+            # Post-close retraining of the baseline ranker specialists. Reads the
+            # labelled set and writes only its own model tables; takes no
+            # position and cannot place an order. Refuses to train until enough
+            # labelled sessions exist. Flag-gated OFF
+            # (CANDIDATE_TRAINING_ENABLED). See candidate_capture/training.py.
+            from candidate_capture.training import run_training
+            return await run_training()
+
         async def _option_flow_watchdog_runner() -> dict[str, Any]:
             # Detection/telemetry only (default OFF): flags a frozen REST premium
             # feed once the FAST lanes lean on the Fyers tick path. See
@@ -1656,6 +1682,70 @@ class MarketHoursPaperSupervisor:
                 enabled=settings.GANN_TP_DELTA_AUTO_ENABLED,
                 market_hours_fn=_in_gann_market_hours,
                 next_open_fn=_next_gann_market_open,
+            ),
+            RunnerConfig(
+                key="candidate_capture",
+                label="Candidate Capture (research observer)",
+                interval_seconds=settings.CANDIDATE_CAPTURE_INTERVAL_SECONDS,
+                callback=_candidate_capture_runner,
+                enabled=settings.CANDIDATE_CAPTURE_ENABLED,
+                # broker_profile left DEFAULT: this runner makes no broker call
+                # at all, so tagging it with a cadence class would be meaningless.
+                market_hours_fn=_in_nse_market_hours,
+                next_open_fn=_next_nse_market_open,
+                # A snapshot is a point-in-time observation of a LIVE chain.
+                # Replaying it after the close would stamp stale cache contents
+                # with a post-close timestamp — a fabricated observation.
+                post_close_catchup=False,
+                timeout_seconds=120.0,
+                # CORE plane: this records data, it does not decide anything and
+                # holds no position, so it belongs with the other observers
+                # rather than on the strategy plane.
+                plane="core",
+            ),
+            RunnerConfig(
+                key="candidate_labelling",
+                label="Candidate Outcome Labelling (post-close)",
+                # Never reached in-session: market_hours_fn is _never_in_session,
+                # so the ONLY dispatch path is the once-per-session post-close
+                # catch-up, and interval_seconds is inert (kept non-zero because
+                # RunnerConfig requires a cadence). _in_nse_market_hours here
+                # would fire it hourly DURING the session — and immediately at
+                # 09:15, since last_started_at is None — resolving horizons
+                # whose forward windows have not finished yet and writing labels
+                # a later pass would have to repair. The labeller is idempotent
+                # (ON CONFLICT DO UPDATE) so a retry is a repair, not a
+                # duplicate, but a label computed from an incomplete forward
+                # window is a wrong measurement, not a missing one.
+                interval_seconds=3600,
+                callback=_candidate_labelling_runner,
+                enabled=settings.CANDIDATE_LABELLING_ENABLED,
+                market_hours_fn=_never_in_session,
+                next_open_fn=_next_nse_market_open,
+                # Same shape as lane_audit: fire ONCE per session after the
+                # 15:35 cutoff even if in-session passes already ran, so the
+                # day's labels are always resolved against a complete tape.
+                post_close_catchup=True,
+                post_close_force_daily=True,
+                timeout_seconds=900.0,
+                plane="core",
+            ),
+            RunnerConfig(
+                key="candidate_training",
+                label="Candidate Model Training (post-close)",
+                # Post-close ONLY, same as the labeller and for a stronger
+                # reason: training mid-session would fit on horizons whose
+                # forward windows have not closed. _never_in_session makes the
+                # post-close catch-up the only dispatch path.
+                interval_seconds=3600,
+                callback=_candidate_training_runner,
+                enabled=settings.CANDIDATE_TRAINING_ENABLED,
+                market_hours_fn=_never_in_session,
+                next_open_fn=_next_nse_market_open,
+                post_close_catchup=True,
+                post_close_force_daily=True,
+                timeout_seconds=1200.0,
+                plane="core",
             ),
             RunnerConfig(
                 key="lane_audit",

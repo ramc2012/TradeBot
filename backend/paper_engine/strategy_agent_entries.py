@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 import uuid
-from datetime import date
+from datetime import date, datetime, timedelta, timezone
 from types import SimpleNamespace
 from typing import Any, Optional, TYPE_CHECKING
 
@@ -32,6 +32,11 @@ from agent.window_calculator import days_remaining_in_window
 from analytics.technicals import latest_macd_rsi
 from core.config import settings
 from market_data import market_profile_builder, option_history_service
+from market_data.strike_ladder import (
+    format_strike,
+    log_verdict as log_strike_verdict,
+    resolve_contract as resolve_catalog_contract,
+)
 from db.database import AsyncSessionLocal
 from paper_engine.base_strategy_agent import _latest_session_rows, _now_ist, _parse_iso_timestamp, _round_or_none
 from paper_engine.portfolio import PaperPortfolio
@@ -111,10 +116,18 @@ class StrategyEntryMixin:
                     """
                     SELECT MAX(timezone('Asia/Kolkata', time)::date)
                     FROM atm_option_watchlist_snapshots
-                    WHERE instrument_key = ANY(:instrument_keys)
+                    WHERE time >= :since
+                      AND instrument_key = ANY(:instrument_keys)
                     """
                 ),
-                {"instrument_keys": instrument_keys},
+                # Bound the partitioning column so the planner can prune chunks;
+                # the instrument_key filter alone does not, so this scanned the
+                # whole hypertable on every entry pass. See the note on the same
+                # query shape in api/routers/strategy.py.
+                {
+                    "instrument_keys": instrument_keys,
+                    "since": datetime.now(timezone.utc) - timedelta(days=30),
+                },
             )
             if trading_day is None:
                 return {}
@@ -1064,8 +1077,8 @@ class StrategyEntryMixin:
                     runtime.last_run_summary = summary
                 counters = summary.setdefault("counters", {})
                 counters["signal_flip"] = int(counters.get("signal_flip") or 0) + 1
-            await self._open_position(runtime, candidate)
-            opened += 1
+            if await self._open_position(runtime, candidate):
+                opened += 1
 
         if candidates:
             top = candidates[0]
@@ -1081,7 +1094,7 @@ class StrategyEntryMixin:
         self: "PaperStrategyAgent",
         runtime: StrategyRuntime,
         candidate: dict[str, Any],
-    ) -> None:
+    ) -> bool:
         row = candidate["row"]
         side = candidate["side"]
         latest_close = float(candidate["latest_close"])
@@ -1089,10 +1102,69 @@ class StrategyEntryMixin:
         window = candidate.get("window") or {}
 
         if latest_close <= 0:
-            return
+            return False
 
         expiry = row["expiry"]
         strike = float(side["strike"])
+
+        # ── FAIL-CLOSED CONTRACT GUARD (2026-08-04) ──────────────────────────
+        # No leg opens unless the exchange actually lists it. A strike absent
+        # from fo_contract_catalog can never resolve to a tradeable symbol, so
+        # the WS subscription and the held-position candle maintenance both
+        # skip it: the leg marks at its entry price forever, shows exactly 0.0
+        # P&L, and no price-based exit can ever fire. That is not a stale
+        # position, it is phantom notional — ITC 288 PE carried ~Rs 71.6k of it
+        # from 2026-07-28 to 2026-08-03 before anyone noticed.
+        #
+        # `snap=True` first pulls the requested strike onto the nearest real
+        # rung when it is within half a ladder step, which repairs a
+        # representation artifact (x.50 rendered as an integer) instead of
+        # rejecting a trade that was genuinely correct. Anything further out is
+        # refused. Increments are read per underlying from the catalog — ITC is
+        # 2.5-wide, SENSEX 100 — never assumed.
+        verdict = await resolve_catalog_contract(
+            underlying=row["underlying"],
+            expiry=expiry,
+            strike=strike,
+            option_type=opt_type,
+        )
+        log_strike_verdict(
+            verdict,
+            underlying=str(row["underlying"]),
+            expiry=str(expiry),
+            option_type=str(opt_type),
+            context=f"{runtime.label} entry",
+        )
+        if not verdict["ok"]:
+            self._append_commentary(
+                runtime.label,
+                f"BLOCKED entry {row['underlying']} {opt_type} "
+                f"{format_strike(strike)} {expiry} — strike is not in "
+                f"fo_contract_catalog ({verdict['reason']}). A leg that cannot resolve to a "
+                "tradeable contract would price at 0 P&L forever and never reach an exit.",
+                tone="warning",
+            )
+            summary = runtime.last_run_summary if isinstance(runtime.last_run_summary, dict) else {}
+            if not isinstance(runtime.last_run_summary, dict):
+                runtime.last_run_summary = summary
+            counters = summary.setdefault("counters", {})
+            counters["blocked"] = int(counters.get("blocked") or 0) + 1
+            reasons = summary.setdefault("blocked_reasons", {})
+            key = f"strike_not_in_catalog:{verdict['reason']}"
+            reasons[key] = int(reasons.get(key) or 0) + 1
+            return False
+
+        strike = float(verdict["strike"])
+        # The catalog is more authoritative than the watchlist row for
+        # instrument identity, and it is exactly what the snapped rung points
+        # at — so carry ITS keys onto the position, not the pre-snap ones.
+        side = {
+            **side,
+            "strike": strike,
+            "instrument_key": verdict["instrument_key"] or side.get("instrument_key"),
+            "trading_symbol": verdict["trading_symbol"] or side.get("trading_symbol"),
+            "lot_size": side.get("lot_size") or verdict["lot_size"],
+        }
         symbol = self._contract_symbol(row["underlying"], expiry, strike, opt_type)
         signal_id = str(
             uuid.uuid5(
@@ -1240,14 +1312,14 @@ class StrategyEntryMixin:
 
         self._append_commentary(
             runtime.label,
-            f"ENTRY {row['underlying']} {opt_type} {int(strike)} @{fill_price:.2f} | "
+            f"ENTRY {row['underlying']} {opt_type} {format_strike(strike)} @{fill_price:.2f} | "
             f"Qty={qty} | Setup={candidate.get('spot_setup')} | "
             f"IV={candidate.get('iv_pct') or 0:.0f}% | TTE={candidate['tte_days']}d | "
             f"Regime={regime_label} | MP={candidate.get('mp_day_type')}",
             tone="trade",
         )
         await self._send_telegram_text(
-            f"ENTRY | {row['underlying']} {opt_type} {int(strike)} @{fill_price:.2f}\n"
+            f"ENTRY | {row['underlying']} {opt_type} {format_strike(strike)} @{fill_price:.2f}\n"
             f"Qty: {qty} | Setup: {candidate.get('spot_setup')} | "
             f"IV: {candidate.get('iv_pct') or 0:.0f}% | Regime: {regime_label} | "
             f"MP: {candidate.get('mp_day_type')}"
@@ -1311,6 +1383,7 @@ class StrategyEntryMixin:
                 "learning_risk_multiplier": candidate.get("learning_risk_multiplier"),
             },
         )
+        return True
 
     def _get_sizing_mode(self, candidate: dict[str, Any]) -> str:
         setup = candidate.get("spot_setup")

@@ -785,6 +785,26 @@ def test_strategy1_open_position_prefers_contract_lot_over_underlying_row(monkey
 
     monkeypatch.setattr(strategy_entries_module.option_history_service, "resolve_lot_size", fake_resolve_lot_size)
 
+    # The entry path is fail-closed against fo_contract_catalog (2026-08-04).
+    # Stand in for the catalog so this test stays about lot-size precedence.
+    async def fake_resolve_contract(**kwargs):
+        assert float(kwargs["strike"]) == 75000.0
+        return {
+            "ok": True,
+            "strike": 75000.0,
+            "requested": 75000.0,
+            "outcome": "exact",
+            "reason": None,
+            "instrument_key": "BSE_FO|SENSEX_CE",
+            "trading_symbol": "SENSEX75000CE",
+            # Deliberately None: the catalog must not be able to override the
+            # contract lot resolved by option_history_service.
+            "lot_size": None,
+            "ladder": [75000.0],
+        }
+
+    monkeypatch.setattr(strategy_entries_module, "resolve_catalog_contract", fake_resolve_contract)
+
     candidate = {
         "row": {
             "underlying": "SENSEX",
@@ -1295,11 +1315,14 @@ def test_ensure_recovered_state_refreshes_stale_strategy2_signal_lane(monkeypatc
                 return date(2026, 4, 10)
             return None
 
-    restore_args: dict[str, date | None] = {}
+    restore_args: dict[str, object] = {}
 
-    async def fake_restore_from_historical_state(*, latest_snapshot_day=None, latest_position_day=None):
+    async def fake_restore_from_historical_state(
+        *, latest_snapshot_day=None, latest_position_day=None, rebuild_strategy1=True
+    ):
         restore_args["latest_snapshot_day"] = latest_snapshot_day
         restore_args["latest_position_day"] = latest_position_day
+        restore_args["rebuild_strategy1"] = rebuild_strategy1
 
     monkeypatch.setattr(strategy_agent_module, "AsyncSessionLocal", lambda: FakeSession())
     monkeypatch.setattr(agent, "_restore_from_historical_state", fake_restore_from_historical_state)
@@ -1309,6 +1332,11 @@ def test_ensure_recovered_state_refreshes_stale_strategy2_signal_lane(monkeypatc
     assert restore_args == {
         "latest_snapshot_day": date(2026, 4, 10),
         "latest_position_day": None,
+        # A STALE S2 SIGNAL LANE MUST NOT REBUILD S1'S BOOK (2026-08-04). S2 is
+        # what needs recovery here; S1's open book is untouched. Rebuilding it
+        # from the `positions` journal is lossy and re-strands any leg whose
+        # strike has rotated out of the ATM watchlist at its entry price.
+        "rebuild_strategy1": False,
     }
 
 
@@ -2025,3 +2053,114 @@ def test_index_position_is_not_force_closed_by_the_stock_rule(monkeypatch) -> No
     position.underlying = "NIFTY"
     asyncio.run(agent._manage_exits(runtime))
     assert closed == []
+
+
+# ── Fail-closed contract guard (2026-08-04) ──────────────────────────────────
+#
+# ITC 287.5 PE entered the S1 book keyed OPT:ITC:2026-08-25:288:PE. 288 is not
+# on ITC's 2.5-wide ladder, so the leg could never resolve to a tradeable
+# symbol: NULL instrument_key, price frozen at entry, exactly 0.0 unrealized
+# P&L from 2026-07-28, and no price-based exit reachable — ~Rs 71.6k of phantom
+# notional. No leg may open unless fo_contract_catalog lists it.
+
+
+def _guard_candidate(strike: float) -> dict:
+    return {
+        "row": {"underlying": "ITC", "expiry": "2026-08-25", "lot_size": 1725},
+        "side": {"instrument_key": None, "trading_symbol": None, "strike": strike},
+        "latest_close": 8.30,
+        "opt_type": "PE",
+        "latest_bar_time": "2026-07-28T12:05:00+05:30",
+        "signal_key": "ITC:2026-08-25:PE",
+        "reason": "macd_zero_cross",
+        "tte_days": 28,
+        "spot_setup": "reversal",
+        "quadrant": type("Quadrant", (), {"regime": "bearish"})(),
+        "strength": 1.0,
+        "fraction_override": 0.0,
+    }
+
+
+def _stub_catalog(monkeypatch, verdict: dict) -> None:
+    async def _fake(**_kwargs):
+        return verdict
+
+    monkeypatch.setattr(strategy_entries_module, "resolve_catalog_contract", _fake)
+
+
+def test_open_position_refuses_strike_absent_from_catalog(monkeypatch) -> None:
+    agent = PaperStrategyAgent()
+    runtime = agent._build_runtime("strategy1", "Strategy 1")
+    _stub_catalog(
+        monkeypatch,
+        {
+            "ok": False,
+            "strike": None,
+            "requested": 288.0,
+            "outcome": "off_ladder",
+            "reason": "strike_not_in_catalog",
+            "instrument_key": None,
+            "trading_symbol": None,
+            "lot_size": None,
+            "ladder": [285.0, 287.5, 290.0],
+        },
+    )
+
+    opened = asyncio.run(agent._open_position(runtime, _guard_candidate(288.0)))
+
+    assert opened is False
+    assert runtime.positions == {}
+    reasons = (runtime.last_run_summary or {}).get("blocked_reasons", {})
+    assert any("strike_not_in_catalog" in key for key in reasons)
+
+
+def test_open_position_refuses_when_catalog_is_unreachable(monkeypatch) -> None:
+    # A catalog outage must also fail closed — an unverifiable contract is
+    # exactly the one that strands notional.
+    agent = PaperStrategyAgent()
+    runtime = agent._build_runtime("strategy1", "Strategy 1")
+    _stub_catalog(
+        monkeypatch,
+        {
+            "ok": False,
+            "strike": None,
+            "requested": 287.5,
+            "outcome": "no_ladder",
+            "reason": "catalog_unavailable",
+            "instrument_key": None,
+            "trading_symbol": None,
+            "lot_size": None,
+            "ladder": [],
+        },
+    )
+
+    assert asyncio.run(agent._open_position(runtime, _guard_candidate(287.5))) is False
+    assert runtime.positions == {}
+
+
+def test_open_position_snaps_to_catalog_rung_and_takes_its_identity(monkeypatch) -> None:
+    agent = PaperStrategyAgent()
+    runtime = agent._build_runtime("strategy1", "Strategy 1")
+    _stub_catalog(
+        monkeypatch,
+        {
+            "ok": True,
+            "strike": 287.5,
+            "requested": 288.0,
+            "outcome": "snapped",
+            "reason": None,
+            "instrument_key": "NSE_FO|117951",
+            "trading_symbol": "ITC 287.5 PE 25 AUG 26",
+            "lot_size": 1725,
+            "ladder": [285.0, 287.5, 290.0],
+        },
+    )
+
+    opened = asyncio.run(agent._open_position(runtime, _guard_candidate(288.0)))
+
+    assert opened is True
+    position = runtime.positions["OPT:ITC:2026-08-25:287.5:PE"]
+    assert position.strike == 287.5
+    # The identity that makes the leg priceable must come from the catalog.
+    assert position.instrument_key == "NSE_FO|117951"
+    assert position.trading_symbol == "ITC 287.5 PE 25 AUG 26"

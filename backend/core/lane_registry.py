@@ -206,6 +206,79 @@ def get_registry() -> tuple[LaneSpec, ...]:
             ),
         ),
         LaneSpec(
+            key="candidate_capture",
+            label="Candidate Capture (research observer)",
+            kind="scheduler-runner",
+            execution_mode="none",
+            status_source="supervisor",
+            cadence_seconds=float(settings.CANDIDATE_CAPTURE_INTERVAL_SECONDS),
+            broker_profile=None,
+            exchange_session=nse,
+            enabled_flag_name="CANDIDATE_CAPTURE_ENABLED",
+            runner_keys=("candidate_capture",),
+            notes=(
+                "Prospective training-set capture. Records EVERY evaluated option "
+                "contract inside a DTE/moneyness envelope — plus one explicit "
+                "NO_TRADE candidate per decision set — to candidate_snapshots, so "
+                "the contracts that were passed over stop being invisible. Every "
+                "other book here only ever sees a contract after something chose "
+                "to act on it, which makes honest supervised learning impossible. "
+                "Read-only by construction: it reads the option chain already "
+                "cached in Redis by OptionChainService, never calls track() or "
+                "the broker, and imports no order path (enforced by "
+                "tests/test_candidate_capture_service.py). Takes no position and "
+                "touches no strategy math."
+            ),
+        ),
+        LaneSpec(
+            key="candidate_labelling",
+            label="Candidate Outcome Labelling (post-close)",
+            kind="scheduler-runner",
+            execution_mode="none",
+            status_source="supervisor",
+            cadence_seconds=3600.0,
+            broker_profile=None,
+            exchange_session=nse,
+            enabled_flag_name="CANDIDATE_LABELLING_ENABLED",
+            runner_keys=("candidate_labelling",),
+            notes=(
+                "Post-close outcome resolution for candidate_capture. Two stages, "
+                "because the data supports them very differently: the SPOT outcome "
+                "is exactly computable from the ~0.25s index tick tape (barrier "
+                "first-touch, true MFE/MAE), while the OPTION outcome is a "
+                "nearest-sample mark on an irregular ~2-3 minute cadence, so every "
+                "option field carries its REALIZED lag and sample count and an "
+                "unmarkable row is stored as unlabellable_* rather than dropped. "
+                "Costs are computed into the label (never re-subtracted at "
+                "evaluation) using each row's OWN measured spread; the measured "
+                "entry half-spread and the assumed exit half-spread are kept as "
+                "separate columns. Reads committed rows only — no broker call, no "
+                "position."
+            ),
+        ),
+        LaneSpec(
+            key="candidate_training",
+            label="Candidate Model Training (post-close)",
+            kind="scheduler-runner",
+            execution_mode="none",
+            status_source="supervisor",
+            cadence_seconds=3600.0,
+            broker_profile=None,
+            exchange_session=nse,
+            enabled_flag_name="CANDIDATE_TRAINING_ENABLED",
+            runner_keys=("candidate_training",),
+            notes=(
+                "Fits, gates and versions the baseline ranker specialists from "
+                "the labelled candidate set. Walk-forward (expanding-window) "
+                "prequential evaluation with SESSION-CLUSTERED standard errors, "
+                "and ten promotion gates that fail CLOSED — a metric that cannot "
+                "be computed is a failed gate, never a skipped one. Refuses to "
+                "promote anything until there is enough data, which is the "
+                "normal outcome early on. Reads its own tables and writes only "
+                "model versions; no broker call, no position."
+            ),
+        ),
+        LaneSpec(
             key="auction_intelligence",
             audit_lane_key="auction_intelligence",
             label="Auction Intelligence Paper Cycle",
@@ -636,7 +709,15 @@ def supervisor_runner_keys() -> set[str]:
 # durable ingestion + NSE constituent sync (data lane, no broker call) — the
 # manual ingestion endpoints were never scheduled, so the 24-date runtime
 # handoff could never be reached.
-EXPECTED_LANE_TOTAL = 34
+# 2026-08-26: 34 -> 35 with candidate_capture, the prospective training-set
+# observer. Records every evaluated contract (plus an explicit NO_TRADE
+# candidate) so the passed-over set stops being invisible to learning. Default
+# OFF, no broker call, no position.
+# 2026-08-27: 35 -> 36 with candidate_labelling, the post-close outcome
+# resolver for the capture lane. Default OFF, no broker call, no position.
+# 2026-08-27: 36 -> 37 with candidate_training, the post-close model fit +
+# promotion-gate pass. Default OFF, no broker call, no position.
+EXPECTED_LANE_TOTAL = 37
 
 
 def registry_counts() -> dict[str, int]:

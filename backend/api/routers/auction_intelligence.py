@@ -1636,6 +1636,7 @@ async def _build_db_spot_mp_rows(underlying: str, *, limit: int = 60) -> list[di
                         FROM underlying_spot_candles
                         WHERE underlying = :underlying
                           AND interval = '1minute'
+                          AND time >= :since
                         GROUP BY timezone('Asia/Kolkata', time)::date
                         HAVING COUNT(*) >= 20
                         ORDER BY session_date DESC
@@ -1646,11 +1647,26 @@ async def _build_db_spot_mp_rows(underlying: str, *, limit: int = 60) -> list[di
                     FROM underlying_spot_candles
                     WHERE underlying = :underlying
                       AND interval = '1minute'
+                      AND time >= :since
                       AND timezone('Asia/Kolkata', time)::date IN (SELECT session_date FROM recent_sessions)
                     ORDER BY session_date ASC, time ASC
                     """
                 ),
-                {"underlying": normalized, "limit": limit},
+                # `time` is the partitioning column and BOTH halves of this
+                # query previously left it unbounded, so the planner had to
+                # open all 1330 chunks of underlying_spot_candles: measured
+                # 5201ms PLANNING against 678ms of actual execution. The
+                # tz-wrapped date in GROUP BY / IN is fine — it is the missing
+                # bound on raw `time` that defeated chunk exclusion. A literal
+                # timestamptz (not NOW() - interval, which is STABLE and defers
+                # pruning to startup) restores plan-time exclusion. Two calendar
+                # days per requested session plus 30 clears weekends and any
+                # holiday bridge at the default limit of 60.
+                {
+                    "underlying": normalized,
+                    "limit": limit,
+                    "since": datetime.now(timezone.utc) - timedelta(days=limit * 2 + 30),
+                },
             )
             db_rows = result.mappings().all()
     except Exception as exc:
