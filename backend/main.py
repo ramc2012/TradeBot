@@ -431,6 +431,17 @@ async def lifespan(app: FastAPI):
         except Exception as e:
             logger.warning(f"Chain candle builder start skipped: {e}")
 
+    # Upstox chain builder: the LIVE equity-iv feed. Replaces the dead
+    # fyers_chain/upstox_expired paths (see the module docstring). Gated OFF by
+    # default; the sweep self-staggers through the shared Upstox limiter.
+    if settings.UPSTOX_CHAIN_BUILDER_ENABLED and boots_core():
+        try:
+            from market_data.upstox_chain_builder import upstox_chain_builder
+            await upstox_chain_builder.start()
+            logger.info("✓ Upstox chain builder (30m CE+PE + greeks) started")
+        except Exception as e:
+            logger.warning(f"Upstox chain builder start skipped: {e}")
+
     yield
 
     # Shutdown
@@ -485,6 +496,12 @@ async def lifespan(app: FastAPI):
         try:
             from market_data.chain_candle_builder import chain_candle_builder
             await chain_candle_builder.stop()
+        except Exception:
+            pass
+    if settings.UPSTOX_CHAIN_BUILDER_ENABLED and boots_core():
+        try:
+            from market_data.upstox_chain_builder import upstox_chain_builder
+            await upstox_chain_builder.stop()
         except Exception:
             pass
     await market_hours_paper_supervisor.stop()

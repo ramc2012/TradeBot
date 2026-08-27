@@ -89,6 +89,7 @@ CORE_SUBSYSTEMS = frozenset(
         "macd_diffusion_daemon",
         "greeks_enrichment_daemon",
         "chain_candle_builder",
+        "upstox_chain_builder",
         # Supervisor runners tagged plane="core":
         "runner:option_flow_watchdog",
         "runner:token_readiness",

@@ -278,6 +278,15 @@ class Settings(BaseSettings):
     # accumulator so enabling it genuinely feeds S1 (WS-first chain design P2).
     # Only meaningful when CHAIN_CANDLE_BUILDER_ENABLED is also True.
     CHAIN_CANDLE_BUILDER_EMIT_30M: bool = True
+    # Upstox full-universe option-chain -> 30m OHLC+greeks builder
+    # (market_data/upstox_chain_builder.py). This is the LIVE replacement for
+    # the equity `iv` that died on 2026-07-28: `upstox_expired` only prices
+    # already-expired contracts and `fyers_chain` needs Fyers, whose credentials
+    # no longer decrypt in this deployment. Costs ~213 Upstox chain calls per
+    # 30-minute bar (~2.8k/session), governed by the shared upstox limiter as
+    # CLASS_BULK. OFF by default: enable deliberately after a market-open
+    # verification via GET /api/system/upstox-chain-builder.
+    UPSTOX_CHAIN_BUILDER_ENABLED: bool = False
     # WS-first chain design — phase-P0 empirical probe. OFF by default; enable for
     # ONE live session to confirm Upstox WS greeks/iv payload, Fyers oi/pdoi
     # cadence, and the Upstox iv unit via GET /api/diagnostics/ws-chain-probe.

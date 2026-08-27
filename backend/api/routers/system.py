@@ -1112,6 +1112,16 @@ async def signal_validation() -> dict[str, Any]:
     )
 
 
+@router.get("/upstox-chain-builder")
+async def upstox_chain_builder_status() -> dict[str, Any]:
+    """Coverage snapshot for the Upstox chain builder — the surface used to
+    VERIFY it is covering the universe before it is trusted as the equity-iv
+    feed. Mirrors the Fyers builder's own status() contract."""
+    from market_data.upstox_chain_builder import upstox_chain_builder
+
+    return upstox_chain_builder.status()
+
+
 @router.get("/ws-chain-probe")
 async def ws_chain_probe_status() -> dict[str, Any]:
     """WS-first chain design P0 probe results (empty unless WS_CHAIN_PROBE_ENABLED
