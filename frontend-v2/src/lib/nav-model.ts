@@ -513,6 +513,16 @@ export const SIDEBAR_GROUPS: SidebarGroup[] = [
       { kind: "desk", href: "/strategies/directional" },
       { kind: "desk", href: "/strategies/directional?horizon=positional" },
       { kind: "desk", href: "/strategies/cbe" },
+      // Vanguard sits in a group that is OPEN on first paint, deliberately.
+      // It was first placed under "Research" to avoid disturbing the owner's
+      // pinned Future-lanes set — but that group has no defaultOpen, so the
+      // desk was reachable only by expanding a collapsed section. That is the
+      // exact failure this file's own header warns about ("a books page that
+      // is not one click from first paint has not shipped"), and it is how the
+      // desk shipped invisible the first time. Technical lanes is both open by
+      // default and an honest home: Vanguard is a systematic multi-factor
+      // signal lane, alongside MACD Refined / Directional / CBE.
+      { kind: "desk", href: "/strategies/vanguard" },
     ],
   },
   {
@@ -533,12 +543,6 @@ export const SIDEBAR_GROUPS: SidebarGroup[] = [
       { kind: "link", href: "/research", label: "Research lab", matchers: ["/research", "/analysis", "/backtester", "/data"] },
       { kind: "link", href: "/macro-research", label: "Macro" },
       { kind: "link", href: "/sector-interaction", label: "Sector network" },
-      // Vanguard sits under Research, not Future lanes: it is a trade-SELECTION
-      // research system with a paper book, and "Future lanes" is the owner's
-      // pinned set of three (nav-model.test.ts asserts exactly Gann/Fractal/
-      // Sniper). It is a `desk` rather than a `link` because it is declared in
-      // LANE_SECTIONS and carries a real book endpoint.
-      { kind: "desk", href: "/strategies/vanguard" },
     ],
   },
   {
