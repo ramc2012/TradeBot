@@ -782,3 +782,21 @@ export const uploadBacktestCsv = (formData: FormData) =>
   api.post("/api/backtester/run-csv", formData, {
     headers: { "Content-Type": "multipart/form-data" },
   });
+
+// ── Vanguard (M1–M10 paper trade-selection lane) ────────────────────────────
+// Read-only by design: the lane has no POST surface at all. Vanguard's own
+// doctrine forbids an execution layer, so there is deliberately no
+// "run a cycle" action to call from a browser — `make daily-cycle` on the
+// research host is the only thing that advances it.
+export const getVanguardSummary = () => api.get("/api/vanguard/summary");
+export const getVanguardFunnel = (ts?: string) =>
+  api.get("/api/vanguard/funnel", { params: { ts } });
+export const getVanguardSelection = (ts?: string, limit = 100) =>
+  api.get("/api/vanguard/selection", { params: { ts, limit } });
+export const getVanguardBook = (limit = 200) =>
+  api.get("/api/vanguard/book", { params: { limit } });
+export const getVanguardAttribution = (limit = 30) =>
+  api.get("/api/vanguard/attribution", { params: { limit } });
+export const getVanguardBacktests = (limit = 30) =>
+  api.get("/api/vanguard/backtests", { params: { limit } });
+export const getVanguardPipeline = () => api.get("/api/vanguard/pipeline");

@@ -281,6 +281,25 @@ const INTRADAY_DESKS: NavDesk[] = [
       absent: ["openPositions", "realizedPnl", "unrealizedPnl"],
     },
   },
+  {
+    href: "/strategies/vanguard",
+    label: "Vanguard",
+    policy: null,
+    // Vanguard runs as its own process out of a git worktree, not as a lane in
+    // the served registry, so it declares NO lane keys — the KIND axis stays
+    // honestly empty rather than claiming a registry entry that does not exist.
+    laneKeys: [],
+    status: "active",
+    note: "Trade-selection research lane (M1–M10): fuses options flow, GEX regime, sector RS and microstructure timing into paper tickets, then journals every fill and outcome. Active as a pipeline but has never emitted a ticket on real data — the desk's job is to show WHY, not to hide it.",
+    book: {
+      endpoint: "/api/vanguard/summary",
+      path: ["book"],
+      // Nothing marks open paper positions to market, so unrealized P&L is
+      // genuinely unmeasured. Declared absent so the card says so instead of
+      // rendering a 0 that reads as a flat book.
+      absent: ["unrealizedPnl"],
+    },
+  },
 ];
 
 const SWING_DESKS: NavDesk[] = [
@@ -514,6 +533,12 @@ export const SIDEBAR_GROUPS: SidebarGroup[] = [
       { kind: "link", href: "/research", label: "Research lab", matchers: ["/research", "/analysis", "/backtester", "/data"] },
       { kind: "link", href: "/macro-research", label: "Macro" },
       { kind: "link", href: "/sector-interaction", label: "Sector network" },
+      // Vanguard sits under Research, not Future lanes: it is a trade-SELECTION
+      // research system with a paper book, and "Future lanes" is the owner's
+      // pinned set of three (nav-model.test.ts asserts exactly Gann/Fractal/
+      // Sniper). It is a `desk` rather than a `link` because it is declared in
+      // LANE_SECTIONS and carries a real book endpoint.
+      { kind: "desk", href: "/strategies/vanguard" },
     ],
   },
   {

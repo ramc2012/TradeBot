@@ -522,6 +522,11 @@ const SERVED_ENDPOINTS = new Set([
   "/api/gann-tp-delta/paper-agent/status",
   "/api/cbe/paper-summary",
   "/api/us/macd-refined/paper-summary",
+  // Added 2026-08-27 with the Vanguard desk. Verified by importing
+  // backend/api/routers/vanguard.py and listing router.routes (GET
+  // /api/vanguard/summary present) and by executing the endpoint against the
+  // live database — not by assuming the router file's existence is enough.
+  "/api/vanguard/summary",
 ]);
 
 const KNOWN_404 = [
