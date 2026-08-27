@@ -661,7 +661,22 @@ class DataRouter:
                 setattr(client, "restart_flag", False)
             except Exception:
                 pass
-            close_fn = getattr(client, "close_connection", None) or getattr(client, "close", None)
+            # Upstox's MarketDataStreamerV3 exposes NEITHER close_connection NOR
+            # close — its teardown method is disconnect(). Without it in this
+            # lookup close_fn was None, so the Upstox socket was never torn
+            # down and every watchdog resubscribe stacked another live streamer
+            # on top of the last. That is the same zombie-accumulation failure
+            # described above for Fyers, and it ends the same way: the account
+            # hits Upstox's concurrent-connection cap and NEW sockets connect
+            # but receive no data, so the watchdog resubscribes again and makes
+            # it worse. Observed 2026-08-27: ticks stopped dead on a backend
+            # restart mid-session and did not recover across three more
+            # restarts while the storm kept running.
+            close_fn = (
+                getattr(client, "close_connection", None)
+                or getattr(client, "close", None)
+                or getattr(client, "disconnect", None)
+            )
             if close_fn is not None:
                 close_fn()
 

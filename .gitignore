@@ -6,6 +6,13 @@
 !.env.example
 credentials.json
 backend/credentials.json
+# ...and every dated/backup variant. `credentials.json.bak-fyers-20260812`
+# was sitting untracked and NOT ignored: it carries live fyers app_id/secret/
+# pin/access_token/refresh_token, upstox api_key/secret/access_token and the
+# telegram bot_token, so a `git add -A` would have published working broker
+# credentials to the remote.
+credentials.json.*
+backend/credentials.json.*
 
 # Python caches and virtualenvs
 __pycache__/
