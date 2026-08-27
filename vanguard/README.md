@@ -52,66 +52,89 @@ Genuinely absent from the schema, and built fresh:
 existing table carries this), `ingest_log`, `results_calendar`, `sector_rs`,
 `leadlag`. See `db/migrations/001_schema.sql` for the full reasoning.
 
-## What is done and verified against live data (2026-08-26)
+## Status (2026-08-27)
 
-- **Universe**: `config/fno_universe_aug2026_series.csv` — 218 rows (210
-  equities + 8 indices), pulled from the live Fyers NSE/BSE derivatives
-  master, not an assumed list. 214/218 cross-check against
-  `fo_underlying_catalog` by symbol (the 4 that don't are BSE-only names
-  SENSEX/BANKEX plus two indices `fo_underlying_catalog` hasn't picked up
-  yet). Sector / sector_group is curated NSE domain knowledge, not sourced
-  from an official classification file — treat it as a starting point, not
-  ground truth (see the file's own header comment for four names flagged as
-  inferred-not-confirmed: NIFTYFPI, VMM, TMPV, GVT&D).
-- **`db/migrations/001_schema.sql`**: applied. Additive-only; confirmed the
-  live app's Alembic head (`031_preopen_atr_last_session`) is untouched.
-- **M1 — participant OI** (`ingest/m1_participant_oi.py`): live NSE archive,
-  run for 2026-08-20 through 2026-08-26. Trading days return 24 rows
-  (4 participants × 6 buckets); weekends correctly 404. Idempotency verified
-  both ways — re-running an `ok` day updates in place, re-running a
-  `not_a_trading_day` accumulates retry history in `ingest_log`. 7 offline
-  unit tests, including one that asserts the parser fails loudly (not
-  silently) if NSE reshuffles a column, and one that reconciles the parsed
-  sum against the file's own TOTAL row rather than trusting it.
-- **M4 — sector RS, sector20, lead-lag** (`features/m4_sector.py`): run
-  against `underlying_spot_candles` with a 90-day lookback. 207/210 equities
-  had bars (3 missing: ATHERENERG, MAHABANK, SAGILITY — newly listed,
-  presumably short history). sector20 is genuinely computed by hierarchical
-  clustering of sector_group correlations, not asserted — 25 sector_group
-  buckets clustered to 20. `sector_rs`: 960 rows. `leadlag`: 207 rows.
-- `make test`, `make db-init`, `make ingest`, `make features` all run clean
-  end to end (see Makefile).
+**M1 through M10 are all built and running.** An earlier revision of this file
+declared M2/M3/M5 and M6–M10 "not started"; that was true when it was written
+and false by the time anyone read it. Corrected here rather than left to
+mislead the next reader into re-implementing modules that already exist.
 
-## What is explicitly NOT done
+| Module | State | Output |
+|---|---|---|
+| M1 participant OI + bhavcopy/delivery, bulk-block, announcements, USDINR | built | `participant_oi`, `bhavcopy_delivery`, `bulk_block_deals`, `corporate_announcements`, `usdinr_daily` |
+| M2 options informed flow | built | `features_flow` — 9,240 rows, 44 sessions (2026-05-25 → 07-28), 210 names |
+| M3 GEX regime | built | `regime` — 13,231 rows |
+| M4 sector RS + lead-lag | built | `sector_rs` (960), `leadlag` (207) |
+| M5 microstructure timing | built | `timing` — 128,459 rows |
+| M6 fusion & selection | built | `tickets` (emitted AND gated near-misses) |
+| M7 risk & sizing | built | consumed by M6; no table of its own |
+| M8 backtest harness | built | `vanguard_backtest_runs` |
+| M9 paper execution | built | `decisions`, `fills`, `outcomes`, `paper_capital_daily` |
+| M10 journal & attribution | built | `attribution_runs` |
+| UI | built | `/strategies/vanguard` + `/api/vanguard/*` (read-only), on branch `vanguard/ui` |
 
-- **M2 (options informed-flow scanner)**: not started. `fo_option_chain_metrics`
-  already gives PCR; IV spread, skew delta, O/S ratio and ΔOI conjunction are
-  new computation, not yet written.
-- **M3 (GEX regime)**, **M5 (microstructure timing)**: not started, per the
-  "reimplement fresh" decision — these need independent logic, not a wrap.
-- **Bhavcopy+delivery%, bulk/block deals, corporate announcements,
-  cross-asset (Brent/LME/USDINR/IN10Y)**: not checked against the existing
-  schema and not built. Before building fresh collectors for these, repeat
-  the inventory step above — given how much of M1's other feeds turned out
-  to already exist, it would not be surprising if some of these do too.
-- **M6 (fusion) through M10 (journal)**: not started. All depend on M2/M3/M5.
-- **The bars/indicator pipeline** (EMA/RSI/MACD/BB/ATR/ADX/VWAP/OBV/RVOL/
-  realized-vol/Supertrend) described under "Existing Foundations": not built.
-  `underlying_spot_candles` supplies OHLCV; the indicator overlay on top of it
-  does not exist yet in Vanguard and will be needed once M2/M3/M5 start.
+239 offline tests pass (`make test`).
+
+## The lane emits nothing, and the reason is DATA, not tuning
+
+This is the single most important fact about Vanguard today, and the desk's
+Pipeline tab exists to keep it visible.
+
+M6 needs four inputs to coincide: flow + sector RS (prior session) and regime
++ timing (same bar). They do not coincide any more:
+
+- `features_flow` ends **2026-07-28**. Stock-level option-chain collection was
+  retired around 2026-08-12, so there is no newer input to compute it from.
+- `regime` collapses to 0–5 symbols per session from 2026-07-29 onward.
+- `timing` alone stays healthy (~2,800 rows/session, 213 names).
+
+Result: only **9 of the last 30 sessions** carry all three per-symbol inputs,
+and none of them is recent. Across the entire healthy window (2026-05-25 →
+07-28, 1,022 bars) exactly **4 candidates** ever cleared the filter, none
+reaching `CONVICTION_MIN = 85` (max 79.6). Every one is journaled in `tickets`
+with its gating reason.
+
+Lowering the threshold would manufacture trades from a four-observation
+sample. The honest next step is restoring a flow feed, not retuning a filter
+against data that no longer arrives.
+
+## Known-and-unfixed (from the 2026-08-27 adversarial review)
+
+Fixed in this branch: the exit rule's stop-ordering / gap-through / tie-break
+defects, M7's missing `as_of` bounds (which let M8 size historical bars with
+present-day state), the M8-vs-M9 R-multiple disagreement, the unenforced
+weekly loss stop, `resolve_instrument` selecting expiring/far-month series,
+and `tickets.instrument NOT NULL` making the entire gated audit trail
+unwritable (migration 005).
+
+Still open, in rough priority order:
+
+- **M2 does not store `n_ingredients`.** ~42% of the candidate pool is a
+  saturated ±100 flow score derived from a SINGLE ingredient, and M6 cannot
+  tell those from corroborated ones. Doctrine #1 (no raw/unqualified features
+  in stored outputs) argues for persisting the count.
+- **`timing` contains off-hours bars on a second 15-minute-offset grid**, so
+  an exact-timestamp evaluation swings between a ~208-symbol and a ~55-symbol
+  universe. `load_bars` needs a market-hours filter.
+- **`make db-init` never creates `features_flow`** — its DDL lives inside
+  `features/m2_flow.py` and is applied as a side effect of running it.
+- **`daily-cycle` re-runs full-history recomputation every 30 minutes**
+  (m2_flow defaults to a 130-day lookback). Fine nightly, wasteful per bar.
+- **M9 fill/decision/outcome writes are not atomic** under autocommit, and
+  `fill_pending_tickets` re-checks no concurrency/heat cap.
+- **`db/apply.py` has no migration version tracking** and re-applies every
+  file each run.
+- **001_schema.sql's isolation claim is wrong.** `backtest_runs` collided with
+  the live app's OWN Alembic chain, not a neighbouring project's — see
+  004's header. Check `information_schema.tables` before adding any table.
 
 ## The P1 acceptance gate that cannot be satisfied in one sitting
 
 Section 6 of the spec requires "5 consecutive sessions with zero missed EOD
-feeds" before P1 is considered exited. That is 5 calendar trading days of
-`make ingest` actually running unattended — it cannot be produced
-synchronously regardless of how much code is written today. `ingest_log` is
-the evidence trail for it; as of this writing it has 5 trading-day rows for
-`m1_participant_oi`, all `ok`, from a manual backfill run today rather than 5
-separate days of an actually-scheduled unattended job. Wiring an unattended
-daily run (cron / research-sync scheduler, matching how `fo_risk_ingest.py`'s
-own daily cadence is enforced by its caller) is the next concrete step before
-this gate can start being satisfied for real.
+feeds" before P1 is exited. That is 5 calendar trading days of `make ingest`
+running unattended — it cannot be produced synchronously. `ingest_log` is the
+evidence trail. Wiring an unattended daily run is still the next concrete step
+before this gate can start being satisfied for real.
 
 ## Reproduce
 

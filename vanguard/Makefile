@@ -13,7 +13,7 @@
 # if that checkout ever moves.
 PYTHON ?= /Users/ramachandran/CLAUDE PROJECTS/Nomad Curie/TradeBot/.venv/bin/python
 
-.PHONY: test db-init sector-taxonomy ingest features backfill
+.PHONY: test db-init sector-taxonomy ingest features backfill select paper attribution backtest daily-cycle
 
 ## test — offline unit tests only. No network, no database (matches the live
 ## app's own test convention).
@@ -62,3 +62,36 @@ features:
 ## order that's actually safe end to end. Use for a first-time setup or
 ## after a TRUNCATE; `ingest`+`features` alone are what a daily cron needs.
 backfill: db-init sector-taxonomy ingest features
+
+## select — M6 fusion/selection: evaluate the latest timing bar, write any
+## tickets that clear conviction/rank/M7's risk gate (--write persists;
+## without it this is a dry-run print). Must run AFTER `features` for the
+## same bar (needs that bar's own regime/timing rows already written).
+select:
+	"$(PYTHON)" fusion/m6_select.py --write
+
+## paper — M9 paper execution engine: one run_cycle() at "now" -- flattens
+## any stand-down positions, fills whatever `select` just emitted, walks
+## every open position forward against real subsequent bars, force-closes
+## anything stale past T+3, rolls today's realized P&L into
+## paper_capital_daily. Must run AFTER `select` in the same cycle.
+paper:
+	"$(PYTHON)" paper/engine.py
+
+## attribution — M10 nightly rollup: cumulative hit rate/avg R, conviction-
+## decile monotonicity, per-component IC, per-symbol attribution, as of
+## today. Meant for an end-of-day cron, not every bar.
+attribution:
+	"$(PYTHON)" journal/attribution.py --write
+
+## daily-cycle — the one live sequence: features (this bar's M2-M5 reads)
+## -> select (M6/M7 decide) -> paper (M9 fills/walks/journals). Intended to
+## run once per 30-minute timing bar during market hours; `attribution` is
+## separate (end-of-day only, not per-bar).
+daily-cycle: features select paper
+
+## backtest — M8 ad-hoc historical replay over an explicit --start/--end
+## window (not part of the daily cycle -- run manually, e.g.
+## `make backtest ARGS="--start 2026-05-25T00:00:00+05:30 --end 2026-07-28T23:59:00+05:30 --write"`).
+backtest:
+	"$(PYTHON)" backtest/harness.py $(ARGS)
