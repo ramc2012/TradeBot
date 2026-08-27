@@ -95,3 +95,40 @@ daily-cycle: features select paper
 ## `make backtest ARGS="--start 2026-05-25T00:00:00+05:30 --end 2026-07-28T23:59:00+05:30 --write"`).
 backtest:
 	"$(PYTHON)" backtest/harness.py $(ARGS)
+
+# ── Live accumulation ───────────────────────────────────────────────────────
+#
+# `features` recomputes deep history (m2_flow alone defaults to a 130-day
+# lookback) and is the right thing for a first build or after a TRUNCATE. It is
+# the WRONG thing to run every 30 minutes: it re-derives months of settled rows
+# to append one bar, hammering a shared production database.
+#
+# These two targets are the steady-state pair. They accumulate forward instead
+# of rebuilding, and they split by the cadence each feature actually has:
+#
+#   live-cycle  per 30-minute bar, during market hours. M3 regime and M5 timing
+#               are bar-cadence, so they lead; M6 then selects on that bar and
+#               M9 journals whatever it filled/closed.
+#   eod-cycle   once after the close. M4 sector RS is session-cadence — running
+#               it per bar would be pure waste — and M10 attribution is a
+#               nightly rollup by definition.
+#
+# M2 is in NEITHER. Its IV source died on 2026-07-28 (see README); running it
+# now would write saturated single-ingredient flow scores rather than leave an
+# honest gap. Add it back to eod-cycle the day a live IV feed lands.
+#
+# Lookbacks are short enough to be cheap and long enough to stay correct: M5
+# keeps its full 60-day warmup buffer while emitting only the last 3 days, and
+# M3 keeps 60 days so its gex_percentile still has a real distribution behind it.
+
+.PHONY: live-cycle eod-cycle
+
+live-cycle:
+	"$(PYTHON)" features/m3_gex.py --lookback-days 60
+	"$(PYTHON)" features/m5_timing.py --lookback-days 3 --buffer-days 60 --write
+	"$(PYTHON)" fusion/m6_select.py --write
+	"$(PYTHON)" paper/engine.py
+
+eod-cycle:
+	"$(PYTHON)" features/m4_sector.py
+	"$(PYTHON)" journal/attribution.py --write
