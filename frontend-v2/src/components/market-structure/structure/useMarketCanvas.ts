@@ -50,6 +50,7 @@ import {
   getChartOHLC,
   getInstitutionalConvergenceDetail,
   getOrderflowSnapshot,
+  getUnifiedMpSnapshot,
 } from "@/lib/api";
 
 import type { MarketKey } from "../context/schema";
@@ -213,6 +214,18 @@ export function useMarketCanvas(
     queryKey: ["ms-detail", "convergence", market, symbol],
     queryFn: async () =>
       (await getInstitutionalConvergenceDetail(symbol, market)).data as any,
+    enabled: enabled && !!symbol,
+    refetchInterval: REFRESH_MS.snapshot,
+    refetchOnWindowFocus: false,
+    retry: false,
+  });
+
+  // Unified Market Profile (mp_core, 2026-08-29): the canonical profile for
+  // ANY symbol with 30-minute bars. Primary source for the workbench; the
+  // convergence payload remains the fallback and still supplies bars/CVD/risk.
+  const mpQuery = useQuery({
+    queryKey: ["ms-detail", "mp-unified", symbol],
+    queryFn: async () => (await getUnifiedMpSnapshot(symbol)).data as any,
     enabled: enabled && !!symbol,
     refetchInterval: REFRESH_MS.snapshot,
     refetchOnWindowFocus: false,
@@ -423,16 +436,24 @@ export function useMarketCanvas(
         : null;
 
     // ── Profile payload for the workbench ───────────────────────────────────
+    // Source order (2026-08-29): the unified mp_core snapshot first — one
+    // computation for every surface, any symbol with 30m bars, futures-backed
+    // for the indices — then the convergence payload as fallback.
+    const mpProfile = mpQuery.data?.profile ?? null;
+    const mpHasTpo =
+      !!mpProfile && Object.keys(mpProfile.tpo_counts ?? {}).length > 0;
     const hasTpo =
-      !!convProfile &&
-      (Object.keys(convProfile.tpo_counts ?? {}).length > 0 ||
-        (Array.isArray(convProfile.tpo_rows) && convProfile.tpo_rows.length > 0));
-    const profile = convProfile ?? null;
+      mpHasTpo ||
+      (!!convProfile &&
+        (Object.keys(convProfile.tpo_counts ?? {}).length > 0 ||
+          (Array.isArray(convProfile.tpo_rows) && convProfile.tpo_rows.length > 0)));
+    const profile = (mpHasTpo ? mpProfile : null) ?? convProfile ?? null;
+    const profileFromUnified = mpHasTpo;
     const profileUnavailable = hasTpo
       ? null
-      : convProfile
-        ? "the convergence lane served profile LEVELS for this instrument but no TPO distribution this cycle — the workbench renders levels only."
-        : "no lane emits a market profile for this instrument: TPO counts, prior-session levels, HVNs and single prints come from /api/institutional-convergence/status/{symbol}, whose universe does not include it.";
+      : profile
+        ? "a lane served profile LEVELS for this instrument but no TPO distribution this cycle — the workbench renders levels only."
+        : "no source emits a market profile for this instrument: /api/mp/unified/snapshot needs 30-minute bars for the symbol, and the convergence universe does not include it either.";
 
     const risk = convResult?.risk ?? null;
     const plan: CanvasPlan | null = risk
@@ -483,7 +504,11 @@ export function useMarketCanvas(
       levels,
       levelsSource,
       profile,
-      profileSource: convProfile ? "institutional_convergence/status/{symbol}" : null,
+      profileSource: profileFromUnified
+        ? "/api/mp/unified/snapshot · mp_core"
+        : convProfile
+          ? "institutional_convergence/status/{symbol}"
+          : null,
       profileUnavailable,
       metrics: instrument?.metrics ?? null,
       metricsSource: instrument?.source?.order_flow ?? instrument?.source?.quote ?? null,

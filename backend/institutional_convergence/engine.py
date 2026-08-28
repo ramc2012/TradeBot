@@ -282,9 +282,17 @@ def _aligned_tick_cvd(
 
 
 def _profile(symbol: str, bars: list[dict[str, Any]], tick_size: float, prior=None):
-    engine = MarketProfileEngine({"period_minutes": 30, "tick_size": tick_size, "initial_balance_periods": 2})
+    # Routed through mp_core's content-addressed cache (2026-08-29): this
+    # function used to rebuild the full TPO ladder for the current AND prior
+    # session on every evaluation cycle. The prior session's bars never change,
+    # so its profile now computes once per process; the developing session
+    # recomputes only when a new bar arrives. Same engine, same output.
+    from mp_core.service import build_cached_profile
+
     objects = [MarketBar(timestamp=row["time"], open=_f(row["open"]), high=_f(row["high"]), low=_f(row["low"]), close=_f(row["close"]), volume=_f(row.get("volume"))) for row in bars]
-    return engine.build_profile(symbol, objects, prior_profile=prior)
+    return build_cached_profile(symbol, objects, tick_size=tick_size,
+                                period_minutes=30, initial_balance_periods=2,
+                                prior_profile=prior)
 
 
 def evaluate_rules(

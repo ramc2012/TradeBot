@@ -74,7 +74,7 @@ async def _main(args: argparse.Namespace) -> dict[str, Any]:
             underlyings=normalize_underlyings(args.underlying),
             from_date=_parse_date(args.from_date, default=DEFAULT_START_DATE),
             to_date=_parse_date(args.to_date, default=date.today()),
-            interval="1minute",
+            interval=args.interval,
             fyers_adapter=fyers_adapter,
             upstox_access_token=upstox_token,
             fyers_symbols=_parse_fyers_symbols(args.fyers_symbol),
@@ -110,6 +110,16 @@ def main() -> None:
     parser.add_argument("--from-date", default=DEFAULT_START_DATE.isoformat())
     parser.add_argument("--to-date", default="today")
     parser.add_argument("--chunk-days", type=int, default=60)
+    # The script name says 1minute for historical reasons; the pipeline is
+    # interval-agnostic. 30minute is what the Market-Profile research consumes
+    # (13 bars per NSE session), and for a 5-year expired-contract sweep it is
+    # ~25x fewer rows and requests than 1minute.
+    parser.add_argument(
+        "--interval",
+        choices=["1minute", "30minute", "day"],
+        default="1minute",
+        help="Candle interval to fetch and store (default 1minute).",
+    )
     parser.add_argument("--upstox-gap-seconds", type=float, default=0.4)
     parser.add_argument(
         "--fyers-symbol",

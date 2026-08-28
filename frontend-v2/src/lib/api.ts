@@ -440,6 +440,14 @@ export const getInstitutionalConvergenceDetail = (symbol: string, market?: "NSE"
   api.get(
     `/api/institutional-convergence${market === "MCX" ? "/commodity" : ""}/status/${encodeURIComponent(symbol)}`,
   );
+/**
+ * Unified Market Profile (mp_core, 2026-08-29): the ONE profile computation.
+ * Serves the full TPO snapshot (same shape the convergence lane emitted) plus
+ * the research intelligence layer, for any symbol with 30-minute bars —
+ * futures table preferred for the indices, spot fallback for everything else.
+ */
+export const getUnifiedMpSnapshot = (symbol: string) =>
+  api.get(`/api/mp/unified/snapshot?symbol=${encodeURIComponent(symbol)}`);
 export const runCommodityInstitutionalConvergence = () =>
   api.post("/api/institutional-convergence/commodity/run-once", undefined, { timeout: 650_000 });
 // Execution/analytics endpoints (deployed separately from the desk — the UI
@@ -800,3 +808,22 @@ export const getVanguardAttribution = (limit = 30) =>
 export const getVanguardBacktests = (limit = 30) =>
   api.get("/api/vanguard/backtests", { params: { limit } });
 export const getVanguardPipeline = () => api.get("/api/vanguard/pipeline");
+
+// The evidence layer. `/market` returns one row per SYMBOL at a bar — every
+// input the lane collected, the age of each one, and each filter leg's own
+// verdict — so the desk can show what the lane decided nothing ABOUT, not just
+// that it decided nothing. `/symbol` is deliberately one request per symbol
+// rather than eight: the detail panel renders those blocks together, and eight
+// round trips per click against a shared production database is the polling
+// pattern this repo has been bitten by before.
+export const getVanguardMarket = (ts?: string, limit = 400) =>
+  api.get("/api/vanguard/market", { params: { ts, limit } });
+export const getVanguardSymbol = (symbol: string, bars = 60, sessions = 60) =>
+  api.get(`/api/vanguard/symbol/${encodeURIComponent(symbol)}`, { params: { bars, sessions } });
+export const getVanguardRisk = () => api.get("/api/vanguard/risk");
+export const getVanguardCrossSection = (horizon?: number) =>
+  api.get("/api/vanguard/cross-section", { params: { horizon } });
+// Market-wide only: NSE's participant-wise OI is an aggregate by instrument
+// class with no per-symbol dimension, so this can never be a symbol column.
+export const getVanguardSentiment = (limit = 60) =>
+  api.get("/api/vanguard/sentiment", { params: { limit } });
