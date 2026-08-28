@@ -36,9 +36,27 @@ NO_TRADE = "NO_TRADE"
 # Penalty weights. Structural a-priori values, deliberately NOT swept against
 # realized returns — a weight tuned on the evaluation set is a parameter fitted
 # to the thing the promotion gates are supposed to be testing.
+# Penalties that do NOT vary with probability do the cross-sectional work —
+# separating a liquid ATM from an illiquid wing AT THE SAME p. They can be as
+# strong as the economics warrant, because they cannot invert the ordering in p.
 W_SLIPPAGE = 1.0
-W_TAIL = 0.5
-W_UNCERTAINTY = 0.5
+# The two penalties BELOW vary with p, so their combined slope must stay under
+# the expected-log slope or the ranking inverts. They are allowed at most this
+# share of the signal's slope; the weights are derived from it rather than
+# guessed, so the invariant cannot be broken by a later hand-edit.
+P_VARYING_PENALTY_BUDGET = 0.5
+
+# BOUNDED SO THE RANKING CANNOT INVERT.
+#
+# This penalty is largest at p = 0.5 and zero at either certainty, so it has
+# slope +/- 2 * W * fraction in p. At W = 0.5 that slope (0.020) EXCEEDED the
+# expected-log slope (0.012), which made total utility DECREASING in probability
+# for every p < 0.5 — the ranker preferred the contract least likely to profit.
+# Measured on real labels, the base rate of a profitable long is 0.15-0.31, so
+# essentially every candidate sat in the inverted region and the whole ranking
+# ran backwards.
+#
+# `assert_monotone_in_probability()` pins the invariant, and a test calls it.
 W_LIQUIDITY = 0.25
 W_CONCENTRATION = 0.5
 # Charged when a row has NO usable quoted spread. Deliberately punitive: a
@@ -73,6 +91,45 @@ STOP_RETURN_PCT = 0.20
 # A contract whose round trip cannot be paid for by the target move is
 # uneconomic by construction — no probability makes it worth taking.
 UNECONOMIC_MARGIN = 1.0
+
+
+def _signal_slope(fraction: float = SIZING_FRACTION) -> float:
+    """d(expected log growth)/dp — how much a point of probability is worth."""
+    return math.log1p(fraction * TARGET_RETURN_PCT) - math.log1p(-fraction * STOP_RETURN_PCT)
+
+
+# Split the allowed budget evenly between the two probability-varying penalties.
+# Tail slope  = W_TAIL * fraction            (at the moneyness cap)
+# Uncert slope = 2 * W_UNCERTAINTY * fraction
+_HALF_BUDGET = 0.5 * P_VARYING_PENALTY_BUDGET * _signal_slope()
+W_TAIL = _HALF_BUDGET / SIZING_FRACTION
+W_UNCERTAINTY = _HALF_BUDGET / (2.0 * SIZING_FRACTION)
+
+
+def probability_slope_budget(fraction: float = SIZING_FRACTION) -> tuple[float, float]:
+    """(expected-log slope, worst-case total penalty slope) in probability.
+
+    The utility must rise with the probability of the outcome it is ranking. A
+    penalty whose slope in p exceeds the signal's inverts the ordering, which is
+    not a tuning preference but a correctness property.
+    """
+    signal = _signal_slope(fraction)
+    # Only the uncertainty and tail penalties vary with p.
+    uncertainty = 2.0 * W_UNCERTAINTY * fraction
+    tail = W_TAIL * fraction  # d/dp of (1-p) * capped_steps, at the cap
+    return signal, uncertainty + tail
+
+
+def assert_monotone_in_probability(fraction: float = SIZING_FRACTION) -> None:
+    """Fail loudly if the weights would make utility fall as p rises."""
+    signal, penalty = probability_slope_budget(fraction)
+    if penalty >= signal:
+        raise ValueError(
+            f"ranking weights invert the ordering: probability-varying penalty "
+            f"slope {penalty:.6f} >= expected-log slope {signal:.6f}. Lower "
+            f"W_UNCERTAINTY / W_TAIL, or the ranker will prefer the candidate "
+            f"LEAST likely to profit."
+        )
 
 
 def _finite(value: Any) -> Optional[float]:

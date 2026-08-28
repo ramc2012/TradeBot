@@ -45,6 +45,10 @@ from candidate_capture.evaluation import (
     refusal_summary,
 )
 from candidate_capture.features import (
+    CONCRETE_TARGETS,
+    COST_DEPENDENT_TARGETS,
+    TARGET_GROSS_POSITIVE,
+    TARGET_MFE_HURDLE,
     TARGET_NET_POSITIVE,
     build_features,
     build_target,
@@ -87,6 +91,18 @@ MIN_TOTAL_SESSIONS = 12
 WF_MIN_TRAIN_SESSIONS = 8
 WF_CALIBRATE_SESSIONS = 2
 
+# ── premium floor ──────────────────────────────────────────────────────────
+# Below this premium the FLAT per-order brokerage swamps the position and the
+# percentage return stops describing the market.
+#
+# Measured: quantity is one lot for every row regardless of premium, so a
+# Rs.0.30 contract carries ~Rs.40 of brokerage against ~Rs.19.50 of notional —
+# a -363% "return" that no trade could realise. 14% of rows sat below Rs.30 and
+# produced 59% of the entire population mean loss. Excluding them is not
+# cherry-picking: it removes positions whose cost structure makes them
+# untradeable, and the exclusion is reported.
+MIN_PREMIUM_RUPEES = 30.0
+
 STATUS_CHAMPION = "champion"
 STATUS_REFUSED = "refused"
 STATUS_CANDIDATE = "candidate"
@@ -98,6 +114,18 @@ class SpecialistSpec:
     target: str = TARGET_NET_POSITIVE
     underlying_class: Optional[str] = None
     expiry_class: Optional[str] = None
+    # Restrict training to rows whose spread was MEASURED. Set automatically for
+    # cost-dependent targets; a concrete target does not need it.
+    measured_spread_only: Optional[bool] = None
+
+    def __post_init__(self) -> None:
+        if self.measured_spread_only is None:
+            self.measured_spread_only = self.target in COST_DEPENDENT_TARGETS
+
+    @property
+    def is_concrete(self) -> bool:
+        """True when nothing in the target passes through the cost model."""
+        return self.target in CONCRETE_TARGETS
 
     @property
     def name(self) -> str:
@@ -137,6 +165,15 @@ async def load_training_rows(spec: SpecialistSpec) -> list[dict[str, Any]]:
         "o.option_type <> 'NO_TRADE'",
     ]
     params: dict[str, Any] = {"horizon": int(spec.horizon_seconds)}
+    # Below the premium floor the flat brokerage swamps the notional and the
+    # percentage return stops describing the market — see MIN_PREMIUM_RUPEES.
+    clauses.append("COALESCE(s.bid, s.ltp) >= :min_premium")
+    params["min_premium"] = MIN_PREMIUM_RUPEES
+    if spec.measured_spread_only:
+        # A cost-dependent target is only meaningful where the spread was
+        # actually quoted. Reconstructed rows carry an estimate, so training a
+        # net-return model on them teaches the assumption, not the market.
+        clauses.append("s.spread_pct_estimated IS FALSE")
     if spec.underlying_class:
         clauses.append("s.underlying_class = :underlying_class")
         params["underlying_class"] = spec.underlying_class
@@ -160,7 +197,9 @@ async def load_training_rows(spec: SpecialistSpec) -> list[dict[str, Any]]:
                            s.features,
                            s.eligibility_status,
                            o.label_status, o.trade_arrived,
-                           o.option_net_return_pct, o.option_mfe_pct,
+                           o.option_gross_return_pct, o.option_net_return_pct,
+                           o.option_mfe_pct, o.option_mae_pct,
+                           o.spot_return_pct, o.spot_barrier_hit,
                            o.breakeven_move_pct
                       FROM candidate_outcomes o
                       JOIN candidate_snapshots s
@@ -458,6 +497,46 @@ async def train_specialist(
         unresolved_selections=unresolved,
     )
     passed = gates_passed(gates)
+
+    # PROMOTION REQUIRES A MEASURED COST.
+    #
+    # A concrete target is spread-free, so the model itself is honest — but the
+    # gates that decide promotion (net return, slippage robustness) run through
+    # the cost model, and on reconstructed rows that cost is an assumption. A
+    # model can therefore be a well-evidenced CANDIDATE on historical data and
+    # still not be promotable, and conflating the two is how an assumption gets
+    # to license live capital. It becomes eligible for champion once live
+    # captures supply measured spreads for its slice.
+    trained_on_estimates = spec.is_concrete
+    if trained_on_estimates and passed:
+        status = STATUS_CANDIDATE
+        promotion_note = (
+            "gates passed, but held at CANDIDATE: trained on reconstructed rows "
+            "whose spread is estimated, so the cost-dependent gates rest on an "
+            "assumption. Promotable once measured spreads exist for this slice."
+        )
+    else:
+        status = STATUS_CHAMPION if passed else STATUS_REFUSED
+        promotion_note = refusal_summary(gates)
+
+    # Rupee-weighted alongside mean-of-ratios: the two can disagree in SIGN when
+    # cheap contracts dominate the ratio average, so reporting only one hides
+    # which population the number describes.
+    weighted_num = 0.0
+    weighted_den = 0.0
+    for row in all_eval_rows:
+        net = row.get("option_net_return_pct")
+        mid = row.get("ltp") or row.get("bid")
+        if net is None or not mid:
+            continue
+        notional = float(mid)
+        weighted_num += float(net) * notional
+        weighted_den += notional
+    metrics["rupee_weighted_net_return"] = (
+        round(weighted_num / weighted_den, 8) if weighted_den else None
+    )
+    metrics["min_premium_rupees"] = MIN_PREMIUM_RUPEES
+    metrics["trained_on_estimated_spread"] = trained_on_estimates
     metrics["abstained_sets"] = abstained
     metrics["unresolved_selections"] = unresolved
     metrics["decision_sets"] = total_sets
@@ -474,9 +553,9 @@ async def train_specialist(
     result = {
         "specialist": spec.name,
         "version_name": version_name,
-        "status": STATUS_CHAMPION if passed else STATUS_REFUSED,
+        "status": status,
         "gates_passed": passed,
-        "reason": refusal_summary(gates),
+        "reason": promotion_note,
         "metrics": metrics,
         "gates": [g.as_dict() for g in gates],
         "train_rows": fit.n_rows,
@@ -488,7 +567,9 @@ async def train_specialist(
     if persist:
         await _persist_model(
             spec=spec, version_name=version_name, artifact=artifact,
-            feature_names=names, gates=gates, metrics=metrics, passed=passed,
+            feature_names=names, gates=gates, metrics=metrics,
+            passed=passed and status == STATUS_CHAMPION, status=status,
+            promotion_note=promotion_note,
             train_s=train_s, eval_s=eval_s,
             train_rows=fit.n_rows, eval_rows=len(all_eval_rows),
         )
@@ -508,6 +589,8 @@ async def _persist_model(
     eval_s: Sequence[date],
     train_rows: int,
     eval_rows: int,
+    status: str = STATUS_CHAMPION,
+    promotion_note: Optional[str] = None,
 ) -> None:
     """Write the version, retiring any incumbent only when this one is promoted.
 
@@ -568,7 +651,7 @@ async def _persist_model(
             {
                 "id": str(uuid.uuid4()),
                 "version_name": version_name,
-                "status": STATUS_CHAMPION if passed else STATUS_REFUSED,
+                "status": status,
                 "family": MODEL_FAMILY_LOGISTIC,
                 "horizon": spec.horizon_seconds,
                 "ucls": spec.underlying_class,
@@ -587,19 +670,36 @@ async def _persist_model(
                 "metrics": json.dumps(dict(metrics), default=str),
                 "gates": json.dumps([g.as_dict() for g in gates], default=str),
                 "passed": passed,
-                "reason": refusal_summary(gates),
+                "reason": promotion_note or refusal_summary(gates),
                 "promoted_at": datetime.now(UTC) if passed else None,
             },
         )
         await session.commit()
 
 
-DEFAULT_SPECIALISTS = (
-    SpecialistSpec(horizon_seconds=900, expiry_class="WEEKLY"),
-    SpecialistSpec(horizon_seconds=900, expiry_class="MONTHLY"),
-    SpecialistSpec(horizon_seconds=1800, expiry_class="WEEKLY"),
-    SpecialistSpec(horizon_seconds=1800, expiry_class="MONTHLY"),
-    SpecialistSpec(horizon_seconds=3600, expiry_class="MONTHLY"),
+# ── the specialist slate ───────────────────────────────────────────────────
+# CONCRETE targets on the reconstructed history: gross return and the MFE
+# hurdle are settled exactly by the tape, so they can be trained on backfilled
+# rows. The cost-dependent targets are deliberately absent here — they need a
+# MEASURED spread and so wait for live captures.
+#
+# Multi-day horizons are included because a long option needs a move large
+# enough to clear its own cost, and the measured MFE grows with horizon
+# (3.35% at 5m, 13.60% at 60m) while breakeven stays roughly flat.
+_CONCRETE_HORIZONS = (1800, 3600, 86400, 172800, 259200)
+
+DEFAULT_SPECIALISTS = tuple(
+    SpecialistSpec(horizon_seconds=h, target=t, expiry_class=c)
+    for h in _CONCRETE_HORIZONS
+    for t in (TARGET_GROSS_POSITIVE, TARGET_MFE_HURDLE)
+    for c in ("MONTHLY", "WEEKLY")
+)
+
+# Kept separate: these run only where the spread was quoted.
+COST_DEPENDENT_SPECIALISTS = tuple(
+    SpecialistSpec(horizon_seconds=h, target=TARGET_NET_POSITIVE, expiry_class=c)
+    for h in (900, 1800, 3600)
+    for c in ("MONTHLY", "WEEKLY")
 )
 
 

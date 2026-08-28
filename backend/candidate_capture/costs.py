@@ -213,6 +213,7 @@ def round_trip_cost(
     entry_ask: Optional[float] = None,
     exit_bid: Optional[float] = None,
     exit_ask: Optional[float] = None,
+    estimated_half_spread_pct: Optional[float] = None,
     fallback_half_spread_pct: float = FALLBACK_HALF_SPREAD_PCT,
 ) -> CostBreakdown:
     """Full cost of buying at `entry_mid` and selling at `exit_mid`.
@@ -231,8 +232,19 @@ def round_trip_cost(
     notes.extend(f"entry:{n}" for n in entry_notes)
     entry_measured = entry_half is not None
     if entry_half is None:
-        entry_half = fallback_half_spread_pct
-        notes.append("entry_half_spread_assumed")
+        # PREFER A CALLER'S ESTIMATE over the flat fallback. A reconstructed row
+        # has no quote but may carry a band-calibrated spread, and that estimate
+        # is the whole reason the row was restricted to a liquid band. Falling
+        # through to the generic constant would silently discard it — measured
+        # here as roughly doubling the charged spread and pushing every
+        # backfilled contract below breakeven.
+        estimated = _finite(estimated_half_spread_pct)
+        if estimated is not None and estimated > 0:
+            entry_half = estimated
+            notes.append("entry_half_spread_estimated_by_caller")
+        else:
+            entry_half = fallback_half_spread_pct
+            notes.append("entry_half_spread_assumed")
 
     exit_half, exit_notes = measured_half_spread_pct(bid=exit_bid, ask=exit_ask)
     notes.extend(f"exit:{n}" for n in exit_notes)
@@ -243,11 +255,11 @@ def round_trip_cost(
         # liquidity does not deteriorate over the hold. That assumption fails
         # precisely on the illiquid contracts where it matters most, hence the
         # separate `exit_half_spread_measured=False` flag on every row.
-        exit_half = entry_half if entry_measured else fallback_half_spread_pct
+        exit_half = entry_half
         notes.append(
             "exit_half_spread_assumed_from_entry"
             if entry_measured
-            else "exit_half_spread_assumed_flat"
+            else "exit_half_spread_assumed_from_entry_estimate"
         )
 
     if entry_v is None or exit_v is None or qty <= 0:
@@ -311,6 +323,7 @@ def breakeven_move_pct(
     lot_size: Optional[int] = None,
     entry_bid: Optional[float] = None,
     entry_ask: Optional[float] = None,
+    estimated_half_spread_pct: Optional[float] = None,
 ) -> Optional[float]:
     """The premium move, as a fraction, needed just to break even on a round trip.
 
@@ -344,6 +357,7 @@ def breakeven_move_pct(
         lot_size=lot_size,
         entry_bid=entry_bid,
         entry_ask=entry_ask,
+        estimated_half_spread_pct=estimated_half_spread_pct,
     )
     if (entry_v * high * qty) - ceiling_cost.total_rupees < 0:
         return None
@@ -358,6 +372,7 @@ def breakeven_move_pct(
             lot_size=lot_size,
             entry_bid=entry_bid,
             entry_ask=entry_ask,
+            estimated_half_spread_pct=estimated_half_spread_pct,
         )
         gross = (exit_mid - entry_v) * qty
         if gross - cost.total_rupees >= 0:

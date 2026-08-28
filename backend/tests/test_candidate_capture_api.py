@@ -36,6 +36,8 @@ class TestSurfaceShape:
             "/api/candidate-capture/decidability",
             "/api/candidate-capture/sessions",
             "/api/candidate-capture/filters",
+            "/api/candidate-capture/method",
+            "/api/candidate-capture/direction",
             "/api/candidate-capture/models",
             "/api/candidate-capture/training-runs",
             "/api/candidate-capture/snapshots",

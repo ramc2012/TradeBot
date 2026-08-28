@@ -15,20 +15,35 @@
  * TRADE, so a reasoned no-trade is the system WORKING, while a stale feed
  * producing no trade is the system BROKEN. They must never look the same.
  *
- * So this desk leads with WHY, not with WHAT:
+ * So this desk leads with WHY, not with WHAT — and, since 2026-08-27, with the
+ * EVIDENCE underneath the why. The desk previously showed that the lane
+ * decided nothing but not what it decided nothing ABOUT: not one symbol's
+ * collected market information appeared anywhere in the UI. The Market tab is
+ * that missing layer, and it is now the landing tab.
  *
- *   Selection  the filter funnel for one bar — how many symbols entered, and
- *              exactly which gate each cohort died at. "0 tickets" becomes
- *              "247 had a bar, 12 reached IGNITION, 0 had prior-session flow",
- *              and the binding constraint is named outright.
+ *   Market     every symbol the lane evaluated at this bar, with every input
+ *              it collected and — crucially — the AGE of each one. Click a row
+ *              for the full decision trace and every feed behind it. This is
+ *              the tab that answers "why not this one?".
+ *   Decision   the attrition ribbon: how a bar's universe narrows leg by leg,
+ *              which leg is the biggest killer, and how far the whole
+ *              cross-section sits from the conviction gate.
+ *   Sentiment  market-wide only — FII/DII positioning, PCR, volatility and
+ *              breadth. On its own tab rather than as a column because NSE's
+ *              participant file is an aggregate with no per-symbol dimension,
+ *              and rendering it beside a symbol would invent detail the
+ *              exchange does not publish.
  *   Book       fills / outcomes / equity, with unrealized P&L declared ABSENT
  *              rather than shown as 0 (nothing marks open paper positions).
+ *   Research   the cross-sectional IC study (the only measurement here that
+ *              can currently falsify M2) and M7's risk limits, including
+ *              whether they can actually bind.
  *   Attribution M10's cumulative record, every statistic suppressed to "not
  *              enough closed trades" until its own sample gate passes.
  *   Backtest   M8 replay, kept visually distinct from Attribution because a
  *              backtest is not a track record.
  *   Pipeline   per-feed coverage. The place a stale feed is supposed to be
- *              obvious, so the Selection tab's "no trade" can be trusted.
+ *              obvious, so the no-trade above it can be trusted.
  *
  * ─── Read-only, deliberately ────────────────────────────────────────────────
  *
@@ -37,7 +52,7 @@
  * `make daily-cycle` on the research host is the only thing that advances the
  * lane. A "run now" control would be that forbidden layer wearing a UI.
  */
-import { useMemo } from "react";
+import { useMemo, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import {
   Activity,
@@ -46,7 +61,9 @@ import {
   FlaskConical,
   GitBranch,
   Info,
+  Gauge,
   Layers,
+  Sigma,
 } from "lucide-react";
 
 import {
@@ -66,11 +83,22 @@ import {
   getVanguardAttribution,
   getVanguardBacktests,
   getVanguardBook,
+  getVanguardCrossSection,
   getVanguardFunnel,
+  getVanguardMarket,
   getVanguardPipeline,
+  getVanguardRisk,
   getVanguardSelection,
+  getVanguardSentiment,
   getVanguardSummary,
+  getVanguardSymbol,
 } from "@/lib/api";
+
+import { DecisionFlowTab } from "./DecisionFlow";
+import { MarketTab } from "./MarketTab";
+import { ResearchTab } from "./ResearchTab";
+import { SentimentTab } from "./SentimentTab";
+import { SymbolDetail } from "./SymbolDetail";
 
 type FunnelStage = { stage: string; surviving: number; gate: string };
 
@@ -89,7 +117,16 @@ function num(value: unknown): number | null {
 }
 
 export default function VanguardDesk() {
-  const [activeTab, setActiveTab] = useUrlTab("selection");
+  const [activeTab, setActiveTab] = useUrlTab("market");
+  // Which symbol's detail is open. Kept here rather than in MarketTab so the
+  // Decision tab's "these died here" chips can open the same panel — clicking a
+  // casualty in the funnel and clicking it in the grid must land in one place.
+  const [symbol, setSymbol] = useState<string | null>(null);
+
+  const openSymbol = (next: string | null) => {
+    setSymbol(next);
+    if (next) setActiveTab("market");
+  };
 
   const summary = useQuery({
     queryKey: ["vanguard", "summary"],
@@ -100,13 +137,13 @@ export default function VanguardDesk() {
     queryKey: ["vanguard", "funnel"],
     queryFn: (): Promise<any> => getVanguardFunnel().then((r) => r.data),
     refetchInterval: REFRESH_MS.summary,
-    enabled: activeTab === "selection",
+    enabled: activeTab === "decision",
   });
   const selection = useQuery({
     queryKey: ["vanguard", "selection"],
     queryFn: (): Promise<any> => getVanguardSelection().then((r) => r.data),
     refetchInterval: REFRESH_MS.summary,
-    enabled: activeTab === "selection",
+    enabled: activeTab === "decision",
   });
   const book = useQuery({
     queryKey: ["vanguard", "book"],
@@ -129,6 +166,35 @@ export default function VanguardDesk() {
     queryFn: (): Promise<any> => getVanguardPipeline().then((r) => r.data),
     enabled: activeTab === "pipeline",
   });
+  // The market grid is needed by BOTH the Market tab and the Decision tab (the
+  // conviction histogram is over the whole evaluated universe, not just
+  // survivors), so it is not gated on a single tab.
+  const market = useQuery({
+    queryKey: ["vanguard", "market"],
+    queryFn: (): Promise<any> => getVanguardMarket().then((r) => r.data),
+    refetchInterval: REFRESH_MS.summary,
+    enabled: activeTab === "market" || activeTab === "decision",
+  });
+  const detail = useQuery({
+    queryKey: ["vanguard", "symbol", symbol],
+    queryFn: (): Promise<any> => getVanguardSymbol(symbol as string).then((r) => r.data),
+    enabled: Boolean(symbol),
+  });
+  const crossSection = useQuery({
+    queryKey: ["vanguard", "cross-section"],
+    queryFn: (): Promise<any> => getVanguardCrossSection().then((r) => r.data),
+    enabled: activeTab === "research",
+  });
+  const sentiment = useQuery({
+    queryKey: ["vanguard", "sentiment"],
+    queryFn: (): Promise<any> => getVanguardSentiment().then((r) => r.data),
+    enabled: activeTab === "sentiment",
+  });
+  const risk = useQuery({
+    queryKey: ["vanguard", "risk"],
+    queryFn: (): Promise<any> => getVanguardRisk().then((r) => r.data),
+    enabled: activeTab === "research",
+  });
 
   const s = summary.data;
   const thresholds = s?.thresholds;
@@ -143,8 +209,11 @@ export default function VanguardDesk() {
       paperMode
       isFetching={summary.isFetching}
       tabs={[
-        { key: "selection", label: "Selection", icon: Filter },
+        { key: "market", label: "Market", icon: Layers },
+        { key: "decision", label: "Decision flow", icon: Filter },
+        { key: "sentiment", label: "Sentiment", icon: Gauge },
         { key: "book", label: "Book", icon: BookOpen },
+        { key: "research", label: "Research", icon: Sigma },
         { key: "attribution", label: "Attribution", icon: Activity },
         { key: "backtest", label: "Backtest", icon: FlaskConical },
         { key: "pipeline", label: "Pipeline", icon: GitBranch },
@@ -152,8 +221,32 @@ export default function VanguardDesk() {
       activeTab={activeTab}
       onTabChange={setActiveTab}
     >
-      {activeTab === "selection" && (
-        <SelectionTab funnel={funnel.data} selection={selection.data} thresholds={thresholds} />
+      {activeTab === "market" &&
+        (symbol ? (
+          <SymbolDetail
+            data={detail.data}
+            loading={detail.isLoading}
+            thresholds={market.data?.thresholds}
+            onBack={() => setSymbol(null)}
+          />
+        ) : (
+          <MarketTab
+            market={market.data}
+            selectedSymbol={symbol}
+            onPickSymbol={openSymbol}
+          />
+        ))}
+      {activeTab === "decision" && (
+        <DecisionFlowTab
+          funnel={funnel.data}
+          selection={selection.data}
+          market={market.data}
+          onPickSymbol={openSymbol}
+        />
+      )}
+      {activeTab === "sentiment" && <SentimentTab data={sentiment.data} />}
+      {activeTab === "research" && (
+        <ResearchTab crossSection={crossSection.data} risk={risk.data} />
       )}
       {activeTab === "book" && <BookTab book={book.data} capital={capital} summary={s} />}
       {activeTab === "attribution" && <AttributionTab data={attribution.data} />}
@@ -164,176 +257,13 @@ export default function VanguardDesk() {
 }
 
 // ─── Selection ──────────────────────────────────────────────────────────────
-
-function SelectionTab({
-  funnel,
-  selection,
-  thresholds,
-}: {
-  funnel?: { ts?: string; stages?: FunnelStage[]; binding_constraint?: string | null; survivors?: number };
-  selection?: { ts?: string | null; tickets?: any[]; note?: string; conviction_min?: number };
-  thresholds?: Record<string, any>;
-}) {
-  const stages = funnel?.stages ?? [];
-  const entered = stages[0]?.surviving ?? 0;
-  const survivors = funnel?.survivors ?? 0;
-  const binding = funnel?.binding_constraint;
-
-  return (
-    <div className="space-y-4">
-      <Section
-        title="Why this bar produced what it produced"
-        icon={<Filter size={16} />}
-        description={
-          funnel?.ts
-            ? `Candidate filter at ${formatIST(funnel.ts)}. Each row is the cohort still alive after that gate.`
-            : "No timing bar available yet."
-        }
-      >
-        {stages.length === 0 ? (
-          <p className="text-sm text-text-secondary">
-            No timing bars exist, so there is nothing to filter. This is a missing FEED, not a
-            no-trade decision — see the Pipeline tab.
-          </p>
-        ) : (
-          <>
-            <div className="mb-3 flex flex-wrap items-center gap-2">
-              <StatusBadge
-                label={survivors > 0 ? `${survivors} candidate${survivors === 1 ? "" : "s"}` : "no trade"}
-                variant={survivors > 0 ? "success" : "neutral"}
-              />
-              {binding && (
-                <StatusBadge label={`binding constraint: ${binding}`} variant="warn" icon={<Info size={12} />} />
-              )}
-              <span className="text-xs text-text-muted">
-                A reasoned no-trade is the designed default (doctrine #2), not a fault.
-              </span>
-            </div>
-            <div className="space-y-1.5">
-              {stages.map((stage, i) => {
-                const prev = i === 0 ? stage.surviving : stages[i - 1].surviving;
-                const lost = Math.max(0, prev - stage.surviving);
-                const pct = entered > 0 ? (stage.surviving / entered) * 100 : 0;
-                const isBinding = binding === stage.stage;
-                return (
-                  <div
-                    key={stage.stage}
-                    className={
-                      "rounded-xl border px-3 py-2 " +
-                      (isBinding
-                        ? "border-accent-amber/45 bg-accent-amber/10"
-                        : "border-bg-border bg-bg-secondary/25")
-                    }
-                  >
-                    <div className="flex items-baseline justify-between gap-3">
-                      <span className="text-sm font-medium text-text-primary">{stage.stage}</span>
-                      <span className="font-mono text-sm text-text-primary">
-                        {stage.surviving}
-                        {lost > 0 && <span className="ml-2 text-xs text-accent-red">−{lost}</span>}
-                      </span>
-                    </div>
-                    <div className="mt-1 h-1.5 overflow-hidden rounded-full bg-bg-border">
-                      <div
-                        className={isBinding ? "h-full bg-accent-amber" : "h-full bg-accent-blue/70"}
-                        style={{ width: `${Math.max(pct, stage.surviving > 0 ? 2 : 0)}%` }}
-                      />
-                    </div>
-                    <div className="mt-1 text-[11px] text-text-muted">{stage.gate}</div>
-                  </div>
-                );
-              })}
-            </div>
-          </>
-        )}
-      </Section>
-
-      <Section
-        title="Tickets & near-misses"
-        icon={<Layers size={16} />}
-        description={
-          selection?.ts
-            ? `Every candidate that cleared the filter at ${formatIST(selection.ts)} — emitted AND gated. Gated rows are kept on purpose (doctrine #5).`
-            : "No ticket has ever been generated."
-        }
-      >
-        {!selection?.tickets?.length ? (
-          <p className="text-sm text-text-secondary">
-            {selection?.note ??
-              "No candidates cleared the filter at this bar. Nothing was suppressed — nothing qualified."}
-          </p>
-        ) : (
-          <div className="overflow-x-auto">
-            <table className="w-full min-w-[720px] text-sm">
-              <thead>
-                <tr className="border-b border-bg-border text-left text-[11px] uppercase tracking-wider text-text-muted">
-                  <th className="py-2 pr-3">Symbol</th>
-                  <th className="py-2 pr-3">Dir</th>
-                  <th className="py-2 pr-3 text-right">Conviction</th>
-                  <th className="py-2 pr-3">Instrument</th>
-                  <th className="py-2 pr-3">Outcome</th>
-                </tr>
-              </thead>
-              <tbody>
-                {selection.tickets.map((t: any) => (
-                  <tr key={t.id} className="border-b border-bg-border/50">
-                    <td className="py-2 pr-3 font-medium text-text-primary">{t.symbol}</td>
-                    <td className="py-2 pr-3">
-                      <StatusBadge
-                        label={t.direction}
-                        variant={t.direction === "bullish" ? "success" : "error"}
-                      />
-                    </td>
-                    <td className="py-2 pr-3 text-right font-mono">
-                      {formatNumber(num(t.conviction), 1)}
-                      {selection.conviction_min != null && (
-                        <span className="ml-1 text-[11px] text-text-muted">
-                          / {selection.conviction_min}
-                        </span>
-                      )}
-                    </td>
-                    <td className="py-2 pr-3 font-mono text-xs text-text-secondary">
-                      {t.instrument ?? (
-                        <span className="text-text-muted">— never resolved</span>
-                      )}
-                    </td>
-                    <td className="py-2 pr-3">
-                      {t.emitted ? (
-                        <StatusBadge label="emitted" variant="success" />
-                      ) : (
-                        <span className="text-xs text-text-secondary">{t.gated_reason}</span>
-                      )}
-                    </td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
-        )}
-      </Section>
-
-      {thresholds && (
-        <Section
-          title="Thresholds in force"
-          description="Served by the API, not hardcoded here — the desk always shows the numbers the selector actually applied."
-        >
-          <div className="grid grid-cols-2 gap-2 md:grid-cols-3 lg:grid-cols-6">
-            <MetricTile size="sm" label="|flow| ≥" value={String(thresholds.flow_min_abs)} />
-            <MetricTile size="sm" label="|RS z| ≥" value={String(thresholds.sector_rs_min_abs_z)} />
-            <MetricTile size="sm" label="timing ≥" value={String(thresholds.timing_min_score)} />
-            <MetricTile size="sm" label="conviction ≥" value={String(thresholds.conviction_min)} />
-            <MetricTile size="sm" label="top N / bar" value={String(thresholds.top_n_per_bar)} />
-            <MetricTile
-              size="sm"
-              label="regime permits"
-              value={(thresholds.regime_permits ?? []).length}
-              detail={(thresholds.regime_permits ?? []).join(", ")}
-            />
-          </div>
-        </Section>
-      )}
-    </div>
-  );
-}
+//
+// SelectionTab lived here and drew the funnel plus the ticket table. Both moved
+// to ./DecisionFlow.tsx when the funnel stopped being a re-derivation of M6's
+// filter and became a projection of the journal M6 writes (see migration 006).
+// Deleted rather than left dormant: a second, older renderer of the same
+// numbers is exactly how the funnel and the selector drifted apart in the first
+// place.
 
 // ─── Book ───────────────────────────────────────────────────────────────────
 

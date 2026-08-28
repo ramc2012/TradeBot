@@ -14,6 +14,7 @@ wiped a lane's symbol list.
 from __future__ import annotations
 
 import asyncio
+import math
 from datetime import date, datetime, time as dt_time, timedelta, timezone
 from typing import Any, Mapping, Optional, Sequence
 
@@ -23,8 +24,11 @@ from sqlalchemy import text
 import bisect
 
 from candidate_capture.labelling import (
+    ALL_HORIZONS_SECONDS,
+    SESSION_HORIZON_TOLERANCE_SECONDS,
     BARRIER_SIGMA_MULTIPLE,
     DEFAULT_HORIZONS_SECONDS,
+    SESSION_HORIZONS,
     INDEX_TICK_SYMBOL,
     LABEL_VERSION,
     OK,
@@ -40,6 +44,7 @@ from candidate_capture.labelling import (
     build_spot_path,
     realized_vol_per_sqrt_second,
     select_forward_mark,
+    session_target_instant,
     tolerance_window,
 )
 from db.database import AsyncSessionLocal
@@ -50,6 +55,22 @@ IST = timezone(timedelta(hours=5, minutes=30))
 # NSE cash + F&O session, in IST. Used only to build literal UTC query bounds.
 SESSION_START_IST = dt_time(9, 15)
 SESSION_END_IST = dt_time(15, 30)
+
+
+def forward_bounds_utc(
+    session_date: date, *, forward_days: int = 0
+) -> tuple[datetime, datetime]:
+    """[session start, end of the window a multi-day horizon needs).
+
+    A session horizon looks at LATER sessions, so the forward readers must span
+    them. `forward_days` is padded generously in CALENDAR days because the
+    target lands N TRADING sessions out, and weekends plus holidays can put a
+    3-session horizon more than a week away.
+    """
+    start, end = session_bounds_utc(session_date)
+    if forward_days <= 0:
+        return start, end
+    return start, end + timedelta(days=forward_days)
 
 
 def session_bounds_utc(
@@ -82,7 +103,8 @@ async def load_anchors(session_date: date) -> list[dict[str, Any]]:
                     """
                     SELECT time, decision_id, underlying, underlying_class,
                            expiry, strike, option_type,
-                           ltp, bid, ask, volume, oi, spot, lot_size,
+                           ltp, bid, ask, spread_pct, spread_pct_estimated,
+                           volume, oi, spot, lot_size,
                            eligibility_status
                       FROM candidate_snapshots
                      WHERE time >= :start AND time < :end
@@ -96,7 +118,7 @@ async def load_anchors(session_date: date) -> list[dict[str, Any]]:
 
 
 async def load_spot_ticks(
-    underlying: str, session_date: date
+    underlying: str, session_date: date, *, forward_days: int = 0
 ) -> list[tuple[datetime, float]]:
     """The whole session's index tick path, ascending.
 
@@ -107,7 +129,7 @@ async def load_spot_ticks(
     symbol = INDEX_TICK_SYMBOL.get(str(underlying).upper())
     if not symbol:
         return []
-    start, end = session_bounds_utc(session_date)
+    start, end = forward_bounds_utc(session_date, forward_days=forward_days)
     async with AsyncSessionLocal() as session:
         rows = (
             await session.execute(
@@ -128,8 +150,138 @@ async def load_spot_ticks(
     return [(r[0], float(r[1])) for r in rows]
 
 
+def _merge_windows(
+    windows: Sequence[tuple[datetime, datetime]]
+) -> list[tuple[datetime, datetime]]:
+    """Collapse overlapping [start, end) windows so the query stays small."""
+    ordered = sorted(windows)
+    merged: list[tuple[datetime, datetime]] = []
+    for start, end in ordered:
+        if merged and start <= merged[-1][1]:
+            merged[-1] = (merged[-1][0], max(merged[-1][1], end))
+        else:
+            merged.append((start, end))
+    return merged
+
+
+# The broker-history sources. `live_tick` and the tick-derived aggregates carry
+# the documented cross-symbol contamination (measured here: 2x the true 1-minute
+# range), so a path built from them would report excursions that never happened.
+SPOT_CANDLE_SOURCES = ("upstox_spot_index", "fyers_spot_index", "upstox_spot", "upstox")
+
+
+async def load_spot_bars(
+    underlying: str, session_date: date, forward_days: int
+) -> list[tuple[datetime, float]]:
+    """Multi-day spot path from 1-minute candles, expanded to capture extremes.
+
+    Ticks are the right source INTRADAY, but a 3-session horizon needs ~450k of
+    them per underlying-session and that does not finish. One-minute bars over
+    the same span are ~1,900 rows and lose nothing that matters at a day scale.
+
+    Each bar contributes its LOW and HIGH as separate points so MFE/MAE still
+    see the true extremes; within-bar ordering is arbitrary, which only affects
+    first-touch resolution inside a single minute.
+    """
+    start, end = forward_bounds_utc(session_date, forward_days=forward_days)
+    async with AsyncSessionLocal() as session:
+        rows = (
+            await session.execute(
+                text(
+                    """
+                    SELECT time, low, high, close
+                      FROM underlying_spot_candles
+                     WHERE time >= :start AND time < :end
+                       AND underlying = :underlying
+                       AND interval = '1minute'
+                       AND source = ANY(:sources)
+                       AND low IS NOT NULL AND high IS NOT NULL AND close IS NOT NULL
+                     ORDER BY time
+                    """
+                ),
+                {
+                    "start": start, "end": end, "underlying": underlying,
+                    "sources": list(SPOT_CANDLE_SOURCES),
+                },
+            )
+        ).fetchall()
+    path: list[tuple[datetime, float]] = []
+    for stamp, low, high, close in rows:
+        path.append((stamp, float(low)))
+        path.append((stamp, float(high)))
+        path.append((stamp, float(close)))
+    return path
+
+
+DAILY_VOL_LOOKBACK_SESSIONS = 20
+MIN_DAILY_VOL_SESSIONS = 10
+
+
+async def load_daily_closes(
+    underlying: str, session_date: date, lookback: int = DAILY_VOL_LOOKBACK_SESSIONS
+) -> list[float]:
+    """Trailing session closes, oldest first — the basis for a MULTI-DAY barrier.
+
+    A session horizon must not take its barrier from intraday volatility scaled
+    by sqrt(t). Measured on this data, that extrapolation overstates the barrier
+    so badly that the confirmed-direction rate collapses from ~10% intraday to
+    ~0% at three days: mean |sigma| falls 0.45 -> 0.09 purely because the
+    denominator grows faster than any real move.
+
+    Correcting calendar seconds to TRADING seconds only halves the error, which
+    is itself the finding: intraday variance does not scale to multi-day
+    variance, because index moves mean-revert within the day. So multi-day
+    volatility is measured from actual close-to-close returns instead of
+    extrapolated.
+    """
+    end = datetime.combine(session_date, SESSION_START_IST, tzinfo=IST).astimezone(UTC)
+    start = end - timedelta(days=lookback * 2 + 10)
+    async with AsyncSessionLocal() as session:
+        rows = (
+            await session.execute(
+                text(
+                    """
+                    SELECT (time AT TIME ZONE 'Asia/Kolkata')::date AS sess,
+                           (ARRAY_AGG(close ORDER BY time DESC))[1] AS close
+                      FROM underlying_spot_candles
+                     WHERE time >= :start AND time < :end
+                       AND underlying = :underlying
+                       AND interval IN ('30minute', '1minute')
+                       AND source = ANY(:sources)
+                       AND close IS NOT NULL
+                     GROUP BY 1 ORDER BY 1
+                    """
+                ),
+                {
+                    "start": start, "end": end, "underlying": underlying,
+                    "sources": list(SPOT_CANDLE_SOURCES),
+                },
+            )
+        ).fetchall()
+    return [float(r[1]) for r in rows if r[1] is not None][-lookback:]
+
+
+def daily_sigma(closes: Sequence[float]) -> Optional[float]:
+    """Std-dev of close-to-close log returns; None below a usable sample."""
+    usable = [c for c in closes if c and c > 0]
+    if len(usable) < MIN_DAILY_VOL_SESSIONS:
+        return None
+    rets = [
+        math.log(cur / prev) for prev, cur in zip(usable, usable[1:]) if prev > 0 and cur > 0
+    ]
+    if len(rets) < 2:
+        return None
+    mean = sum(rets) / len(rets)
+    var = sum((r - mean) ** 2 for r in rets) / (len(rets) - 1)
+    return math.sqrt(var) if var > 0 else None
+
+
 async def load_forward_option_samples(
-    *, underlying: str, session_date: date
+    *,
+    underlying: str,
+    session_date: date,
+    forward_days: int = 0,
+    extra_windows: Optional[Sequence[tuple[datetime, datetime]]] = None,
 ) -> dict[tuple[Any, float, str], list[dict[str, Any]]]:
     """Forward marks for every contract of one underlying, keyed by contract.
 
@@ -147,7 +299,28 @@ async def load_forward_option_samples(
     Both are keyed on the full logical contract — (underlying, expiry, strike,
     option_type) — never on a broker instrument key.
     """
-    start, end = session_bounds_utc(session_date)
+    # TARGETED WINDOWS, NOT A BULK MULTI-DAY LOAD.
+    #
+    # A session horizon points at a handful of specific instants days away, so
+    # the forward data it needs is a few hours around each — not every row in
+    # between. Loading the full span was ~10 days x 75k rows per underlying-
+    # session and did not finish; the union of narrow windows is a small
+    # fraction of that and answers exactly the same question.
+    windows = [session_bounds_utc(session_date)]
+    if extra_windows:
+        windows.extend(extra_windows)
+    windows = _merge_windows(windows)
+    # Bound by the UNION of windows, not their envelope. An earlier version
+    # merged the windows and then queried min(start)..max(end), which for a
+    # 3-session horizon spans five days — the whole cost the windows exist to
+    # avoid. One session took 70 minutes that way.
+    where_time = " OR ".join(
+        f"(time >= :w{i}s AND time < :w{i}e)" for i in range(len(windows))
+    )
+    window_params: dict[str, Any] = {}
+    for i, (w_start, w_end) in enumerate(windows):
+        window_params[f"w{i}s"] = w_start
+        window_params[f"w{i}e"] = w_end
     out: dict[tuple[Any, float, str], list[dict[str, Any]]] = {}
 
     async with AsyncSessionLocal() as session:
@@ -158,13 +331,13 @@ async def load_forward_option_samples(
                     SELECT time, expiry, strike, option_type,
                            ltp, bid, ask, volume, oi
                       FROM candidate_snapshots
-                     WHERE time >= :start AND time < :end
+                     WHERE (""" + where_time + """)
                        AND underlying = :underlying
                        AND option_type IN ('CE','PE')
                      ORDER BY time
                     """
                 ),
-                {"start": start, "end": end, "underlying": underlying},
+                {**window_params, "underlying": underlying},
             )
         ).mappings().all()
 
@@ -176,12 +349,12 @@ async def load_forward_option_samples(
                         """
                         SELECT time, expiry, strike, option_type, ltp, oi, volume
                           FROM option_chain_snapshots
-                         WHERE time >= :start AND time < :end
+                         WHERE (""" + where_time + """)
                            AND symbol = :symbol
                          ORDER BY time
                         """
                     ),
-                    {"start": start, "end": end, "symbol": chain_symbol},
+                    {**window_params, "symbol": chain_symbol},
                 )
             ).mappings().all()
             if chain_symbol
@@ -304,10 +477,26 @@ async def load_lot_sizes(underlying: str) -> dict[tuple[Any, float, str], int]:
                 {"underlying": underlying},
             )
         ).mappings().all()
-    return {
+    exact = {
         (r["expiry"], float(r["strike"]), str(r["option_type"])): int(r["lot_size"])
         for r in rows
     }
+    # MODAL FALLBACK for contracts the catalog no longer lists.
+    #
+    # fo_contract_catalog holds only FORWARD contracts, so a backfilled row on
+    # an expiry that has already passed resolves nothing — measured at ~20% of
+    # reconstructed rows. Without a lot size the quantity is 0, the trade is
+    # uncostable, and the row silently drops out of training.
+    #
+    # The modal lot for the underlying is an approximation and can be an
+    # anachronism if the exchange revised the lot mid-history, but it is bounded
+    # and visible, whereas dropping a fifth of the data is neither. Exact
+    # matches always win; this only fills the gaps.
+    counts: dict[int, int] = {}
+    for value in exact.values():
+        counts[value] = counts.get(value, 0) + 1
+    modal = max(counts, key=lambda k: counts[k]) if counts else None
+    return {"__modal__": modal, **exact} if modal is not None else exact
 
 
 def _slice_forward(
@@ -474,14 +663,39 @@ async def persist_outcomes(rows: Sequence[Mapping[str, Any]]) -> int:
     return len(rows)
 
 
+async def load_session_calendar() -> list[date]:
+    """Sessions that actually have captured rows — the calendar a session
+    horizon steps along. Read from the data rather than a holiday table so a
+    day with no capture cannot be counted as a trading day."""
+    async with AsyncSessionLocal() as session:
+        rows = (
+            await session.execute(
+                text("SELECT DISTINCT session_date FROM candidate_snapshots ORDER BY 1")
+            )
+        ).fetchall()
+    return [r[0] for r in rows]
+
+
+# Calendar days of forward data to load when a session horizon is requested.
+# 3 trading sessions can be 5 calendar days across a weekend, more with a
+# holiday; padded so the target instant is inside the loaded window.
+FORWARD_DAYS_FOR_SESSION_HORIZONS = 10
+
+
 async def label_session(
     session_date: date,
     *,
     horizons: Sequence[int] = DEFAULT_HORIZONS_SECONDS,
     persist: bool = True,
+    calendar: Optional[Sequence[date]] = None,
 ) -> dict[str, Any]:
     """Label every candidate captured in one session, at every horizon."""
     started = datetime.now(UTC)
+    needs_sessions = any(h in SESSION_HORIZONS for h in horizons)
+    forward_days = FORWARD_DAYS_FOR_SESSION_HORIZONS if needs_sessions else 0
+    sessions_calendar = list(calendar) if calendar is not None else (
+        await load_session_calendar() if needs_sessions else []
+    )
     anchors = await load_anchors(session_date)
     if not anchors:
         return {
@@ -499,12 +713,56 @@ async def label_session(
 
     # Serialized per underlying on purpose — see the module docstring.
     for underlying, rows in by_underlying.items():
+        # Spot for a multi-day horizon comes from the tick tape too, but only
+        # out to the furthest target instant rather than a fixed pad.
+        spot_forward_days = 0
+        if needs_sessions and rows:
+            latest = max(a["time"] for a in rows)
+            furthest = max(
+                (
+                    session_target_instant(latest, h, sessions_calendar)
+                    for h in horizons
+                    if h in SESSION_HORIZONS
+                ),
+                default=None,
+            )
+            if furthest is not None:
+                spot_forward_days = max(0, (furthest.date() - session_date).days + 1)
+        # Intraday horizons use the tick tape; multi-day uses 1-minute bars.
         ticks = await load_spot_ticks(underlying, session_date)
+        bars = (
+            await load_spot_bars(underlying, session_date, spot_forward_days)
+            if spot_forward_days > 0
+            else []
+        )
+        bar_stamps = [t for t, _ in bars]
+        # Multi-day barriers come from close-to-close volatility, not from an
+        # intraday estimate stretched by sqrt(t).
+        sigma_daily = (
+            daily_sigma(await load_daily_closes(underlying, session_date))
+            if needs_sessions else None
+        )
         # Precomputed once so every slice below is a binary search.
         stamps = [t for t, _ in ticks]
         dark = await option_source_dark(underlying, session_date)
+        # The instants a session horizon points at, computed up front so the
+        # forward reader can fetch only those windows.
+        target_windows: list[tuple[datetime, datetime]] = []
+        if needs_sessions:
+            grid = sorted({a["time"] for a in rows})
+            for horizon in (h for h in horizons if h in SESSION_HORIZONS):
+                for anchor_time in grid:
+                    target = session_target_instant(
+                        anchor_time, horizon, sessions_calendar
+                    )
+                    if target is None:
+                        continue
+                    pad = timedelta(seconds=SESSION_HORIZON_TOLERANCE_SECONDS)
+                    target_windows.append((target - pad, target + pad))
         forward = await load_forward_option_samples(
-            underlying=underlying, session_date=session_date
+            underlying=underlying,
+            session_date=session_date,
+            extra_windows=target_windows,
         )
         lots = await load_lot_sizes(underlying)
 
@@ -516,7 +774,7 @@ async def label_session(
                 str(anchor["option_type"]),
             )
             samples = forward.get(key, []) if key[1] is not None else []
-            lot_size = lots.get(key) if key[1] is not None else None
+            lot_size = (lots.get(key) or lots.get("__modal__")) if key[1] is not None else None
             anchor_spot = anchor.get("spot") or _spot_at(ticks, anchor["time"], stamps)
             sigma = _anchor_sigma(ticks, anchor["time"], stamps)
 
@@ -527,16 +785,54 @@ async def label_session(
                 await asyncio.sleep(0)
 
             for horizon in horizons:
-                width = barrier_width_for_horizon(sigma, horizon)
+                is_session_horizon = horizon in SESSION_HORIZONS
+
+                # A session horizon points at the same time-of-day N TRADING
+                # sessions later, so a Friday anchor resolves to Monday rather
+                # than to a Saturday when nothing trades.
+                target_lag: Optional[float] = None
+                if is_session_horizon:
+                    target = session_target_instant(
+                        anchor["time"], horizon, sessions_calendar
+                    )
+                    if target is None:
+                        continue  # not enough later sessions exist yet
+                    target_lag = (target - anchor["time"]).total_seconds()
+
+                effective = target_lag if target_lag is not None else float(horizon)
+
+                # Multi-day barriers come from close-to-close volatility.
+                # Extrapolating a 30-minute estimate by sqrt(t) overstates them
+                # so badly that the confirmed-direction rate collapsed to ~0%:
+                # mean |sigma| fell 0.45 -> 0.09 purely because the denominator
+                # grew faster than any real move could.
+                if is_session_horizon:
+                    steps = SESSION_HORIZONS[horizon]
+                    width = (
+                        round(sigma_daily * math.sqrt(steps) * BARRIER_SIGMA_MULTIPLE, 8)
+                        if sigma_daily
+                        else None
+                    )
+                else:
+                    width = barrier_width_for_horizon(sigma, horizon)
+
+                # Ticks intraday; 1-minute bars for the multi-day path, which is
+                # ~240x cheaper and loses nothing at a day scale.
+                path_src, path_stamps = (
+                    (bars, bar_stamps) if is_session_horizon else (ticks, stamps)
+                )
                 spot_path = build_spot_path(
                     anchor_price=anchor_spot,
-                    forward_ticks=_slice_forward(ticks, anchor["time"], horizon, stamps),
+                    forward_ticks=_slice_forward(
+                        path_src, anchor["time"], int(effective), path_stamps
+                    ),
                     anchor_time=anchor["time"],
                     horizon_seconds=horizon,
                     barrier_width_pct=width,
+                    target_lag_seconds=target_lag,
                 )
                 window_end = anchor["time"] + timedelta(
-                    seconds=tolerance_window(horizon)[1]
+                    seconds=tolerance_window(horizon, target_lag_seconds=target_lag)[1]
                 )
                 mark = select_forward_mark(
                     samples=[s for s in samples if s["time"] <= window_end],
@@ -547,6 +843,7 @@ async def label_session(
                     # against ltp — two different entry prices on one row.
                     anchor_price=_entry_mid(anchor),
                     horizon_seconds=horizon,
+                    target_lag_seconds=target_lag,
                 )
                 all_rows.append(
                     build_outcome_row(

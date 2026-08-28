@@ -573,3 +573,259 @@ async def list_training_runs(limit: int = 30) -> list[dict[str, Any]]:
             )
         ).mappings().all()
     return [dict(r) for r in rows]
+
+
+# ══════════════════════════════════════════════════════════════════════════
+# Method transparency — what the model is actually fed and asked
+# ══════════════════════════════════════════════════════════════════════════
+async def direction_report(
+    *, session_date: Optional[date] = None
+) -> dict[str, Any]:
+    """Confirmed-direction rates by horizon, with the strength distribution.
+
+    A direction label is only useful if its base rate is neither ~0 nor ~1, so
+    the rate is reported alongside the mean |sigma| and efficiency that produced
+    it — a collapsed rate is then diagnosable as a volatility-scaling problem
+    rather than a market fact.
+    """
+    from candidate_capture.features import (
+        MIN_DIRECTION_EFFICIENCY, MIN_DIRECTION_SIGMA,
+    )
+
+    clauses = [
+        "spot_return_pct IS NOT NULL",
+        "spot_barrier_width_pct IS NOT NULL",
+        "spot_barrier_width_pct > 0",
+    ]
+    params: dict[str, Any] = {
+        "min_sigma": MIN_DIRECTION_SIGMA, "min_eff": MIN_DIRECTION_EFFICIENCY,
+    }
+    if session_date is not None:
+        clauses.append("session_date = :session_date")
+        params["session_date"] = session_date
+
+    async with AsyncSessionLocal() as session:
+        rows = (
+            await session.execute(
+                text(
+                    f"""
+                    WITH d AS (
+                      SELECT horizon_seconds,
+                             spot_return_pct / spot_barrier_width_pct AS sigma,
+                             CASE WHEN (spot_mfe_pct - spot_mae_pct) > 0
+                                  THEN LEAST(abs(spot_return_pct)
+                                             / (spot_mfe_pct - spot_mae_pct), 1.0) END AS eff
+                        FROM candidate_outcomes
+                       WHERE {' AND '.join(clauses)}
+                    )
+                    SELECT horizon_seconds,
+                           count(*) AS rows,
+                           round(avg(abs(sigma))::numeric, 3) AS avg_abs_sigma,
+                           round(avg(eff)::numeric, 3) AS avg_efficiency,
+                           count(*) FILTER (
+                             WHERE eff >= :min_eff AND sigma >= :min_sigma) AS up,
+                           count(*) FILTER (
+                             WHERE eff >= :min_eff AND sigma <= -:min_sigma) AS down,
+                           count(*) FILTER (
+                             WHERE eff >= :min_eff AND abs(sigma) >= :min_sigma) AS confirmed
+                      FROM d
+                     GROUP BY 1 ORDER BY 1
+                    """
+                ),
+                params,
+            )
+        ).mappings().all()
+
+    out = []
+    for r in rows:
+        record = dict(r)
+        n = int(record["rows"] or 0)
+        record["confirmed_rate"] = round(int(record["confirmed"]) / n, 4) if n else None
+        record["up_rate"] = round(int(record["up"]) / n, 4) if n else None
+        record["down_rate"] = round(int(record["down"]) / n, 4) if n else None
+        out.append(record)
+
+    return {
+        "definition": {
+            "min_sigma": MIN_DIRECTION_SIGMA,
+            "min_efficiency": MIN_DIRECTION_EFFICIENCY,
+            "sigma": "return divided by the 1-sigma move over the same horizon",
+            "efficiency": "|return| / (MFE - MAE): the share of range that was directional",
+            "note": (
+                "Both bars must clear. Chop that closes positive is UNCONFIRMED, and a "
+                "move too small for its own volatility is UNCONFIRMED however clean."
+            ),
+        },
+        "by_horizon": out,
+    }
+
+
+def method_card() -> dict[str, Any]:
+    """The inputs, labels and normalization, as data rather than prose.
+
+    Surfaced in the UI because "the model was refused" is not reviewable unless
+    a reader can see what it was given and what it was asked to predict. Every
+    value here is read from the code that actually runs, so the card cannot
+    drift from the implementation.
+    """
+    from candidate_capture import features as F
+    from candidate_capture import model as M
+    from candidate_capture import ranking as R
+    from candidate_capture import training as T
+    from candidate_capture import evaluation as E
+
+    names = F.feature_names()
+    groups = {
+        "geometry": names[0:6],
+        "quote": names[6:9],
+        "activity": names[9:14],
+        "pricing": names[14:23],
+        "chain_context": names[23:30],
+        "one_hot": names[30:],
+    }
+    signal, penalty = R.probability_slope_budget()
+
+    return {
+        "features": {
+            "count": len(names),
+            "groups": [
+                {"name": g, "count": len(v), "columns": v} for g, v in groups.items()
+            ],
+            "leakage_guard": (
+                "build_features() takes ONLY a candidate_snapshots row. No outcome "
+                "field is reachable from it, so a leak would require changing the "
+                "signature."
+            ),
+            "normalization": [
+                {
+                    "rule": "no global standardisation",
+                    "why": (
+                        "scaling by a dataset-wide mean or sd leaks the future into "
+                        "the past, because the statistic includes days being predicted"
+                    ),
+                },
+                {
+                    "rule": "scale-free or row-relative only",
+                    "why": (
+                        "ratios, ladder-step counts and percentiles are already "
+                        "comparable; the rest are normalised against a value from the "
+                        "SAME row (theta/premium, iv - atm_iv, gamma x spot)"
+                    ),
+                },
+                {
+                    "rule": "log1p for heavy tails",
+                    "why": "OI, volume and premium span orders of magnitude",
+                },
+                {
+                    "rule": "one-hot with FIXED vocabularies",
+                    "why": (
+                        "a class absent from one training window must not shift every "
+                        "later column index; UNKNOWN gets no column at all, so it "
+                        "cannot acquire a fitted coefficient"
+                    ),
+                },
+                {
+                    "rule": "missing -> 0 plus a *_missing indicator",
+                    "why": "an imputed value would be indistinguishable from a real one",
+                },
+            ],
+        },
+        "targets": {
+            "concrete": [
+                {
+                    "name": F.TARGET_DIRECTION_UP,
+                    "asks": "did the underlying move UP in a confirmed direction with strength",
+                    "definition": (
+                        f"return/sigma >= {F.MIN_DIRECTION_SIGMA} AND efficiency >= "
+                        f"{F.MIN_DIRECTION_EFFICIENCY}, where efficiency = |return| / (MFE - MAE)"
+                    ),
+                    "cost_free": True,
+                },
+                {
+                    "name": F.TARGET_DIRECTION_STRONG,
+                    "asks": "was there a confirmed directional move at all, either way",
+                    "definition": "same bars, sign ignored",
+                    "cost_free": True,
+                },
+                {
+                    "name": F.TARGET_GROSS_POSITIVE,
+                    "asks": "did the option gain, before costs",
+                    "definition": "gross return > 0, LTP to LTP",
+                    "cost_free": True,
+                },
+                {
+                    "name": F.TARGET_MFE_HURDLE,
+                    "asks": f"did the option ever gain {F.MFE_HURDLE_PCT:.0%} in the horizon",
+                    "definition": f"max(MFE, 0) >= {F.MFE_HURDLE_PCT}",
+                    "cost_free": True,
+                    "caveat": (
+                        "predicts an EXCURSION while evaluation measures hold-to-horizon "
+                        "return; monetising it needs a take-profit exit the labeller "
+                        "does not model"
+                    ),
+                },
+            ],
+            "cost_dependent": [
+                {
+                    "name": F.TARGET_NET_POSITIVE,
+                    "asks": "did the option gain after real costs",
+                    "requires": "a MEASURED spread — trained on live captures only",
+                    "cost_free": False,
+                },
+            ],
+            "unmeasurable_is_null": (
+                "every target returns None rather than 0 when the question could not "
+                "be answered, so measurement failures never become a majority class"
+            ),
+        },
+        "model": {
+            "family": M.MODEL_FAMILY_LOGISTIC,
+            "why_not_gbt": (
+                "scikit-learn, LightGBM, XGBoost and Torch are not installed in the "
+                "backend image; adding one to the container that runs live trading is "
+                "not warranted for a baseline whose job is to be a floor"
+            ),
+            "regularisation": f"L2, lambda={M.DEFAULT_L2}, intercept unpenalised",
+            "solver": "Newton-IRLS, deterministic (no seed, no shuffling)",
+            "calibration": "isotonic (PAV) fitted on a SEPARATE held-out slice",
+            "min_train_rows": M.MIN_TRAIN_ROWS,
+            "min_minority_rows": M.MIN_MINORITY_ROWS,
+        },
+        "evaluation": {
+            "scheme": "walk-forward, expanding window, whole sessions",
+            "why": (
+                "rows in one decision set share a spot path and a chain snapshot, so a "
+                "shuffled split puts near-duplicates of a training row into the test set"
+            ),
+            "standard_errors": "clustered on session_date",
+            "clustering_evidence": (
+                "measured previously in this repo: day-clustering widened an SE 2.5x, "
+                "and nominal SEs ran 1.6-4.7x too small"
+            ),
+            "min_eval_sessions": E.MIN_EVAL_SESSIONS,
+            "min_selected_trades": E.MIN_SELECTED_TRADES,
+            "premium_floor_rupees": T.MIN_PREMIUM_RUPEES,
+        },
+        "ranking": {
+            "abstain_utility": 0.0,
+            "target_return_pct": R.TARGET_RETURN_PCT,
+            "stop_return_pct": R.STOP_RETURN_PCT,
+            "monotonicity": {
+                "expected_log_slope": round(signal, 6),
+                "probability_varying_penalty_slope": round(penalty, 6),
+                "holds": penalty < signal,
+                "why": (
+                    "penalties that vary with probability must stay under the signal's "
+                    "slope or utility FALLS as probability rises; this was violated and "
+                    "inverted the ranking below p=0.5"
+                ),
+            },
+        },
+        "limits": [
+            "backfilled rows carry an ESTIMATED spread, so cost-dependent targets are "
+            "trained on live captures only, and backfill-trained models are capped at "
+            "CANDIDATE and can never be promoted to champion",
+            "a gate refusal means 'not trustworthy with capital', NOT 'no signal' — "
+            "discrimination is measured separately in the experiment battery",
+        ],
+    }

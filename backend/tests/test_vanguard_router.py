@@ -89,6 +89,15 @@ requires_worktree = pytest.mark.skipif(
         (vanguard.TIMING_MIN_SCORE, "TIMING_MIN_SCORE"),
         (vanguard.CONVICTION_MIN, "CONVICTION_MIN"),
         (vanguard.TOP_N_PER_BAR, "TOP_N_PER_BAR"),
+        # The freshness legs added 2026-08-27. The funnel labels each leg with
+        # the numbers it applies, so a drift here would have the desk telling a
+        # trader a flow score is stale at a threshold the selector no longer uses.
+        (vanguard.FLOW_MAX_AGE_SESSIONS, "FLOW_MAX_AGE_SESSIONS"),
+        (vanguard.RS_MAX_AGE_SESSIONS, "RS_MAX_AGE_SESSIONS"),
+        (vanguard.REGIME_MAX_AGE_BARS, "REGIME_MAX_AGE_BARS"),
+        (vanguard.FLOW_MIN_INGREDIENTS, "FLOW_MIN_INGREDIENTS"),
+        # /risk computes the sizing-coherence arithmetic from M6's own stop.
+        (vanguard.STOP_PCT, "STOP_PCT"),
     ],
 )
 def test_router_scalar_thresholds_match_m6(router_value, m6_name):
@@ -122,6 +131,8 @@ def test_every_mirrored_constant_is_actually_covered_by_this_test():
     covered = {
         "FLOW_MIN_ABS", "SECTOR_RS_MIN_ABS_Z", "TIMING_MIN_SCORE",
         "CONVICTION_MIN", "TOP_N_PER_BAR", "REGIME_PERMITS",
+        "FLOW_MAX_AGE_SESSIONS", "RS_MAX_AGE_SESSIONS", "REGIME_MAX_AGE_BARS",
+        "FLOW_MIN_INGREDIENTS", "STOP_PCT",
     }
     m6_names = set(_m6_constants())
     mirrored = {
@@ -140,3 +151,81 @@ def test_funnel_thresholds_are_exposed_in_the_summary_response_shape():
     assert vanguard.FLOW_MIN_ABS > 0
     assert vanguard.REGIME_PERMITS, "an empty permit list would silently gate everything out"
     assert vanguard.TOP_N_PER_BAR >= 1
+
+
+# ── the second mirror: M7's risk limits ────────────────────────────────────
+#
+# /risk renders the configured limits AND states whether they can actually
+# bind. Both halves are wrong if the mirrored numbers drift, and the "cannot
+# bind" claim is the more dangerous one to get wrong — it would either invent
+# a control that is not there or deny one that is.
+
+_M7_RELATIVE = Path(".claude") / "worktrees" / "vanguard-phase-1" / "vanguard" / "fusion" / "m7_risk.py"
+
+
+def _locate_m7() -> Path | None:
+    for ancestor in Path(__file__).resolve().parents:
+        candidate = ancestor / _M7_RELATIVE
+        if candidate.exists():
+            return candidate
+    return None
+
+
+_M7_SOURCE = _locate_m7()
+requires_m7 = pytest.mark.skipif(_M7_SOURCE is None, reason="vanguard worktree absent")
+
+
+def _m7_constants() -> dict[str, object]:
+    tree = ast.parse(_M7_SOURCE.read_text())
+    found: dict[str, object] = {}
+    for node in tree.body:
+        if isinstance(node, ast.Assign) and len(node.targets) == 1 and isinstance(node.targets[0], ast.Name):
+            try:
+                found[node.targets[0].id] = ast.literal_eval(node.value)
+            except ValueError:
+                continue
+    return found
+
+
+@requires_m7
+@pytest.mark.parametrize(
+    ("router_value", "m7_name"),
+    [
+        (vanguard.RISK_PER_TRADE_PCT, "RISK_PER_TRADE_PCT"),
+        (vanguard.MAX_PREMIUM_PER_TRADE_PCT, "MAX_PREMIUM_PER_TRADE_PCT"),
+        (vanguard.MAX_PORTFOLIO_HEAT_PCT, "MAX_PORTFOLIO_HEAT_PCT"),
+        (vanguard.MAX_CONCURRENT_POSITIONS, "MAX_CONCURRENT_POSITIONS"),
+        (vanguard.MAX_POSITIONS_PER_SECTOR20, "MAX_POSITIONS_PER_SECTOR20"),
+        (vanguard.DAILY_LOSS_STOP_PCT, "DAILY_LOSS_STOP_PCT"),
+        (vanguard.WEEKLY_LOSS_STOP_PCT, "WEEKLY_LOSS_STOP_PCT"),
+    ],
+)
+def test_router_risk_limits_match_m7(router_value, m7_name):
+    constants = _m7_constants()
+    assert m7_name in constants, f"{m7_name} vanished from m7_risk.py — update the router mirror"
+    assert router_value == constants[m7_name]
+
+
+@requires_m7
+def test_the_routers_coherence_arithmetic_agrees_with_m7s_own():
+    """/risk recomputes sizing_coherence rather than importing it (the backend
+    must not import research code). Recomputation is a copy, so it is checked
+    against the real one's inputs here."""
+    m7 = _m7_constants()
+    premium_needed = m7["RISK_PER_TRADE_PCT"] / vanguard.STOP_PCT
+    effective = min(m7["RISK_PER_TRADE_PCT"], m7["MAX_PREMIUM_PER_TRADE_PCT"] * vanguard.STOP_PCT)
+    router_premium_needed = vanguard.RISK_PER_TRADE_PCT / vanguard.STOP_PCT
+    router_effective = min(vanguard.RISK_PER_TRADE_PCT,
+                           vanguard.MAX_PREMIUM_PER_TRADE_PCT * vanguard.STOP_PCT)
+    assert router_premium_needed == premium_needed
+    assert router_effective == effective
+
+
+@requires_worktree
+def test_the_funnel_legs_are_exactly_m6s_own_leg_order():
+    """The desk draws one funnel row per leg, in order. A leg added to M6 and
+    forgotten here would be an invisible gate — candidates dying at a stage the
+    UI does not draw."""
+    constants = _m6_constants()
+    assert "LEG_ORDER" in constants, "M6 no longer publishes LEG_ORDER"
+    assert [leg for leg, _ in vanguard.LEGS] == list(constants["LEG_ORDER"])

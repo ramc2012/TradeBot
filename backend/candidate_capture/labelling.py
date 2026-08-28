@@ -72,6 +72,24 @@ UNLABELLABLE_NO_SPOT = "unlabellable_no_spot"
 # the label is only kept when the realized lag is close enough to mean it.
 DEFAULT_HORIZONS_SECONDS = (300, 900, 1800, 3600)
 
+# ── multi-day horizons are TRADING SESSIONS, not calendar seconds ──────────
+# A "1 day" horizon must mean the next SESSION. Resolving it as anchor+86400s
+# would put every Friday anchor on a Saturday, where nothing trades: the mark
+# would land three calendar days out, fall outside any sane tolerance, and every
+# Friday row would be discarded as unlabellable. Holidays do the same midweek.
+#
+# The nominal seconds are kept as the stored `horizon_seconds` so the column
+# stays one unit, but the TARGET INSTANT is resolved against the sessions that
+# actually exist in the data.
+SESSION_HORIZONS: dict[int, int] = {86400: 1, 172800: 2, 259200: 3}
+MULTIDAY_HORIZONS_SECONDS = tuple(sorted(SESSION_HORIZONS))
+ALL_HORIZONS_SECONDS = DEFAULT_HORIZONS_SECONDS + MULTIDAY_HORIZONS_SECONDS
+
+# Intraday timing on a day-scale horizon is not the point, so the band is a
+# wall-clock window around the same time-of-day N sessions later rather than a
+# fraction of the nominal horizon.
+SESSION_HORIZON_TOLERANCE_SECONDS = 2 * 3600
+
 # A forward mark is accepted inside [H - before, H + after]. Asymmetric because
 # the sampling cadence means marks essentially always arrive LATE, never early,
 # and the tolerance scales with the horizon: 90s of slop is a third of a
@@ -118,11 +136,45 @@ def _finite(value: Any) -> Optional[float]:
     return out if math.isfinite(out) else None
 
 
-def tolerance_window(horizon_seconds: int) -> tuple[float, float]:
-    """(earliest, latest) acceptable realized lag for a horizon, in seconds."""
+def tolerance_window(
+    horizon_seconds: int, *, target_lag_seconds: Optional[float] = None
+) -> tuple[float, float]:
+    """(earliest, latest) acceptable realized lag, in seconds.
+
+    For a session horizon the caller supplies the REALIZED lag to the target
+    instant (which depends on how many non-trading days intervened) and the band
+    is a fixed wall-clock window around it. For intraday horizons the band scales
+    with the horizon, as before.
+    """
+    if horizon_seconds in SESSION_HORIZONS:
+        centre = target_lag_seconds if target_lag_seconds is not None else float(horizon_seconds)
+        return (centre - SESSION_HORIZON_TOLERANCE_SECONDS,
+                centre + SESSION_HORIZON_TOLERANCE_SECONDS)
     before = max(horizon_seconds * TOLERANCE_BEFORE_FRACTION, TOLERANCE_MIN_SECONDS)
     after = max(horizon_seconds * TOLERANCE_AFTER_FRACTION, TOLERANCE_MIN_SECONDS)
     return (horizon_seconds - before, horizon_seconds + after)
+
+
+def session_target_instant(
+    anchor: datetime, horizon_seconds: int, sessions: Sequence[date]
+) -> Optional[datetime]:
+    """The instant a session horizon actually points at.
+
+    Same time-of-day, N trading sessions after the anchor's own session, taken
+    from the sessions PRESENT IN THE DATA rather than a calendar — so a holiday
+    or a weekend shifts the target instead of voiding the row.
+    """
+    steps = SESSION_HORIZONS.get(horizon_seconds)
+    if steps is None:
+        return None
+    ordered = sorted({d for d in sessions})
+    anchor_day = anchor.astimezone(IST).date()
+    later = [d for d in ordered if d > anchor_day]
+    if len(later) < steps:
+        return None
+    target_day = later[steps - 1]
+    local = anchor.astimezone(IST)
+    return datetime.combine(target_day, local.timetz()).astimezone(UTC)
 
 
 # ══════════════════════════════════════════════════════════════════════════
@@ -217,6 +269,7 @@ def build_spot_path(
     anchor_time: datetime,
     horizon_seconds: int,
     barrier_width_pct: Optional[float],
+    target_lag_seconds: Optional[float] = None,
 ) -> SpotPath:
     """Stage A label from an exact tick path. No interpolation, no substitution.
 
@@ -238,7 +291,9 @@ def build_spot_path(
     # "Complete" means the tape actually carried the window to (near) its end.
     # The tolerance band is the same one the option leg uses, so a truncated
     # spot window is flagged by the same rule rather than a second convention.
-    complete = lag >= tolerance_window(horizon_seconds)[0]
+    complete = lag >= tolerance_window(
+        horizon_seconds, target_lag_seconds=target_lag_seconds
+    )[0]
     ret = (forward - entry) / entry
 
     high = max(prices)
@@ -302,6 +357,7 @@ def select_forward_mark(
     anchor_time: datetime,
     anchor_price: Optional[float],
     horizon_seconds: int,
+    target_lag_seconds: Optional[float] = None,
 ) -> ForwardMark:
     """Pick the forward mark closest to the horizon, inside the tolerance band.
 
@@ -322,13 +378,14 @@ def select_forward_mark(
             "no forward sample of this contract in the horizon window",
         )
 
-    lo, hi = tolerance_window(horizon_seconds)
+    centre = float(target_lag_seconds if target_lag_seconds is not None else horizon_seconds)
+    lo, hi = tolerance_window(horizon_seconds, target_lag_seconds=target_lag_seconds)
     scored: list[tuple[float, Mapping[str, Any], float]] = []
     for sample in ordered:
         lag = (sample["time"] - anchor_time).total_seconds()
         if lag <= 0:
             continue
-        scored.append((abs(lag - horizon_seconds), sample, lag))
+        scored.append((abs(lag - centre), sample, lag))
     if not scored:
         return ForwardMark(
             None, None, None, len(ordered), None, None, None, None, None, None,
@@ -370,6 +427,7 @@ def select_forward_mark(
             reason=(
                 f"nearest forward mark lagged {lag:.1f}s, outside the "
                 f"[{lo:.0f}s, {hi:.0f}s] band for a {horizon_seconds}s horizon"
+                + (f" (target instant at +{centre:.0f}s)" if target_lag_seconds is not None else "")
             ),
         )
 
@@ -387,6 +445,17 @@ def select_forward_mark(
         status=OK,
         reason=None,
     )
+
+
+def _half_from_spread_pct(spread_pct: Any) -> Optional[float]:
+    """Half of a FULL quoted-spread fraction — the per-side crossing cost.
+
+    Used only for reconstructed rows, which carry a band-calibrated spread
+    instead of a quote. The result still reports `measured=False`: it is a
+    better assumption than the flat fallback, not a measurement.
+    """
+    full = _finite(spread_pct)
+    return full / 2.0 if full is not None and full > 0 else None
 
 
 def build_outcome_row(
@@ -504,6 +573,9 @@ def build_outcome_row(
         # quote, which is the only way the exit half-spread is ever measured.
         exit_bid=mark.bid,
         exit_ask=mark.ask,
+        # A reconstructed row carries a band-calibrated spread instead of a
+        # quote; honour it rather than the generic flat fallback.
+        estimated_half_spread_pct=_half_from_spread_pct(anchor.get("spread_pct")),
     )
     base.update(
         {
@@ -532,6 +604,7 @@ def build_outcome_row(
         lot_size=lot_size,
         entry_bid=entry_bid,
         entry_ask=entry_ask,
+        estimated_half_spread_pct=_half_from_spread_pct(anchor.get("spread_pct")),
     )
     base["breakeven_move_pct"] = breakeven
     if breakeven is not None and mark.mfe_pct is not None:

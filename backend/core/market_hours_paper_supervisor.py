@@ -630,6 +630,23 @@ class MarketHoursPaperSupervisor:
             from market_data.stock_spot_sweeper import sweep_stock_spot
             return await sweep_stock_spot()
 
+        async def _stock_spot_intraday_runner() -> dict[str, Any]:
+            # IN-SESSION sibling of the post-close sweep. `days=1` keeps it to
+            # the current session, which is served by Upstox's intraday endpoint
+            # — the one nothing in this codebase called, and the reason today's
+            # bars never existed until the next morning.
+            from market_data.stock_spot_sweeper import sweep_stock_spot
+
+            return await sweep_stock_spot(
+                intervals=[
+                    part.strip()
+                    for part in str(settings.STOCK_SPOT_INTRADAY_INTERVALS).split(",")
+                    if part.strip()
+                ] or ["30minute"],
+                days=1,
+                deadline_seconds=600.0,
+            )
+
         async def _auction_runner() -> dict[str, Any]:
             return await run_auction_market_cycle()
 
@@ -1339,6 +1356,36 @@ class MarketHoursPaperSupervisor:
                 post_close_catchup=False,
                 # Data-plane freshness monitor — watches option_premium_candles
                 # persistence, which the CORE plane's feed pipeline owns.
+                plane="core",
+            ),
+            RunnerConfig(
+                key="stock_spot_intraday",
+                label="F&O Stock Spot Intraday Sweep",
+                interval_seconds=settings.STOCK_SPOT_INTRADAY_SECONDS,
+                callback=_stock_spot_intraday_runner,
+                enabled=settings.STOCK_SPOT_INTRADAY_ENABLED,
+                # In-session, unlike its post-close sibling. That sibling is
+                # deliberately post-close-only because a 211-symbol sweep of
+                # AUTHENTICATED broker history would compete with live decision
+                # traffic. This one calls Upstox's PUBLIC candle endpoints, which
+                # need no token and spend none of the authenticated budget, so
+                # that reasoning does not carry over. CLASS_BULK admission still
+                # keeps it behind any queued CRITICAL waiter.
+                #
+                # Without this, the decision grid has no intraday writer at all
+                # and every in-session lane reads the PREVIOUS session.
+                market_hours_fn=_in_nse_market_hours,
+                next_open_fn=_next_nse_market_open,
+                # The post-close sweep already guarantees the once-a-day
+                # backstop, so this one does not need a catch-up pass of its own.
+                post_close_catchup=False,
+                timeout_seconds=660.0,
+                # CORE plane, matching its post-close sibling. This is data-plane
+                # maintenance, not a trading lane, and it must run on the process
+                # that owns the data plane. Left at the "strategies" default it
+                # was silently dropped from the core boot: LANESET=core built ten
+                # runners and this was not among them, so a sweep that looked
+                # registered would never have fired.
                 plane="core",
             ),
             RunnerConfig(

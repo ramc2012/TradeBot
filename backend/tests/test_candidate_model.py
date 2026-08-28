@@ -396,6 +396,68 @@ class TestRanking:
         assert len(ranked) == 1
 
 
+class TestRankingMonotonicity:
+    """The invariant an audit found violated: utility must RISE with probability.
+
+    The uncertainty and tail penalties both vary with p. When their combined
+    slope exceeded the expected-log slope, total utility FELL as probability
+    rose for every p < 0.5 — and since the measured base rate of a profitable
+    long is 0.15-0.31, essentially every real candidate sat in that region. The
+    ranker was systematically preferring the contract least likely to profit.
+    """
+
+    def test_weights_satisfy_the_slope_budget(self):
+        from candidate_capture.ranking import (
+            assert_monotone_in_probability, probability_slope_budget,
+        )
+
+        signal, penalty = probability_slope_budget()
+        assert penalty < signal, (
+            f"probability-varying penalties ({penalty:.6f}) must stay under the "
+            f"expected-log slope ({signal:.6f}) or the ranking inverts"
+        )
+        assert_monotone_in_probability()
+
+    def test_utility_rises_with_probability_everywhere(self):
+        snap = _snap(spread_pct=0.015, moneyness_steps=2.5,
+                     liquidity_percentile=0.9, breakeven_move_pct=0.03)
+        last = None
+        for i in range(5, 100, 5):
+            p = i / 100
+            u, _ = candidate_utility(probability=p, snapshot=snap, breakeven_move_pct=0.03)
+            if last is not None:
+                assert u > last, f"utility fell between p={p - 0.05:.2f} and p={p:.2f}"
+            last = u
+
+    def test_utility_rises_with_probability_at_the_moneyness_cap(self):
+        """The tail penalty is largest at the cap, which is where the slope
+        budget is tightest."""
+        snap = _snap(spread_pct=0.015, moneyness_steps=8.0,
+                     liquidity_percentile=0.5, breakeven_move_pct=0.03)
+        last = None
+        for i in range(5, 100, 5):
+            u, _ = candidate_utility(probability=i / 100, snapshot=snap, breakeven_move_pct=0.03)
+            if last is not None:
+                assert u > last
+            last = u
+
+    def test_the_abstain_floor_is_actually_reachable(self):
+        """It previously required p > 0.795, which a calibrated model on a ~28%
+        base rate cannot emit — so 92% abstention was arithmetic, not judgement."""
+        snap = _snap(spread_pct=0.015, moneyness_steps=2.5,
+                     liquidity_percentile=0.9, breakeven_move_pct=0.03)
+        crossing = next(
+            (i / 100 for i in range(5, 100)
+             if candidate_utility(probability=i / 100, snapshot=snap,
+                                  breakeven_move_pct=0.03)[0] > 0),
+            None,
+        )
+        assert crossing is not None and crossing <= 0.70, (
+            f"abstain floor needs p>{crossing}, which no calibrated model on this "
+            f"base rate can reach"
+        )
+
+
 class TestPayoffGeometry:
     """Regressions for the two ranking defects adversarial review confirmed."""
 

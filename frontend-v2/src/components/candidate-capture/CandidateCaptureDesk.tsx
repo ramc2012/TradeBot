@@ -18,7 +18,7 @@
 import { useMemo, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { clsx } from "clsx";
-import { Activity, Boxes, Database, Gauge, Layers, ScanSearch } from "lucide-react";
+import { Activity, Boxes, Compass, Database, Gauge, Layers, ScanSearch, Sigma } from "lucide-react";
 
 import { Section, MetricTile, StatusBadge, useUrlChoice } from "@/components/desk-ui";
 import { api } from "@/lib/api";
@@ -177,7 +177,36 @@ const captureApi = {
       `${BASE}/outcomes`, { params },
     ).then((r) => r.data),
   models: () => api.get<{ models: ModelRow[] }>(`${BASE}/models`).then((r) => r.data.models),
+  method: () => api.get<MethodCard>(`${BASE}/method`).then((r) => r.data),
+  direction: () => api.get<DirectionReport>(`${BASE}/direction`).then((r) => r.data),
 };
+
+interface MethodCard {
+  features: {
+    count: number;
+    groups: { name: string; count: number; columns: string[] }[];
+    leakage_guard: string;
+    normalization: { rule: string; why: string }[];
+  };
+  targets: {
+    concrete: { name: string; asks: string; definition: string; cost_free: boolean; caveat?: string }[];
+    cost_dependent: { name: string; asks: string; requires: string }[];
+    unmeasurable_is_null: string;
+  };
+  model: Record<string, unknown>;
+  evaluation: Record<string, unknown>;
+  ranking: { monotonicity: { expected_log_slope: number; probability_varying_penalty_slope: number; holds: boolean; why: string } };
+  limits: string[];
+}
+
+interface DirectionReport {
+  definition: { min_sigma: number; min_efficiency: number; sigma: string; efficiency: string; note: string };
+  by_horizon: {
+    horizon_seconds: number; rows: number; avg_abs_sigma: string | number;
+    avg_efficiency: string | number; up: number; down: number; confirmed: number;
+    confirmed_rate: number | null; up_rate: number | null; down_rate: number | null;
+  }[];
+}
 
 // ── formatting ─────────────────────────────────────────────────────────────
 const pct = (v: number | string | null | undefined, digits = 2) =>
@@ -195,7 +224,9 @@ const TABS = [
   { key: "readiness", label: "Readiness", icon: Gauge },
   { key: "decidability", label: "Decidability", icon: Activity },
   { key: "explorer", label: "Explorer", icon: ScanSearch },
+  { key: "direction", label: "Direction", icon: Compass },
   { key: "models", label: "Models", icon: Boxes },
+  { key: "method", label: "Method", icon: Sigma },
 ] as const;
 type TabKey = (typeof TABS)[number]["key"];
 const TAB_KEYS = TABS.map((t) => t.key) as readonly TabKey[];
@@ -231,7 +262,9 @@ export default function CandidateCaptureDesk() {
       {tab === "readiness" ? <ReadinessTab /> : null}
       {tab === "decidability" ? <DecidabilityTab /> : null}
       {tab === "explorer" ? <ExplorerTab /> : null}
+      {tab === "direction" ? <DirectionTab /> : null}
       {tab === "models" ? <ModelsTab /> : null}
+      {tab === "method" ? <MethodTab /> : null}
     </div>
   );
 }
@@ -672,6 +705,201 @@ function ExplorerTab() {
         </Scroll>
       )}
     </Section>
+  );
+}
+
+// ══════════════════════════════════════════════════════════════════════════
+function DirectionTab() {
+  const q = useQuery({ queryKey: ["cc-direction"], queryFn: captureApi.direction });
+  const d = q.data;
+
+  return (
+    <Section
+      title="Confirmed direction with strength"
+      icon={<Compass size={16} />}
+      description={
+        d ? (
+          <>
+            A move counts only when it clears BOTH bars: strength ≥{" "}
+            <strong>{d.definition.min_sigma}σ</strong> of its own horizon volatility, and efficiency ≥{" "}
+            <strong>{d.definition.min_efficiency}</strong>, where efficiency is |return| ÷ (MFE − MAE).
+            Chop that happens to close positive is <em>unconfirmed</em>; so is a clean move too small for
+            its own volatility.
+          </>
+        ) : null
+      }
+    >
+      {q.isLoading ? <Loading label="Reading direction outcomes…" /> : null}
+      {q.isError ? <ErrorPanel what="direction" /> : null}
+      {d && d.by_horizon.length === 0 ? (
+        <Empty label="No spot outcomes yet — direction needs a labelled spot leg." />
+      ) : null}
+      {d && d.by_horizon.length > 0 ? (
+        <Scroll>
+          <table className="w-full text-sm">
+            <THead cols={["Horizon", "Rows", "Avg |σ|", "Avg efficiency", "Up", "Down", "Confirmed", "Rate"]} />
+            <tbody>
+              {d.by_horizon.map((r) => {
+                const rate = r.confirmed_rate ?? 0;
+                const degenerate = rate < 0.02 || rate > 0.9;
+                return (
+                  <tr key={r.horizon_seconds} className="border-b border-bg-border/40 last:border-0">
+                    <Td mono>{horizonLabel(r.horizon_seconds)}</Td>
+                    <Td right>{num(r.rows, 0)}</Td>
+                    <Td right>{num(Number(r.avg_abs_sigma), 3)}</Td>
+                    <Td right>{num(Number(r.avg_efficiency), 3)}</Td>
+                    <Td right>{num(r.up, 0)}</Td>
+                    <Td right>{num(r.down, 0)}</Td>
+                    <Td right>{num(r.confirmed, 0)}</Td>
+                    <Td right>
+                      <span className={clsx(degenerate ? "text-accent-red" : "text-accent-green")}>
+                        {pct(rate, 1)}
+                      </span>
+                    </Td>
+                  </tr>
+                );
+              })}
+            </tbody>
+          </table>
+        </Scroll>
+      ) : null}
+      <p className="mt-2 text-[12px] text-text-muted">
+        A rate near 0% or 100% is shown in red: the label is degenerate there and nothing can be learned
+        from it. A collapsing rate as the horizon grows is a volatility-scaling problem, not a market fact.
+      </p>
+    </Section>
+  );
+}
+
+function MethodTab() {
+  const q = useQuery({ queryKey: ["cc-method"], queryFn: captureApi.method });
+  const m = q.data;
+  if (q.isLoading) return <Loading label="Reading method card…" />;
+  if (q.isError || !m) return <ErrorPanel what="method" />;
+
+  return (
+    <div className="space-y-4">
+      <Section
+        title={`Inputs — ${m.features.count} features`}
+        icon={<Sigma size={16} />}
+        description={m.features.leakage_guard}
+      >
+        <div className="grid gap-2 md:grid-cols-2">
+          {m.features.groups.map((g) => (
+            <div key={g.name} className="rounded-lg border border-bg-border bg-bg-primary/30 p-3">
+              <p className="mb-1 text-[11px] font-semibold uppercase tracking-wider text-accent-blue">
+                {g.name.replace(/_/g, " ")} · {g.count}
+              </p>
+              <p className="font-mono text-[11px] leading-relaxed text-text-muted">
+                {g.columns.join(", ")}
+              </p>
+            </div>
+          ))}
+        </div>
+      </Section>
+
+      <Section title="How inputs are coded" icon={<Sigma size={16} />}>
+        <ul className="space-y-2">
+          {m.features.normalization.map((n) => (
+            <li key={n.rule} className="text-sm">
+              <span className="font-semibold text-text-primary">{n.rule}</span>
+              <span className="text-text-muted"> — {n.why}</span>
+            </li>
+          ))}
+        </ul>
+      </Section>
+
+      <Section
+        title="Labels"
+        icon={<Compass size={16} />}
+        description={m.targets.unmeasurable_is_null}
+      >
+        <div className="space-y-2">
+          {m.targets.concrete.map((t) => (
+            <div key={t.name} className="rounded-lg border border-bg-border bg-bg-primary/30 p-3">
+              <div className="flex flex-wrap items-center gap-2">
+                <span className="font-mono text-[12px] text-text-primary">{t.name}</span>
+                <span className="rounded bg-accent-green/12 px-1.5 py-0.5 text-[11px] text-accent-green">
+                  cost-free
+                </span>
+              </div>
+              <p className="mt-1 text-sm text-text-secondary">{t.asks}</p>
+              <p className="mt-0.5 font-mono text-[11px] text-text-muted">{t.definition}</p>
+              {t.caveat ? (
+                <p className="mt-1 text-[12px] text-accent-amber">⚠ {t.caveat}</p>
+              ) : null}
+            </div>
+          ))}
+          {m.targets.cost_dependent.map((t) => (
+            <div key={t.name} className="rounded-lg border border-accent-amber/30 bg-accent-amber/8 p-3">
+              <div className="flex flex-wrap items-center gap-2">
+                <span className="font-mono text-[12px] text-text-primary">{t.name}</span>
+                <span className="rounded bg-accent-amber/15 px-1.5 py-0.5 text-[11px] text-accent-amber">
+                  needs measured spread
+                </span>
+              </div>
+              <p className="mt-1 text-sm text-text-secondary">{t.asks}</p>
+              <p className="mt-0.5 text-[12px] text-text-muted">{t.requires}</p>
+            </div>
+          ))}
+        </div>
+      </Section>
+
+      <Section title="Model, evaluation and ranking" icon={<Activity size={16} />}>
+        <div className="grid gap-3 md:grid-cols-2">
+          <KeyValues title="Model" data={m.model} />
+          <KeyValues title="Evaluation" data={m.evaluation} />
+        </div>
+        <div
+          className={clsx(
+            "mt-3 rounded-lg border p-3 text-sm",
+            m.ranking.monotonicity.holds
+              ? "border-accent-green/30 bg-accent-green/8"
+              : "border-accent-red/30 bg-accent-red/8",
+          )}
+        >
+          <p className="text-[11px] font-semibold uppercase tracking-wider text-text-muted">
+            Ranking monotonicity
+          </p>
+          <p className="mt-1 text-text-secondary">
+            signal slope{" "}
+            <span className="font-mono text-text-primary">
+              {m.ranking.monotonicity.expected_log_slope}
+            </span>{" "}
+            vs penalty slope{" "}
+            <span className="font-mono text-text-primary">
+              {m.ranking.monotonicity.probability_varying_penalty_slope}
+            </span>{" "}
+            → {m.ranking.monotonicity.holds ? "utility rises with probability" : "INVERTED"}
+          </p>
+          <p className="mt-1 text-[12px] text-text-muted">{m.ranking.monotonicity.why}</p>
+        </div>
+      </Section>
+
+      <Section title="Known limits" icon={<Layers size={16} />}>
+        <ul className="space-y-2">
+          {m.limits.map((l, i) => (
+            <li key={i} className="text-sm text-text-secondary">· {l}</li>
+          ))}
+        </ul>
+      </Section>
+    </div>
+  );
+}
+
+function KeyValues({ title, data }: { title: string; data: Record<string, unknown> }) {
+  return (
+    <div className="rounded-lg border border-bg-border bg-bg-primary/30 p-3">
+      <p className="mb-2 text-[11px] font-semibold uppercase tracking-wider text-accent-blue">{title}</p>
+      <dl className="space-y-1">
+        {Object.entries(data).map(([k, v]) => (
+          <div key={k} className="flex gap-2 text-[12px]">
+            <dt className="shrink-0 font-mono text-text-muted">{k}</dt>
+            <dd className="text-text-secondary">{String(v)}</dd>
+          </div>
+        ))}
+      </dl>
+    </div>
   );
 }
 

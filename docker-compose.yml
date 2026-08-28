@@ -105,7 +105,7 @@ services:
       BACKEND_CORS_ORIGIN_REGEX: "${BACKEND_CORS_ORIGIN_REGEX:-^https?://[^/]+(:[0-9]+)?$}"
       # Phase-1 process split (opt-in). Default `docker compose up` keeps this
       # single all-in-one backend (LANESET=all → byte-identical boot). To split:
-      #   LANESET=core BROKER_REST_BUDGET_FRACTION=0.6 \
+      #   LANESET=core BROKER_REST_BUDGET_FRACTION=0.7 \
       #     docker compose --profile split up -d backend backend-strategies
       # Rollback: `docker compose up -d backend` with LANESET unset.
       LANESET: ${LANESET:-all}
@@ -169,9 +169,20 @@ services:
       BACKEND_CORS_ORIGIN_REGEX: "${BACKEND_CORS_ORIGIN_REGEX:-^https?://[^/]+(:[0-9]+)?$}"
       # Hard-set (not env-substituted): this service IS the strategy plane.
       LANESET: strategies
-      # Phase-1 REST budget share (core=0.6 / strategies=0.4); Phase 2 replaces
+      # Phase-1 REST budget share (core=0.7 / strategies=0.3); Phase 2 replaces
       # the static fractions with a shared Redis token bucket.
-      BROKER_REST_BUDGET_FRACTION: "0.4"
+      #
+      # Rebalanced 2026-08-28 from 0.6/0.4. The fractions must still sum to 1.0
+      # — that invariant is what keeps the two planes jointly under the per-token
+      # cap, and it is the only reason this is safe to change.
+      # Measured over a 2-minute sweep during the 10:15 bar: this plane sat flat
+      # at 176-193 of its 720 (27%), while core sawtoothed 669 -> 902 of its
+      # 1080 and peaked within 178 of the ceiling. The core-only
+      # upstox_chain_builder needs ~213 calls per 30m bar, so it did not fit
+      # (902 + 213 = 1115 > 1080) while 527 sat idle over here.
+      # After: core 1260 (worst case 1115, ~12% headroom), this plane 540
+      # against an observed peak of 193 — still ~2.8x its own demand.
+      BROKER_REST_BUDGET_FRACTION: "0.3"
     volumes:
       - ./backend:/app
       - ./data:/data:ro

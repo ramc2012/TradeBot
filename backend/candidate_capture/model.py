@@ -90,6 +90,19 @@ def fit_logistic(
     """
     Xa = np.asarray(X, dtype=float)
     ya = np.asarray(y, dtype=float)
+    if Xa.size == 0 or ya.size == 0:
+        # Distinguished from a genuine shape mismatch: an EMPTY matrix means
+        # every row was filtered out by the target, which is a data problem
+        # (usually a column the query forgot to select), not a shape bug. The
+        # merged message sent an earlier debug down entirely the wrong path.
+        return FitResult(
+            ok=False,
+            reason=(
+                "no usable training rows: every row returned None from the "
+                "target. Check that the query selects the column the target "
+                "reads."
+            ),
+        )
     if Xa.ndim != 2 or Xa.shape[0] != ya.shape[0]:
         return FitResult(ok=False, reason="X and y shapes disagree")
 

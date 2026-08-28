@@ -123,6 +123,34 @@ async def training_runs(limit: int = Query(30, ge=1, le=200)) -> dict[str, Any]:
     return {"count": len(rows), "runs": rows}
 
 
+@router.get("/method")
+async def method() -> dict[str, Any]:
+    """What the model is fed, what it is asked, and how inputs are coded.
+
+    Read from the code that actually runs, so the card cannot drift from the
+    implementation. A refusal is not reviewable without it.
+    """
+    from candidate_capture.reports import method_card
+
+    return method_card()
+
+
+@router.get("/direction")
+async def direction(
+    session_date: Optional[str] = Query(None, description="ISO date; omit for all"),
+) -> dict[str, Any]:
+    """Confirmed-direction outcomes by horizon — the Stage A label.
+
+    Direction is confirmed only when the move clears BOTH a volatility bar and
+    an efficiency bar, so chop that happens to close positive is not counted.
+    """
+    from candidate_capture.reports import direction_report
+
+    return await direction_report(
+        session_date=_parse_session_date(session_date) if session_date else None
+    )
+
+
 @router.get("/snapshots")
 async def snapshots(
     session_date: str = Query(..., description="ISO date of the capture session"),
