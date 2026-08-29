@@ -30,7 +30,7 @@ import {
   Waves,
 } from "lucide-react";
 
-import { MetricTile, Section, StatusBadge, formatNumber } from "@/components/desk-ui";
+import { MetricTile, Section, StatusBadge } from "@/components/desk-ui";
 
 /* eslint-disable @typescript-eslint/no-explicit-any */
 
@@ -42,6 +42,13 @@ const DAY_TYPE_LABEL: Record<string, string> = {
   neutral_extreme: "neutral extreme",
   double_distribution: "double distribution",
 };
+
+/** Postgres NUMERIC arrives as a string through the JSON layer; coerce before
+ * formatting or every .toFixed call throws on the first real payload. */
+function n2(v: any, digits = 2): string {
+  const n = Number(v);
+  return Number.isFinite(n) ? n.toFixed(digits) : "\u2014";
+}
 
 function pct(v: any, digits = 2): string {
   const n = Number(v);
@@ -104,17 +111,17 @@ export function MpTab({ data, verdicts }: { data?: any; verdicts?: any }) {
         />
         <MetricTile
           label="names profiled"
-          value={formatNumber(summary?.names)}
+          value={n2(summary?.names, 0)}
           detail="one TPO profile per name per session"
         />
         <MetricTile
           label="strong-close flags"
-          value={formatNumber(summary?.flagged_strong_close)}
+          value={n2(summary?.flagged_strong_close, 0)}
           detail="close above value area, close_pos 0.70–0.90 (acceptance)"
         />
         <MetricTile
           label="oversold-MTF flags"
-          value={formatNumber(summary?.flagged_oversold_mtf)}
+          value={n2(summary?.flagged_oversold_mtf, 0)}
           detail="below day AND prior-week AND prior-month value"
         />
         <MetricTile
@@ -177,11 +184,11 @@ export function MpTab({ data, verdicts }: { data?: any; verdicts?: any }) {
                       )}
                     </td>
                     <td className={TD}>{DAY_TYPE_LABEL[r.day_type] ?? r.day_type ?? "—"}</td>
-                    <td className={TD}>{formatNumber(r.close_pos, 2)}</td>
+                    <td className={TD}>{n2(r.close_pos, 2)}</td>
                     <td className={TD}>{r.value_shift ?? "—"}</td>
                     <td className={TD}>{pct(r.exp_range_pct)}</td>
                     <td className={TD}>
-                      {r.of_available ? formatNumber(r.of_delta_share, 2) : "no volume series"}
+                      {r.of_available ? n2(r.of_delta_share, 2) : "no volume series"}
                     </td>
                   </tr>
                 ))}
@@ -206,7 +213,7 @@ export function MpTab({ data, verdicts }: { data?: any; verdicts?: any }) {
                 value={`${s.n} trade${Number(s.n) === 1 ? "" : "s"}`}
                 detail={
                   s.status === "closed"
-                    ? `avg net ${pct(s.avg_net_pct, 3)} · win ${formatNumber(s.win_pct, 0)}% · ₹${formatNumber(s.pnl_rs)}`
+                    ? `avg net ${pct(s.avg_net_pct, 3)} · win ${n2(s.win_pct, 0)}% · ₹${n2(s.pnl_rs, 0)}`
                     : "awaiting exit data"
                 }
               />
@@ -233,11 +240,11 @@ export function MpTab({ data, verdicts }: { data?: any; verdicts?: any }) {
                   <td className={TD}>{t.strategy}</td>
                   <td className={`${TD} font-semibold`}>{t.underlying}</td>
                   <td className={TD}>{t.signal_dt}</td>
-                  <td className={TD}>{formatNumber(t.entry_px, 2)}</td>
+                  <td className={TD}>{n2(t.entry_px, 2)}</td>
                   <td className={TD}>{t.entry_src}</td>
                   <td className={TD}>
                     {t.exit_px != null
-                      ? `${formatNumber(t.exit_px, 2)} (${t.exit_reason})`
+                      ? `${n2(t.exit_px, 2)} (${t.exit_reason})`
                       : "—"}
                   </td>
                   <td className={TD}>
@@ -301,10 +308,10 @@ export function MpTab({ data, verdicts }: { data?: any; verdicts?: any }) {
                 <tr key={r.underlying} className="border-b border-border/50">
                   <td className={`${TD} font-semibold`}>{r.underlying}</td>
                   <td className={TD}>{DAY_TYPE_LABEL[r.day_type] ?? r.day_type ?? "—"}</td>
-                  <td className={TD}>{formatNumber(r.close_pos, 2)}</td>
+                  <td className={TD}>{n2(r.close_pos, 2)}</td>
                   <td className={TD}>{pct(r.ib_width_pct)}</td>
                   <td className={TD}>{pct(r.va_width_pct)}</td>
-                  <td className={TD}>{formatNumber(r.range_over_ib, 2)}</td>
+                  <td className={TD}>{n2(r.range_over_ib, 2)}</td>
                   <td className={TD}>{r.value_shift ?? "—"}</td>
                   <td className={TD}>{pct(r.poc_migration_pct)}</td>
                   <td className={TD}>
@@ -316,7 +323,7 @@ export function MpTab({ data, verdicts }: { data?: any; verdicts?: any }) {
                     {!r.poor_high && !r.poor_low ? "—" : ""}
                   </td>
                   <td className={TD}>
-                    {r.of_available ? formatNumber(r.of_rvol20, 2) : "—"}
+                    {r.of_available ? n2(r.of_rvol20, 2) : "—"}
                   </td>
                   <td className={TD}>
                     <span className="flex gap-1">
