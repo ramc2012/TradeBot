@@ -89,6 +89,8 @@ import {
   getVanguardPipeline,
   getVanguardRisk,
   getVanguardSelection,
+  getVanguardMp,
+  getMpVerdicts,
   getVanguardSentiment,
   getVanguardSummary,
   getVanguardSymbol,
@@ -97,6 +99,7 @@ import {
 import { DecisionFlowTab } from "./DecisionFlow";
 import { MarketTab } from "./MarketTab";
 import { ResearchTab } from "./ResearchTab";
+import { MpTab } from "./MpTab";
 import { SentimentTab } from "./SentimentTab";
 import { SymbolDetail } from "./SymbolDetail";
 
@@ -190,6 +193,18 @@ export default function VanguardDesk() {
     queryFn: (): Promise<any> => getVanguardSentiment().then((r) => r.data),
     enabled: activeTab === "sentiment",
   });
+  const mp = useQuery({
+    queryKey: ["vanguard", "mp"],
+    queryFn: (): Promise<any> => getVanguardMp().then((r) => r.data),
+    enabled: activeTab === "mp",
+    refetchInterval: REFRESH_MS.summary,
+  });
+  const mpVerdicts = useQuery({
+    queryKey: ["mp", "verdicts"],
+    queryFn: (): Promise<any> => getMpVerdicts().then((r) => r.data),
+    enabled: activeTab === "mp",
+    staleTime: Infinity,
+  });
   const risk = useQuery({
     queryKey: ["vanguard", "risk"],
     queryFn: (): Promise<any> => getVanguardRisk().then((r) => r.data),
@@ -212,6 +227,7 @@ export default function VanguardDesk() {
         { key: "market", label: "Market", icon: Layers },
         { key: "decision", label: "Decision flow", icon: Filter },
         { key: "sentiment", label: "Sentiment", icon: Gauge },
+        { key: "mp", label: "MP structure", icon: Layers },
         { key: "book", label: "Book", icon: BookOpen },
         { key: "research", label: "Research", icon: Sigma },
         { key: "attribution", label: "Attribution", icon: Activity },
@@ -245,6 +261,7 @@ export default function VanguardDesk() {
         />
       )}
       {activeTab === "sentiment" && <SentimentTab data={sentiment.data} />}
+      {activeTab === "mp" && <MpTab data={mp.data} verdicts={mpVerdicts.data} />}
       {activeTab === "research" && (
         <ResearchTab crossSection={crossSection.data} risk={risk.data} />
       )}

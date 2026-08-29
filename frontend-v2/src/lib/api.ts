@@ -821,6 +821,9 @@ export const getVanguardMarket = (ts?: string, limit = 400) =>
 export const getVanguardSymbol = (symbol: string, bars = 60, sessions = 60) =>
   api.get(`/api/vanguard/symbol/${encodeURIComponent(symbol)}`, { params: { bars, sessions } });
 export const getVanguardRisk = () => api.get("/api/vanguard/risk");
+export const getVanguardMp = (dt?: string) =>
+  api.get("/api/vanguard/mp", { params: dt ? { dt } : undefined });
+export const getMpVerdicts = () => api.get("/api/mp/unified/verdicts");
 export const getVanguardCrossSection = (horizon?: number) =>
   api.get("/api/vanguard/cross-section", { params: { horizon } });
 // Market-wide only: NSE's participant-wise OI is an aggregate by instrument

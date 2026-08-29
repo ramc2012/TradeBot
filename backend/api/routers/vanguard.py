@@ -1077,3 +1077,96 @@ async def sentiment(limit: int = Query(60, ge=1, le=400)) -> dict[str, Any]:
         "note": "participant_oi is an aggregate publication by instrument class. "
                 "FII/DII positioning describes the market, never an individual name.",
     }
+
+
+# ─── Market Profile structure (features_mp + the MP-edge paper book) ─────────
+#
+# One payload for the desk's MP tab: the latest session's profile features,
+# the two validated signal flags with the researched-universe boundary drawn
+# explicitly, and the mp_paper_trades book those flags feed. The verdicts that
+# scope what each metric may claim live on /api/mp/unified/verdicts (mp_core);
+# the tab fetches them separately so the two surfaces cannot drift.
+
+_MP_RESEARCHED = (
+    "NIFTY", "BANKNIFTY", "HDFCBANK", "ICICIBANK", "SBIN", "AXISBANK",
+    "KOTAKBANK", "INDUSINDBK", "BANKBARODA", "PNB", "CANBK", "UNIONBANK",
+    "FEDERALBNK", "IDFCFIRSTB", "AUBANK", "RBLBANK", "YESBANK", "BANKINDIA",
+)
+
+
+@router.get("/mp")
+async def mp_structure(
+    dt: str | None = Query(None, description="Session date; default = latest"),
+    limit: int = Query(300, le=1000),
+) -> dict[str, Any]:
+    present = await _fetch_one(
+        "SELECT to_regclass('public.features_mp') IS NOT NULL AS present"
+    )
+    if not (present and present["present"]):
+        return {"available": False,
+                "note": "features_mp does not exist yet — the MP structure "
+                        "step has not run (migration 011 + cycle daemon EOD)."}
+
+    target = dt or (await _fetch_one(
+        "SELECT max(dt)::text AS d FROM features_mp"))["d"]
+    if target is None:
+        return {"available": False, "note": "features_mp holds no sessions yet."}
+
+    # asyncpg types the parameter from the column, so it must be a real date --
+    # a CAST-from-string raises "'str' has no attribute 'toordinal'".
+    from datetime import date as _date
+
+    target_d = _date.fromisoformat(str(target))
+    rows = await _fetch_all(
+        """SELECT * FROM features_mp WHERE dt = :d
+           ORDER BY (sig_strong_close OR sig_oversold_mtf) DESC,
+                    exp_range_pct DESC NULLS LAST
+           LIMIT :lim""",
+        {"d": target_d, "lim": limit})
+    sessions = await _fetch_all(
+        "SELECT DISTINCT dt::text AS d FROM features_mp ORDER BY 1 DESC LIMIT 15")
+
+    day_types: dict[str, int] = {}
+    for r in rows:
+        key = r.get("day_type") or "unknown"
+        day_types[key] = day_types.get(key, 0) + 1
+    researched = set(_MP_RESEARCHED)
+    for r in rows:
+        r["researched"] = r["underlying"] in researched
+        r["dt"] = str(r["dt"])
+        r.pop("computed_at", None)
+
+    trades = await _fetch_all(
+        """SELECT id, strategy, underlying, signal_dt::text AS signal_dt,
+                  entry_px, entry_src, notional, cost_bp,
+                  exit_ts::text AS exit_ts, exit_px, exit_reason,
+                  gross_ret_pct, net_ret_pct, status
+           FROM mp_paper_trades ORDER BY signal_dt DESC, id DESC LIMIT 200""")
+    trade_summary = await _fetch_all(
+        """SELECT strategy, status, count(*) AS n,
+                  round(avg(net_ret_pct), 3) AS avg_net_pct,
+                  round(sum(net_ret_pct * notional / 100.0), 0) AS pnl_rs,
+                  round(avg((net_ret_pct > 0)::int) * 100, 0) AS win_pct
+           FROM mp_paper_trades GROUP BY 1, 2 ORDER BY 1, 2""")
+
+    return {
+        "available": True,
+        "as_of_dt": target,
+        "sessions": [s["d"] for s in sessions],
+        "summary": {
+            "names": len(rows),
+            "flagged_strong_close": sum(1 for r in rows if r.get("sig_strong_close")),
+            "flagged_oversold_mtf": sum(1 for r in rows if r.get("sig_oversold_mtf")),
+            "of_available": sum(1 for r in rows if r.get("of_available")),
+            "day_types": day_types,
+        },
+        "features": rows,
+        "signals": [r for r in rows
+                    if r.get("sig_strong_close") or r.get("sig_oversold_mtf")],
+        "trades": trades,
+        "trade_summary": trade_summary,
+        "universe_note": "Signals are TRADED only inside the researched "
+                         "universe (NIFTY, BANKNIFTY, 16 banks). Flags on other "
+                         "names are shown for observation, never traded — "
+                         "trading them would extrapolate beyond the study.",
+    }
