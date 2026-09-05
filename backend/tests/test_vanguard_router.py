@@ -19,11 +19,110 @@ hard failure.
 from __future__ import annotations
 
 import ast
+import asyncio
+from datetime import date, datetime, timezone
 from pathlib import Path
 
 import pytest
 
 from api.routers import vanguard
+
+
+def test_journal_funnel_selects_every_exposed_leg_including_side_momentum(monkeypatch):
+    async def one(sql, params=None):
+        for leg, _ in vanguard.LEGS:
+            assert f"AS {leg}" in sql
+        return {"entered": 10, "survivors": 2, "config_hash": "test",
+                **{leg: 2 for leg, _ in vanguard.LEGS}}
+    async def many(sql, params=None):
+        return []
+    monkeypatch.setattr(vanguard, "_fetch_one", one)
+    monkeypatch.setattr(vanguard, "_fetch_all", many)
+    result = asyncio.run(vanguard._funnel_from_journal(datetime.now(timezone.utc)))
+    assert any(s["leg"] == "side_momentum" for s in result["stages"])
+
+
+def test_watchlist_reads_selected_session_and_compares_paired_exits(monkeypatch):
+    earlier, latest = date(2026,8,28), date(2026,8,31)
+    async def many(sql, params=None):
+        if "LEFT JOIN vanguard_watchlist_items" in sql:
+            return [{"source_session": latest, "status": "awaiting_next_session", "resolved": 0},
+                    {"source_session": earlier, "status": "closed", "resolved": 2}]
+        if params["source_session"] == latest:
+            return []
+        assert params["source_session"] == earlier
+        return [{"status": "closed", "close_return_pct": .2,
+                 "instrument": "TESTCE", "rank": 1, "symbol": "TEST", "option_type": "CE",
+                 "entry_ts": None, "entry_mark": 1, "close_ts": None, "close_mark": 1.2,
+                 "exit_analysis": {"runner": {"net_return_pct": .2},
+                 "baseline_net_return_pct": .1,
+                 "validation_basis": "retrospective_replay_not_validation"}},
+                {"status": "missing_contract", "close_return_pct": None,
+                 "instrument": "MISSPE", "rank": 2, "symbol": "MISS", "option_type": "PE",
+                 "entry_ts": None, "entry_mark": None, "close_ts": None, "close_mark": None,
+                 "exit_analysis": {"runner": {"status": "insufficient_data"}}}]
+    async def one(sql, params=None):
+        return None if "FROM vanguard_model_predictions p" in sql else {"version": "test"}
+    monkeypatch.setattr(vanguard,"_fetch_all",many)
+    monkeypatch.setattr(vanguard,"_fetch_one",one)
+    result = asyncio.run(vanguard.model_watchlist(sessions=20,source_session=earlier))
+    assert result["latest"]["source_session"] == earlier
+    assert result["current"]["source_session"] == latest
+    assert result["latest_completed"]["source_session"] == earlier
+    assert result["exit_summary"]["runner_exited"] == 1
+    assert result["exit_summary"]["paired_hold_net_mean"] == .1
+    assert not result["exit_summary"]["fully_paired"]
+    assert not result["exit_summary"]["prospective"]
+    assert result["model_successes"][0]["instrument"] == "TESTCE"
+
+
+def test_model_latest_counts_do_not_mix_all_sessions_and_legacy_rows(monkeypatch):
+    calls = []
+    async def one(sql, params=None):
+        calls.append((sql, params))
+        return {"version":"test", "horizon_bars": 1} if "SELECT version, family" in sql else {}
+    async def many(sql, params=None):
+        assert "ts=(SELECT max(ts)" in sql
+        return []
+    monkeypatch.setattr(vanguard,"_fetch_one",one)
+    monkeypatch.setattr(vanguard,"_fetch_all",many)
+    result = asyncio.run(vanguard.model_status())
+    assert "ts=(SELECT max(ts)" in calls[1][0]
+    assert calls[2][1]["timing_policy"] == "completed_same_bar_v1"
+    assert "cumulative" in result
+
+
+def test_directional_model_uses_its_two_session_outcome_policy(monkeypatch):
+    calls = []
+    async def one(sql, params=None):
+        calls.append((sql, params))
+        return ({"version": "swing", "horizon_bars": 24, "metrics": {}}
+                if "SELECT version, family" in sql else {})
+    async def many(sql, params=None):
+        return []
+    monkeypatch.setattr(vanguard, "_fetch_one", one)
+    monkeypatch.setattr(vanguard, "_fetch_all", many)
+    asyncio.run(vanguard.model_status())
+    assert calls[2][1]["timing_policy"] == "completed_eod_direction_1_2d_v1"
+
+
+def test_strategy_journals_keep_three_lanes_separate(monkeypatch):
+    async def many(sql, params=None):
+        if "vanguard_swing_watchlist_runs" in sql:
+            return [{"source_session": date(2026, 9, 4), "item_count": 1, "status": "tracking"}]
+        if "vanguard_swing_watchlist_items" in sql:
+            return [{"rank": 1, "symbol": "KEI", "option_type": "PE"}]
+        return [
+            {"strategy": "gap_overnight", "event_key": "mp:1"},
+            {"strategy": "swing_1_2d", "event_key": "2026-09-04:1"},
+            {"strategy": "oversold_mtf", "event_key": "mp:2"},
+        ]
+    monkeypatch.setattr(vanguard, "_fetch_all", many)
+    result = asyncio.run(vanguard.strategy_journals(source_session=None, limit=200))
+    assert result["swing"]["items"][0]["symbol"] == "KEI"
+    assert [row["strategy"] for row in result["journals"]["gap_overnight"]] == ["gap_overnight"]
+    assert [row["strategy"] for row in result["journals"]["swing_1_2d"]] == ["swing_1_2d"]
+    assert result["realtime"]["coalesce_ms"] == 150
 
 _M6_RELATIVE = Path(".claude") / "worktrees" / "vanguard-phase-1" / "vanguard" / "fusion" / "m6_select.py"
 

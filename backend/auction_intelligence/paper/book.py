@@ -8,6 +8,7 @@ from datetime import date, datetime, timezone
 from pathlib import Path
 from typing import Any, Optional
 from uuid import uuid4
+from zoneinfo import ZoneInfo
 
 from core.config import settings
 from core.paper_trade_recorder import paper_trade_recorder
@@ -23,6 +24,8 @@ from market_data.option_history import option_history_service
 # many concurrent option-buy positions without the account-capital reservation
 # becoming the binding constraint. Override via env AI_INITIAL_CAPITAL.
 AI_INITIAL_CAPITAL = float(os.environ.get("AI_INITIAL_CAPITAL", 5_000_000.0))
+IST = ZoneInfo("Asia/Kolkata")
+CURRENT_PERFORMANCE_COHORT = "exact_contract_current_session_v1"
 
 
 def _utc_now() -> str:
@@ -952,7 +955,13 @@ class PaperPositionBook:
             target_price=decision.target_price,
             notes=[*decision.rationale[:3], *list(getattr(execution, "rationale", [])[:2])],
         )
-        return asdict(record)
+        payload = asdict(record)
+        # Only positions opened after both the current-session guard and the
+        # exact-contract valuation guard belong to the prospective clean
+        # performance sample. Existing ledger rows deliberately remain
+        # untagged so historical defects cannot leak into the new estimate.
+        payload["performance_cohort"] = CURRENT_PERFORMANCE_COHORT
+        return payload
 
     async def _resolve_premium(
         self, *, position: dict[str, Any], execution: Any | None, for_close: bool = False
@@ -1052,6 +1061,16 @@ class PaperPositionBook:
         closed_positions = self._filter_positions(state.get("closed_positions", []), symbol=symbol)
         realized = sum(float(item.get("realized_pnl") or 0.0) for item in closed_positions)
         unrealized = sum(float(item.get("unrealized_pnl") or 0.0) for item in open_positions)
+        today_ist = datetime.now(IST).date()
+        daily_realized = sum(
+            float(item.get("realized_pnl") or 0.0)
+            for item in closed_positions
+            if (
+                (closed_at := _parse_time(item.get("closed_at") or item.get("updated_at")))
+                is not None
+                and closed_at.astimezone(IST).date() == today_ist
+            )
+        )
 
         # Capital accounting — turns AI from "PnL ticker" into a funded
         # paper-trading lane matching S1/S2/Commodity/FMP (all ₹10L).
@@ -1110,12 +1129,31 @@ class PaperPositionBook:
 
         win_rate = (wins / (wins + losses)) if (wins + losses) else 0.0
 
+        prospective_open = [
+            row for row in open_positions
+            if row.get("performance_cohort") == CURRENT_PERFORMANCE_COHORT
+        ]
+        prospective_closed = [
+            row for row in closed_positions
+            if row.get("performance_cohort") == CURRENT_PERFORMANCE_COHORT
+        ]
+        prospective_realized = sum(
+            float(row.get("realized_pnl") or 0.0) for row in prospective_closed
+        )
+        prospective_unrealized = sum(
+            float(row.get("unrealized_pnl") or 0.0) for row in prospective_open
+        )
+        prospective_wins = sum(
+            1 for row in prospective_closed if float(row.get("realized_pnl") or 0.0) > 0
+        )
+
         return {
             # legacy fields (kept for backward compatibility)
             "symbol_filter": symbol or None,
             "open_count": len(open_positions),
             "closed_count": len(closed_positions),
             "realized_pnl": round(realized, 2),
+            "daily_realized_pnl": round(daily_realized, 2),
             "unrealized_pnl": round(unrealized, 2),
             "latest_opened_at": open_positions[0].get("opened_at") if open_positions else None,
             "latest_closed_at": closed_positions[0].get("closed_at") if closed_positions else None,
@@ -1130,6 +1168,28 @@ class PaperPositionBook:
             "sharpe_ratio": sharpe,
             "total_trades": wins + losses,
             "win_rate": round(win_rate, 4),
+            # The durable ledger is preserved, but its lifetime aggregate is
+            # not a clean strategy estimate: older rows include the documented
+            # cross-contract premium-marking defect. Do not silently relabel or
+            # delete those rows; expose the measurement boundary to every UI.
+            "performance_quality": "historical_ledger_contaminated",
+            "performance_note": (
+                "Lifetime P/L includes pre-guard trades whose exit premium could come from "
+                "a different option contract. Preserve for audit; evaluate improvement only "
+                "from the separately reported prospective clean cohort."
+            ),
+            "prospective_performance": {
+                "cohort": CURRENT_PERFORMANCE_COHORT,
+                "open_count": len(prospective_open),
+                "closed_count": len(prospective_closed),
+                "realized_pnl": round(prospective_realized, 2),
+                "unrealized_pnl": round(prospective_unrealized, 2),
+                "total_pnl": round(prospective_realized + prospective_unrealized, 2),
+                "wins": prospective_wins,
+                "win_rate": round(prospective_wins / len(prospective_closed), 4)
+                if prospective_closed else None,
+                "sample_ready": bool(prospective_closed),
+            },
         }
 
     def _filter_positions(self, positions: list[dict[str, Any]], *, symbol: str | None) -> list[dict[str, Any]]:

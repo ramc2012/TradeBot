@@ -70,6 +70,7 @@ class MarketProfileEngine:
         period_count = 0
         highs: list[float] = []
         lows: list[float] = []
+        closes: list[float] = []
 
         # Ladder hard cap. The GIL-bound TPO build is O(session_range /
         # tick_size): a too-fine tick (NIFTY at 0.05) or one contaminated bar
@@ -94,6 +95,7 @@ class MarketProfileEngine:
             period_low = min(item.low for item in bucket_bars)
             highs.append(period_high)
             lows.append(period_low)
+            closes.append(sorted(bucket_bars, key=lambda item: item.timestamp)[-1].close)
             total_volume += sum(item.volume for item in bucket_bars)
 
             for price in _price_ladder(period_low, period_high, ladder_tick):
@@ -134,6 +136,29 @@ class MarketProfileEngine:
             spike_direction = "down"
             spike_price = last_high
 
+        rotation_by_period: list[int] = []
+        for idx in range(1, period_count):
+            score = 0
+            if highs[idx] > highs[idx - 1]:
+                score += 1
+            elif highs[idx] < highs[idx - 1]:
+                score -= 1
+            if lows[idx] > lows[idx - 1]:
+                score += 1
+            elif lows[idx] < lows[idx - 1]:
+                score -= 1
+            rotation_by_period.append(score)
+        rotation_factor = sum(rotation_by_period)
+        rotation_intensity = rotation_factor / max(2 * (period_count - 1), 1)
+
+        consecutive_in_prior_value = 0
+        if prior_profile is not None:
+            for period_close in reversed(closes):
+                if prior_profile.val <= period_close <= prior_profile.vah:
+                    consecutive_in_prior_value += 1
+                else:
+                    break
+
         snapshot = MarketProfileSnapshot(
             symbol=symbol,
             session_date=ordered_bars[-1].timestamp.date().isoformat(),
@@ -166,6 +191,10 @@ class MarketProfileEngine:
             spike_price=spike_price,
             period_count=period_count,
             sample_count=total_tpos,
+            rotation_factor=rotation_factor,
+            rotation_intensity=rotation_intensity,
+            rotation_factors_by_period=rotation_by_period,
+            consecutive_periods_in_prior_value=consecutive_in_prior_value,
         )
         return self.with_comparatives(snapshot, prior_profile)
 

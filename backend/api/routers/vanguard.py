@@ -49,8 +49,9 @@ evidence, not just the verdict.
 """
 from __future__ import annotations
 
-from datetime import date, datetime, timedelta
+from datetime import date, datetime, time, timedelta, timezone
 from typing import Any
+from zoneinfo import ZoneInfo
 
 from fastapi import APIRouter, HTTPException, Query
 from sqlalchemy import text
@@ -58,13 +59,14 @@ from sqlalchemy import text
 from db.database import AsyncSessionLocal
 
 router = APIRouter(prefix="/api/vanguard", tags=["vanguard"])
+IST = ZoneInfo("Asia/Kolkata")
 
 # ── Mirrored from vanguard/fusion/m6_select.py — see module docstring ────────
 FLOW_MIN_ABS = 60.0
 SECTOR_RS_MIN_ABS_Z = 1.0
 TIMING_MIN_SCORE = 70.0
 REGIME_PERMITS = ["STRONG_NEG", "NEG", "NEUTRAL"]
-CONVICTION_MIN = 85.0
+CONVICTION_MIN = 50.0
 TOP_N_PER_BAR = 3
 FLOW_MAX_AGE_SESSIONS = 3
 RS_MAX_AGE_SESSIONS = 3
@@ -78,6 +80,7 @@ LEGS = [
     ("flow_fresh", f"that score is <= {FLOW_MAX_AGE_SESSIONS} sessions old and built "
                    f"from >= {FLOW_MIN_INGREDIENTS} ingredients"),
     ("flow_strength", f"|flow_score| >= {FLOW_MIN_ABS}"),
+    ("side_momentum", "this side's option OI/premium state is long_buildup"),
     ("sector_rs", f"|rs_z20| >= {SECTOR_RS_MIN_ABS_Z}, same direction as flow, "
                   f"<= {RS_MAX_AGE_SESSIONS} sessions old"),
     ("regime", f"GEX regime in {'/'.join(REGIME_PERMITS)}, <= {REGIME_MAX_AGE_BARS} bars old"),
@@ -114,6 +117,123 @@ async def _fetch_all(sql: str, params: dict[str, Any] | None = None) -> list[dic
 async def _fetch_one(sql: str, params: dict[str, Any] | None = None) -> dict[str, Any] | None:
     rows = await _fetch_all(sql, params)
     return rows[0] if rows else None
+
+
+async def _watchlist_items(source_session: date) -> list[dict[str, Any]]:
+    return await _fetch_all(
+        """SELECT source_session, rank, symbol, option_type, direction, instrument,
+                  strike, expiry, source_mark_ts, source_mark,
+                  q10_return, q50_return, q90_return,
+                  conservative_edge, selection_threshold,
+                  COALESCE(ranking_score,conservative_edge) AS ranking_score,
+                  entry_ts, entry_mark,
+                  latest_ts, latest_mark, return_pct, max_return_pct, min_return_pct,
+                  close_ts, close_mark, close_return_pct, status, updated_at,
+                  performance_audit, exit_analysis,
+                  COALESCE(ranking_score,conservative_edge) >= selection_threshold AS qualified
+           FROM vanguard_watchlist_items
+           WHERE source_session=:source_session ORDER BY rank""",
+        {"source_session": source_session},
+    )
+
+
+async def _watchlist_market_benchmark(
+    run: dict[str, Any], items: list[dict[str, Any]],
+) -> dict[str, Any]:
+    """Rank the same causal exact-contract universe after the track session.
+
+    This is intentionally a hindsight benchmark, not another selector.  The
+    eligible contracts are the CE and PE contracts that the frozen model had
+    actually resolved at its source timestamp.  Re-selecting strikes after the
+    move would turn cheap far-OTM contracts into a flattering but meaningless
+    leaderboard.
+    """
+    track_session = run.get("track_session")
+    if run.get("status") != "closed" or track_session is None:
+        return {
+            "available": False,
+            "track_session": track_session,
+            "ce": [], "pe": [],
+            "note": "The market benchmark appears after the next session's 15:15 IST close.",
+        }
+
+    start = datetime.combine(track_session, time(9, 15), IST).astimezone(timezone.utc)
+    cutoff = datetime.combine(track_session, time(14, 45), IST).astimezone(timezone.utc)
+    rows = await _fetch_all(
+        """WITH candidates AS MATERIALIZED (
+               SELECT p.symbol,p.option_type,p.instrument,p.strike,p.expiry,
+                      COALESCE(p.ranking_score,p.conservative_edge) AS model_score
+               FROM vanguard_model_predictions p
+               WHERE p.model_version=:model_version AND p.ts=:prediction_ts
+                 AND p.instrument IS NOT NULL AND p.strike IS NOT NULL
+                 AND p.expiry IS NOT NULL
+                 AND EXISTS (
+                     SELECT 1 FROM option_premium_candles source
+                     WHERE source.underlying=p.symbol
+                       AND source.option_type=p.option_type
+                       AND source.strike=p.strike AND source.expiry=p.expiry
+                       AND source.interval='30minute' AND source.time=p.ts
+                 )
+           ), dedup AS MATERIALIZED (
+               SELECT DISTINCT ON (c.symbol,c.option_type,c.instrument,o.time)
+                      c.*,o.time,o.close::double precision AS close
+               FROM candidates c
+               JOIN option_premium_candles o
+                 ON o.underlying=c.symbol AND o.option_type=c.option_type
+                AND o.strike=c.strike AND o.expiry=c.expiry
+                AND o.interval='30minute'
+               WHERE o.time BETWEEN :track_start AND :track_cutoff AND o.close>0
+               ORDER BY c.symbol,c.option_type,c.instrument,o.time,
+                        (o.source='upstox') DESC,o.source
+           ), marks AS (
+               SELECT symbol,option_type,instrument,strike,expiry,model_score,
+                      (array_agg(time ORDER BY time))[1] AS entry_ts,
+                      (array_agg(close ORDER BY time))[1] AS entry_mark,
+                      (array_agg(time ORDER BY time DESC))[1] AS close_ts,
+                      (array_agg(close ORDER BY time DESC))[1] AS close_mark
+               FROM dedup
+               GROUP BY symbol,option_type,instrument,strike,expiry,model_score
+               HAVING min(time)=:track_start AND max(time)=:track_cutoff
+           ), ranked AS (
+               SELECT *,close_mark/entry_mark-1 AS return_pct,
+                      row_number() OVER (
+                          PARTITION BY option_type
+                          ORDER BY close_mark/entry_mark DESC,symbol
+                      ) AS side_rank,
+                      count(*) OVER (PARTITION BY option_type) AS eligible
+               FROM marks
+           )
+           SELECT side_rank,eligible,symbol,option_type,instrument,strike,expiry,
+                  model_score,entry_ts,entry_mark,close_ts,close_mark,return_pct
+           FROM ranked WHERE side_rank<=10 ORDER BY option_type,side_rank""",
+        {
+            "model_version": run["model_version"],
+            "prediction_ts": run["prediction_ts"],
+            "track_start": start,
+            "track_cutoff": cutoff,
+        },
+    )
+    selected = {row["instrument"] for row in items}
+    for row in rows:
+        row["model_selected"] = row["instrument"] in selected
+    by_side = {
+        side: [row for row in rows if row["option_type"] == side]
+        for side in ("CE", "PE")
+    }
+    coverage = {
+        side.lower(): int(side_rows[0]["eligible"]) if side_rows else 0
+        for side, side_rows in by_side.items()
+    }
+    return {
+        "available": True,
+        "track_session": track_session,
+        "entry_time_ist": "09:15 candle close (available 09:45)",
+        "exit_time_ist": "14:45 candle close (available 15:15)",
+        "universe": "exact CE/PE contracts resolved by the model at the frozen source timestamp",
+        "hindsight_only": True,
+        "coverage": coverage,
+        "ce": by_side["CE"], "pe": by_side["PE"],
+    }
 
 
 # NSE's session bars start at 09:15, so they sit on a :15/:45 grid. `timing`
@@ -188,6 +308,391 @@ async def summary() -> dict[str, Any]:
     }
 
 
+@router.get("/model")
+async def model_status() -> dict[str, Any]:
+    """Versioned nonlinear selector and its latest paper/shadow predictions.
+
+    This endpoint is read-only.  In particular, a shadow model remains visible
+    without being able to emit a paper ticket, so negative holdout evidence is
+    not hidden behind an apparently empty selection panel.
+    """
+    model = await _fetch_one(
+        """SELECT version, family, status, horizon_bars, cost_pct,
+                  cost_provenance, training_start, training_end,
+                  validation_start, validation_end, test_start, test_end,
+                  n_train, n_validation, n_test, feature_names, metrics,
+                  artifact_sha256, created_at
+           FROM vanguard_model_versions
+           ORDER BY (horizon_bars = 24) DESC,
+                    (status = 'paper_active') DESC, created_at DESC LIMIT 1"""
+    )
+    if model is None:
+        return {
+            "model": None, "predictions": {},
+            "note": "No nonlinear Vanguard model has been registered.",
+        }
+    latest = await _fetch_one(
+        """SELECT max(ts) AS ts, count(*) AS evaluated,
+                  count(*) FILTER (WHERE selected) AS selected,
+                  count(*) FILTER (WHERE realized_return IS NOT NULL) AS resolved,
+                  avg(realized_net_return) FILTER
+                      (WHERE realized_net_return IS NOT NULL) AS realized_net_mean,
+                  max(COALESCE(ranking_score,conservative_edge)) AS best_ranking_score,
+                  max(conservative_edge) AS best_edge,
+                  max(selection_threshold) AS selection_threshold
+           FROM vanguard_model_predictions WHERE model_version = :version
+             AND ts=(SELECT max(ts) FROM vanguard_model_predictions WHERE model_version=:version)""",
+        {"version": model["version"]},
+    )
+    expected_timing_policy = (
+        "completed_eod_direction_1_2d_v1"
+        if model.get("horizon_bars") == 24 else "completed_same_bar_v1"
+    )
+    cumulative = await _fetch_one(
+        """SELECT count(*) AS evaluated,
+                  count(*) FILTER (WHERE timing_policy IS DISTINCT FROM :timing_policy) AS legacy,
+                  count(*) FILTER (WHERE realized_return IS NOT NULL
+                      AND timing_policy=:timing_policy) AS resolved,
+                  avg(realized_net_return) FILTER
+                      (WHERE timing_policy=:timing_policy) AS realized_net_mean
+           FROM vanguard_model_predictions WHERE model_version=:version""",
+        {"version": model["version"], "timing_policy": expected_timing_policy})
+    recent = await _fetch_all(
+        """SELECT ts, symbol, option_type, q10_return, q50_return, q90_return,
+                  conservative_edge, selection_threshold,
+                  COALESCE(ranking_score,conservative_edge) AS ranking_score,
+                  selected, reason, instrument
+                  , realized_return, realized_net_return, resolved_at,
+                  source_mark_ts, decision_at, timing_policy
+           FROM vanguard_model_predictions
+           WHERE model_version = :version
+             AND ts=(SELECT max(ts) FROM vanguard_model_predictions WHERE model_version=:version)
+           ORDER BY ts DESC, COALESCE(ranking_score,conservative_edge) DESC LIMIT 30""",
+        {"version": model["version"]},
+    )
+    ratio_coverage = await _fetch_one(
+        """SELECT count(*) AS snapshots,
+                  count(*) FILTER (WHERE straddle_to_spot IS NOT NULL) AS straddles,
+                  count(*) FILTER (WHERE premium_pcr IS NOT NULL) AS premium_pcr,
+                  count(*) FILTER (WHERE wing_valid) AS valid_wings,
+                  min(ts) AS first_ts, max(ts) AS last_ts
+           FROM option_premium_ratios"""
+    )
+    return {
+        "model": model, "predictions": latest or {}, "cumulative": cumulative or {}, "recent": recent,
+        "ratio_coverage": ratio_coverage or {},
+        "paper_only": True,
+        "selection_policy": {
+            "m2_m5": "nonlinear features, not sequential vetoes",
+            "m7": "sizing only",
+            "abstention": "conservative edge must clear the versioned threshold",
+            "session_cap": 3,
+            "ratio_atm": "nearest common call/put strike to spot; forward series unavailable",
+            "premium_pcr": "premium turnover ratio, not buyer-initiated flow",
+            "wing_quality": "25-delta wings are missing unless both sides are within 0.08 delta",
+            "timing": "same completed NSE candle for timing, option and ratio inputs; no stale fallback",
+            "flow_rs": "previous completed session; current intraday derivations are not model inputs",
+            "activation": "frozen shadow observation; research training cannot auto-promote",
+            "target": model.get("metrics", {}).get("target_policy"),
+            "ranking_score": model.get("metrics", {}).get("ranking_score"),
+        },
+    }
+
+
+@router.get("/watchlist")
+async def model_watchlist(
+    sessions: int = Query(20, ge=1, le=100, description="Daily lists to return"),
+    source_session: date | None = Query(None, description="Read an earlier frozen list"),
+) -> dict[str, Any]:
+    """Immutable daily model lists and their next-session mark performance.
+
+    Watchlist rows are observations, not tickets.  Returns start at the first
+    exact-contract 30-minute close in the following observed session, so an
+    overnight gap is not silently presented as an executable model return.
+    """
+    runs = await _fetch_all(
+        """SELECT r.source_session, r.model_version, r.prediction_ts,
+                  r.track_session, r.item_count, r.top_n, r.selection_rule,
+                  r.status, r.generated_at, r.started_at, r.closed_at,
+                  m.family, m.horizon_bars, m.metrics AS model_metrics,
+                  count(i.id) FILTER (WHERE i.entry_mark IS NOT NULL) AS marked,
+                  count(i.id) FILTER
+                      (WHERE i.status='closed' AND i.close_return_pct IS NOT NULL) AS resolved,
+                  count(i.id) FILTER
+                      (WHERE i.status='closed' AND i.close_return_pct > 0) AS winners,
+                  count(i.id) FILTER
+                      (WHERE COALESCE(i.ranking_score,i.conservative_edge)
+                             >= i.selection_threshold) AS qualified,
+                  avg(i.close_return_pct) FILTER
+                      (WHERE i.status='closed' AND i.close_return_pct IS NOT NULL) AS avg_return_pct,
+                  avg(i.close_return_pct) FILTER
+                      (WHERE i.close_return_pct IS NOT NULL) AS close_avg_return_pct
+           FROM vanguard_watchlist_runs r
+           JOIN vanguard_model_versions m ON m.version=r.model_version
+           LEFT JOIN vanguard_watchlist_items i ON i.source_session=r.source_session
+           GROUP BY r.source_session, r.model_version, r.prediction_ts,
+                    r.track_session, r.item_count, r.top_n, r.selection_rule,
+                    r.status, r.generated_at, r.started_at, r.closed_at,
+                    m.family, m.horizon_bars, m.metrics
+           ORDER BY r.source_session DESC LIMIT :sessions""",
+        {"sessions": sessions},
+    )
+    if not runs:
+        return {
+            "latest": None, "items": [], "current": None, "current_items": [],
+            "latest_completed": None, "history": [], "paper_only": True,
+            "note": "No daily model watchlist has been captured yet.",
+        }
+    current = runs[0]
+    latest_completed = next(
+        (run for run in runs if run.get("status") == "closed" and (run.get("resolved") or 0) > 0),
+        None,
+    )
+    # The Frozen view defaults to the newest list with a completed outcome.
+    # The newest emitted list remains independently exposed as `current`, even
+    # while it is waiting for the next session.  This prevents an unresolved
+    # list from hiding yesterday's completed performance.
+    latest = (latest_completed or current) if source_session is None else next(
+        (r for r in runs if r["source_session"] == source_session), None)
+    if latest is None:
+        raise HTTPException(404, "Frozen session not found in the requested history window")
+    items = await _watchlist_items(latest["source_session"])
+    current_items = (
+        items if current["source_session"] == latest["source_session"]
+        else await _watchlist_items(current["source_session"])
+    )
+    policy = await _fetch_one(
+        "SELECT version,policy,registered_at FROM vanguard_watchlist_exit_policies ORDER BY registered_at DESC LIMIT 1")
+    analysed = [r for r in items if r.get("exit_analysis")]
+    exited = [r for r in analysed
+              if (r["exit_analysis"].get("runner") or {}).get("net_return_pct") is not None]
+    # Compare identical contracts, not a favourable subset with missing exits.
+    runner_net = [float(r["exit_analysis"]["runner"]["net_return_pct"]) for r in exited]
+    paired_hold = [float(r["exit_analysis"]["baseline_net_return_pct"]) for r in exited]
+    stop_control = [float(r["exit_analysis"]["hard_stop_control"]["net_return_pct"])
+                    for r in exited if (r["exit_analysis"].get("hard_stop_control") or {}).get("net_return_pct") is not None]
+    summary = {
+        "analysed": len(analysed), "runner_exited": len(exited), "total": len(items),
+        "runner_net_mean": sum(runner_net) / len(runner_net) if runner_net else None,
+        "paired_hold_net_mean": sum(paired_hold) / len(paired_hold) if paired_hold else None,
+        "worst_runner_net": min(runner_net) if runner_net else None,
+        "worst_paired_hold_net": min(paired_hold) if paired_hold else None,
+        "stop_only_net_mean": sum(stop_control) / len(stop_control) if stop_control and len(stop_control) == len(exited) else None,
+        "fully_paired": bool(items) and len(exited) == len(items),
+        "prospective": bool(analysed) and all(r["exit_analysis"].get("validation_basis") ==
+                                             "prospective_policy" for r in analysed),
+    }
+
+    # During the session the immutable EOD list does not exist yet. Surface a
+    # read-only preview from the newest completed model snapshot so "no list"
+    # is not confused with "no model run". The preview ranks every observable
+    # contract and shows threshold qualification separately; it never writes a
+    # watchlist row or creates a ticket.
+    preview_head = await _fetch_one(
+        """SELECT p.model_version, p.ts AS prediction_ts,
+                  m.family, m.horizon_bars, m.metrics AS model_metrics,
+                  (p.ts AT TIME ZONE 'Asia/Kolkata')::date AS source_session
+           FROM vanguard_model_predictions p
+           JOIN vanguard_model_versions m ON m.version=p.model_version
+           WHERE m.horizon_bars=24 AND m.status='shadow'
+             AND p.ts=(SELECT max(p2.ts) FROM vanguard_model_predictions p2
+                       JOIN vanguard_model_versions m2 ON m2.version=p2.model_version
+                       WHERE m2.horizon_bars=24 AND m2.status='shadow')
+           ORDER BY m.created_at DESC LIMIT 1"""
+    )
+    preview = None
+    preview_items: list[dict[str, Any]] = []
+    if preview_head and (
+        preview_head["source_session"] != current["source_session"]
+        or preview_head["model_version"] != current["model_version"]
+    ):
+        preview_items = await _fetch_all(
+            """WITH sides AS MATERIALIZED (
+                   SELECT p.*,
+                          row_number() OVER (
+                              PARTITION BY p.symbol
+                              ORDER BY COALESCE(p.ranking_score,p.conservative_edge) DESC,
+                                       p.option_type
+                          ) AS side_rank
+                   FROM vanguard_model_predictions p
+                   WHERE p.model_version=:version AND p.ts=:ts
+                     AND p.instrument IS NOT NULL AND p.entry_mark IS NOT NULL
+               ), best_sides AS MATERIALIZED (
+                   SELECT * FROM sides WHERE side_rank=1
+               )
+               SELECT row_number() OVER
+                          (ORDER BY conservative_edge DESC, symbol, option_type) AS rank,
+                      symbol, option_type,
+                      CASE WHEN option_type='CE' THEN 'bullish' ELSE 'bearish' END AS direction,
+                      instrument, strike, expiry, source_mark_ts, entry_mark AS source_mark,
+                      q10_return, q50_return, q90_return,
+                      conservative_edge,
+                      COALESCE(ranking_score,conservative_edge) AS ranking_score,
+                      selection_threshold,
+                      COALESCE(ranking_score,conservative_edge) >= selection_threshold AS qualified,
+                      reason
+               FROM best_sides
+               ORDER BY COALESCE(ranking_score,conservative_edge) DESC,
+                        symbol, option_type LIMIT 10""",
+            {"version": preview_head["model_version"], "ts": preview_head["prediction_ts"]},
+        )
+        # Rank is presentation metadata for this non-persisted preview. Assign
+        # it after the final SQL ordering so query-planner window placement
+        # cannot expose the pre-deduped CE/PE row number.
+        for index, row in enumerate(preview_items, start=1):
+            row["rank"] = index
+        preview = {
+            **preview_head,
+            "status": "provisional",
+            "item_count": len(preview_items),
+            "qualified": sum(1 for row in preview_items if row["qualified"]),
+            "selection_rule": (
+                "latest common completed feature/spot/option cohort; best CE/PE "
+                "direction per underlying; ranked by within-symbol median margin; "
+                "read-only and not frozen"
+            ),
+        }
+    market_benchmark = await _watchlist_market_benchmark(latest, items)
+    market_ranks = {
+        row["instrument"]: {"side_rank": row["side_rank"], "option_type": row["option_type"]}
+        for side in ("ce", "pe") for row in market_benchmark.get(side, [])
+    }
+    model_successes = []
+    for row in sorted(
+        (item for item in items
+         if item.get("status") == "closed" and (item.get("close_return_pct") or 0) > 0),
+        key=lambda item: float(item["close_return_pct"]), reverse=True,
+    ):
+        model_successes.append({
+            "rank": row["rank"], "symbol": row["symbol"],
+            "option_type": row["option_type"], "instrument": row["instrument"],
+            "entry_ts": row["entry_ts"], "entry_mark": row["entry_mark"],
+            "close_ts": row["close_ts"], "close_mark": row["close_mark"],
+            "return_pct": row["close_return_pct"],
+            "market_side_rank": market_ranks.get(row["instrument"], {}).get("side_rank"),
+        })
+    return {
+        "latest": latest,
+        "items": items,
+        "current": current,
+        "current_items": current_items,
+        "latest_completed": latest_completed,
+        "history": runs,
+        "preview": preview,
+        "preview_items": preview_items,
+        "paper_only": True,
+        "market_benchmark": market_benchmark,
+        "model_successes": model_successes,
+        "performance_basis": (
+            "first to latest exact-contract 30-minute close, capped at the scheduled "
+            "15:15 IST exit in the next observed NSE session; mark-to-mark before costs. "
+            "Best/worst exclude the entry candle. "
+            "Peak is an observed opportunity, not a realizable exit."
+        ),
+        "membership": (
+            "daily top-ranked shadow observation list; one side per underlying; "
+            "qualification is displayed separately and remains mandatory for tickets"
+        ),
+        "provenance": (
+            "Neural 1-2-session directional watchlist"
+            if latest.get("horizon_bars") == 24
+            else "Legacy next-session observation of a 30-minute option model"
+        ) + ", NOT the MP gap_overnight (BTST) strategy",
+        "horizon_note": (
+            "This frozen list predicts the underlying direction over the next one and two "
+            "sessions; its exact option is a next-session performance proxy."
+            if latest.get("horizon_bars") == 24 else
+            "This historical list came from the former next-30-minute model; carrying it "
+            "into the next session was an observation target, not a BTST forecast."
+        ),
+        "btst_note": "BTST is the separate MP structure book: prior-close signal, next-open exit. "
+                     "A list generated after the prior close cannot claim that overnight gap.",
+        "exit_policy": policy, "exit_summary": summary,
+    }
+
+
+@router.get("/strategy-journals")
+async def strategy_journals(
+    source_session: date | None = Query(None, description="Earlier swing list to inspect"),
+    limit: int = Query(200, ge=1, le=1000),
+) -> dict[str, Any]:
+    """Three isolated paper/shadow journals plus the new swing watchlist.
+
+    The API remains read-only. Between persisted 30-minute marks, the browser
+    overlays the existing quote-bus stream by exact instrument identifier.
+    """
+    runs = await _fetch_all(
+        """SELECT r.*,
+                  count(i.id) FILTER (WHERE i.entry_mark IS NOT NULL) marked,
+                  count(i.id) FILTER (WHERE i.status='closed') resolved,
+                  count(i.id) FILTER (WHERE i.return_pct>0) winners,
+                  avg(i.return_pct) FILTER (WHERE i.entry_mark IS NOT NULL) avg_return_pct
+           FROM vanguard_swing_watchlist_runs r
+           LEFT JOIN vanguard_swing_watchlist_items i USING (source_session)
+           GROUP BY r.source_session,r.prediction_ts,r.direction_model_version,
+                    r.contract_model_version,r.top_n,r.item_count,r.status,r.decision_at,
+                    r.entry_session,r.generated_at,r.updated_at
+           ORDER BY r.source_session DESC LIMIT 100"""
+    )
+    selected = None
+    if runs:
+        selected = runs[0] if source_session is None else next(
+            (row for row in runs if row["source_session"] == source_session), None)
+        if selected is None:
+            raise HTTPException(404, "Swing session not found")
+    swing_items = await _fetch_all(
+        """SELECT * FROM vanguard_swing_watchlist_items
+           WHERE source_session=:source_session ORDER BY rank""",
+        {"source_session": selected["source_session"]},
+    ) if selected else []
+    # The candle archive identifies contracts with Upstox keys; the live feed
+    # uses Fyers symbols. The subscription manager owns that translation and
+    # refreshes it every 45 seconds, so the browser can subscribe to the exact
+    # streamed contract without changing the immutable journal identity.
+    if swing_items:
+        from market_data.live_marks import registered_app_symbol
+        for item in swing_items:
+            item["live_symbol"] = registered_app_symbol(item.get("instrument"))
+    journal_rows = await _fetch_all(
+        """SELECT * FROM vanguard_strategy_journal
+           ORDER BY event_ts DESC,id DESC LIMIT :limit""",
+        {"limit": limit},
+    )
+    journals = {"gap_overnight": [], "swing_1_2d": [], "oversold_mtf": []}
+    for row in journal_rows:
+        journals[row["strategy"]].append(row)
+    # The daily output is two layers, and they must not be presented as one
+    # list with a flag: the research ranking is mandatory and always complete,
+    # while the actionable list is allowed to be empty and says why.
+    research = {
+        "CE": [row for row in swing_items if row["option_type"] == "CE"],
+        "PE": [row for row in swing_items if row["option_type"] == "PE"],
+    }
+    for side_rows in research.values():
+        side_rows.sort(key=lambda row: row.get("side_rank") or row["rank"])
+    actionable = [row for row in swing_items if row.get("actionable")]
+    return {
+        "swing": {
+            "latest": selected, "items": swing_items, "history": runs,
+            "research_ranking": research,
+            "actionable": {
+                "items": actionable,
+                "count": len(actionable),
+                "note": (selected or {}).get("actionable_note"),
+                "gates": "expected return, model confidence, liquidity, M7 risk",
+                "empty_is_valid": True,
+            },
+        },
+        "journals": journals,
+        "paper_only": True,
+        "realtime": {
+            "transport": "quote_bus", "coalesce_ms": 150,
+            "persisted_marks": "exact-contract completed 30-minute candles",
+            "decision_snapshot": "immutable 14:15 IST bar; available after 14:45",
+        },
+    }
+
+
 async def _journal_exists() -> bool:
     row = await _fetch_one(
         """SELECT to_regclass('public.candidate_evaluations') IS NOT NULL AS present"""
@@ -227,6 +732,7 @@ async def _funnel_from_journal(bar_ts: datetime) -> dict[str, Any] | None:
                   count(*) FILTER (WHERE leg_flow_present)  AS flow_present,
                   count(*) FILTER (WHERE leg_flow_fresh)    AS flow_fresh,
                   count(*) FILTER (WHERE leg_flow_strength) AS flow_strength,
+                  count(*) FILTER (WHERE leg_side_momentum) AS side_momentum,
                   count(*) FILTER (WHERE leg_sector_rs)     AS sector_rs,
                   count(*) FILTER (WHERE leg_regime)        AS regime,
                   count(*) FILTER (WHERE leg_timing)        AS timing,
@@ -1170,3 +1676,75 @@ async def mp_structure(
                          "names are shown for observation, never traded — "
                          "trading them would extrapolate beyond the study.",
     }
+
+
+@router.get("/oi-futures")
+async def oi_futures() -> dict[str, Any]:
+    """Cross-section of futures OI baselines: latest scored session per symbol.
+
+    Reads futures_oi_baselines (vanguard ingest/futures_oi.py + features/
+    m_futures_oi.py) — true stock/index FUTURES open interest, complementing
+    the MWPL/option-OI oi_positioning pipeline. Intraday, the newest row per
+    symbol is the live running OI scored against settled baselines; after the
+    EOD pass it is the settled session.
+    """
+    present = await _fetch_one(
+        "SELECT to_regclass('public.futures_oi_baselines') IS NOT NULL AS present")
+    if not (present and present["present"]):
+        return {"available": False,
+                "note": "futures_oi_baselines does not exist yet — run vanguard "
+                        "migration 017 and the futures OI ingest/feature steps."}
+
+    rows = await _fetch_all(
+        """SELECT DISTINCT ON (b.symbol)
+                  b.symbol, b.ts::text AS ts, b.expiry::text AS expiry, b.close,
+                  b.d_price_pct, b.oi, b.d_oi, b.d_oi_pct, b.d_oi_pct_z,
+                  b.oi_z, b.volume_z, b.oi_pctile, b.oi_state,
+                  b.activity_surge, b.is_rollover, b.lookback_sessions,
+                  st.sector
+           FROM futures_oi_baselines b
+           LEFT JOIN sector_taxonomy st ON st.symbol = b.symbol
+           WHERE b.ts >= (CURRENT_DATE - INTERVAL '7 days')
+           ORDER BY b.symbol, b.ts DESC""")
+
+    states: dict[str, int] = {}
+    for r in rows:
+        key = r.get("oi_state") or "flat"
+        states[key] = states.get(key, 0) + 1
+    freshness = await _fetch_one(
+        """SELECT max(ts)::text AS latest_session,
+                  max(computed_at)::text AS computed_at
+           FROM futures_oi_baselines""")
+
+    return {
+        "available": True,
+        "rows": rows,
+        "summary": {
+            "names": len(rows),
+            "states": states,
+            "surges": sum(1 for r in rows if r.get("activity_surge")),
+            "rollovers": sum(1 for r in rows if r.get("is_rollover")),
+        },
+        "latest_session": (freshness or {}).get("latest_session"),
+        "computed_at": (freshness or {}).get("computed_at"),
+    }
+
+
+@router.get("/oi-futures/{symbol}")
+async def oi_futures_symbol(
+    symbol: str,
+    sessions: int = Query(120, le=500),
+) -> dict[str, Any]:
+    """Per-symbol futures OI baseline history for the drill-down chart."""
+    rows = await _fetch_all(
+        """SELECT ts::text AS ts, expiry::text AS expiry, close, d_price_pct,
+                  oi, d_oi, d_oi_pct, d_oi_pct_z, oi_z, volume_z, oi_pctile,
+                  oi_state, activity_surge, is_rollover
+           FROM futures_oi_baselines
+           WHERE symbol = :symbol
+             AND ts >= (CURRENT_DATE - INTERVAL '2 years')
+           ORDER BY ts DESC
+           LIMIT :lim""",
+        {"symbol": symbol.upper(), "lim": sessions})
+    rows.reverse()
+    return {"symbol": symbol.upper(), "rows": rows, "sessions": len(rows)}

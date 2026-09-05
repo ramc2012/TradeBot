@@ -29,6 +29,8 @@ class SwingAgent(StrategyAgent):
         enable_spike_acceptance = bool(self.config.get("enable_spike_acceptance", True))
         enable_balance_area_breakout = bool(self.config.get("enable_balance_area_breakout", False))
         enable_trend_pullback = bool(self.config.get("enable_trend_pullback", False))
+        value_acceptance_min_periods = int(self.config.get("value_acceptance_min_periods", 2))
+        ib_periods = int(self.config.get("initial_balance_periods", 2))
 
         _rl_action_idx: int | None = None
         _rl_state = None
@@ -167,7 +169,10 @@ class SwingAgent(StrategyAgent):
             and current.close_price <= (prior.poc + entry_tolerance)
         ):
             candidate_action = "LONG"
-            if positive_response:
+            if current.consecutive_periods_in_prior_value < value_acceptance_min_periods:
+                flat_reason = "entry_filter_failed"
+                blockers.append("value_acceptance_periods_missing")
+            elif positive_response:
                 action = "LONG"
                 stop = min(current.low_price, current.initial_balance_low)
                 target = max(prior.vah, current.vah)
@@ -185,7 +190,10 @@ class SwingAgent(StrategyAgent):
             and current.close_price >= (prior.poc - entry_tolerance)
         ):
             candidate_action = "SHORT"
-            if negative_response:
+            if current.consecutive_periods_in_prior_value < value_acceptance_min_periods:
+                flat_reason = "entry_filter_failed"
+                blockers.append("value_acceptance_periods_missing")
+            elif negative_response:
                 action = "SHORT"
                 stop = max(current.high_price, current.initial_balance_high)
                 target = min(prior.val, current.val)
@@ -197,7 +205,8 @@ class SwingAgent(StrategyAgent):
         elif (
             enable_ib_failure
             and
-            current.high_price > (current.initial_balance_high + ib_break_tolerance)
+            current.period_count > ib_periods
+            and current.high_price > (current.initial_balance_high + ib_break_tolerance)
             and current.close_price < (current.initial_balance_high - ib_break_tolerance)
         ):
             candidate_action = "SHORT"
@@ -213,7 +222,8 @@ class SwingAgent(StrategyAgent):
         elif (
             enable_ib_failure
             and
-            current.low_price < (current.initial_balance_low - ib_break_tolerance)
+            current.period_count > ib_periods
+            and current.low_price < (current.initial_balance_low - ib_break_tolerance)
             and current.close_price > (current.initial_balance_low + ib_break_tolerance)
         ):
             candidate_action = "LONG"
@@ -228,16 +238,24 @@ class SwingAgent(StrategyAgent):
                 blockers.append("positive_response_missing")
         elif enable_auction_rejection_short and regime.label in {"failed_auction", "breakout_rejection", "reversal"} and "SHORT" in regime.allowed_directions:
             candidate_action = "SHORT"
-            action = "SHORT"
-            stop = current.high_price
-            setup_name = "auction_rejection_short"
-            rationale.append("Swing agent fades rejected upside auction.")
+            if negative_response:
+                action = "SHORT"
+                stop = current.high_price
+                setup_name = "auction_rejection_short"
+                rationale.append("Swing agent fades rejected upside auction with order-flow confirmation.")
+            else:
+                flat_reason = "entry_filter_failed"
+                blockers.append("negative_response_missing")
         elif enable_auction_rejection_long and regime.label in {"failed_auction", "breakout_rejection", "reversal"} and "LONG" in regime.allowed_directions:
             candidate_action = "LONG"
-            action = "LONG"
-            stop = current.low_price
-            setup_name = "auction_rejection_long"
-            rationale.append("Swing agent buys rejected downside auction.")
+            if positive_response:
+                action = "LONG"
+                stop = current.low_price
+                setup_name = "auction_rejection_long"
+                rationale.append("Swing agent buys rejected downside auction with order-flow confirmation.")
+            else:
+                flat_reason = "entry_filter_failed"
+                blockers.append("positive_response_missing")
         elif enable_spike_acceptance and current.spike_direction == "up" and current.close_price > current.vah:
             candidate_action = "LONG"
             if positive_initiative:

@@ -137,7 +137,10 @@ export default function AuctionDesk() {
   }, [streamLive, streamSlice, posData, status]);
 
   const ds = snap?.data_status;
-  const paperMode = (snap?.mode ?? "paper") !== "live";
+  // `snap.mode` describes how the analysis snapshot was built; it is not an
+  // execution-mode flag. This desk is backed only by the paper service and
+  // has no live-order route.
+  const paperMode = true;
 
   // Four separated facts (do NOT collapse into one green light):
   //  · execution_mode → paperMode pill (paper/live)
@@ -151,7 +154,7 @@ export default function AuctionDesk() {
   // `live data` additionally requires the global feed to be online and the
   // data mode to actually be `live` — a bar-inferred quote source can no
   // longer read green just because `live_mode` was true.
-  const { autoRunArmed, nseOpen, mcxOpen, feedOnline } = useSystemState();
+  const { nseOpen, mcxOpen, feedOnline } = useSystemState();
   const asOf = (snap?.request?.quote?.timestamp as string | undefined) ?? undefined;
   const sessionOpen = nseOpen || mcxOpen;
   const dataMode = classifyDataMode(ds);
@@ -171,6 +174,8 @@ export default function AuctionDesk() {
         : !sessionOpen
           ? { label: "closed", variant: "neutral" }
           : { label: "stale", variant: "warn" };
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const performanceSummary = positions.summary as any;
 
   return (
     <DeskShell
@@ -178,7 +183,7 @@ export default function AuctionDesk() {
       description="Market-profile auction theory · regime classification · agent sleeves · quote-derived order flow (sides inferred)"
       asOf={snap?.request?.quote?.timestamp as string | undefined}
       isFetching={liveQuery.isFetching}
-      isLive={autoRunArmed}
+      isLive={verdict.live}
       paperMode={paperMode}
       tabs={TABS}
       activeTab={activeTab}
@@ -206,7 +211,23 @@ export default function AuctionDesk() {
       {activeTab === "gates" ? <GatesPanel symbol={symbol} snapshot={snap} /> : null}
 
       {activeTab === "performance" ? (
-        <PaperPerformance summary={positions.summary} positions={positions} />
+        <div className="space-y-4">
+          {performanceSummary?.performance_quality === "historical_ledger_contaminated" ? (
+            <Section title="Performance measurement warning" icon={<ShieldAlert size={16} />}>
+              <p className="text-sm text-accent-amber">{performanceSummary.performance_note}</p>
+              <p className="mt-2 text-xs text-text-muted">
+                The figures below remain visible as an audit ledger, not as evidence that the current Auction rules have this expectancy.
+              </p>
+              <div className="mt-3 grid grid-cols-2 gap-2 md:grid-cols-4">
+                <MetricTile label="Clean closed sample" value={String(performanceSummary.prospective_performance?.closed_count ?? 0)} detail="post-guard trades only" />
+                <MetricTile label="Clean open sample" value={String(performanceSummary.prospective_performance?.open_count ?? 0)} />
+                <MetricTile label="Clean realized P/L" value={formatMoney(Number(performanceSummary.prospective_performance?.realized_pnl ?? 0))} color={tone(Number(performanceSummary.prospective_performance?.realized_pnl ?? 0))} />
+                <MetricTile label="Clean win rate" value={performanceSummary.prospective_performance?.win_rate == null ? "—" : `${(Number(performanceSummary.prospective_performance.win_rate) * 100).toFixed(1)}%`} detail="awaiting prospective closes" />
+              </div>
+            </Section>
+          ) : null}
+          <PaperPerformance summary={positions.summary} positions={positions} />
+        </div>
       ) : null}
 
       {activeTab === "memory" ? <RagMemory rag={snap?.rag_context} /> : null}
@@ -265,7 +286,13 @@ function AuctionTab({
       <div className="grid gap-4 xl:grid-cols-[minmax(0,1.05fr)_minmax(0,1fr)]">
         <Section title="Market profile (TPO)" icon={<Compass size={16} />} description={`${mp?.session_date || ""} · POC ${formatNumber(mp?.poc, 1)} · VA ${formatNumber(mp?.val, 0)}–${formatNumber(mp?.vah, 0)}`} rightSlot={<div className="flex flex-wrap items-center gap-2">{mp?.bracket_state ? <StatusBadge label={mp.bracket_state} variant="info" /> : null}<LastUpdated timestamp={asOf} label="snapshot" /></div>}>
           <div className="grid gap-3 lg:grid-cols-[minmax(0,1fr)_220px]">
-            <MarketProfileChart profile={mp} lastPrice={spot} height={420} />
+            <MarketProfileChart
+              profile={mp}
+              lastPrice={spot}
+              height={420}
+              prior={prior ? { vah: prior.vah, val: prior.val, poc: prior.poc } : null}
+              showLegend
+            />
             <ProfileLadder
               spot={spot}
               vah={mp?.vah} val={mp?.val} poc={mp?.poc}
@@ -276,11 +303,12 @@ function AuctionTab({
               height={400}
             />
           </div>
-          <div className="mt-3 grid grid-cols-2 gap-2.5 md:grid-cols-4">
+          <div className="mt-3 grid grid-cols-2 gap-2.5 md:grid-cols-5">
             <MetricTile size="sm" label="IB range" value={formatNumber(mp?.initial_balance_range, 1)} detail="initial balance" />
             <MetricTile size="sm" label="Day range" value={formatNumber(mp?.day_range, 1)} />
             <MetricTile size="sm" label="Value migration" value={formatNumber(mp?.value_migration, 1)} color={tone(mp?.value_migration)} />
             <MetricTile size="sm" label="POC shift" value={formatNumber(mp?.poc_shift, 1)} />
+            <MetricTile size="sm" label="Rotation" value={formatNumber(mp?.rotation_factor, 0)} detail={mp?.rotation_intensity != null ? `intensity ${formatPct(mp.rotation_intensity, 0)}` : undefined} color={tone(mp?.rotation_factor)} />
           </div>
         </Section>
 

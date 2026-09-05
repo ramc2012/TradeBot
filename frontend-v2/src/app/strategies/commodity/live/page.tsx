@@ -45,6 +45,7 @@ import { StrategyLiveStream } from "@/components/strategies/shared/StrategyLiveS
 import {
   api as apiClient,
   getChartUniverse,
+  getBrokerStatus,
   getCommodityIndexMonitor,
   getCommodityOverview,
   getCommodityProfileHistory,
@@ -52,6 +53,7 @@ import {
   runCommodityStrategyOnce,
   startCommodityStrategyAgent,
 } from "@/lib/api";
+import { isBrokerReady, type BrokerStatusEntry } from "@/lib/broker-status";
 import {
   createCommodityOverviewSocket,
   createCommodityWatchlistSocket,
@@ -3009,6 +3011,13 @@ function Row({ k, v, cols }: { k: string; v: string; cols?: number }) {
 function CommodityMcxDesk({ section }: { section?: BottomTabKey | "watchlist" }) {
   const queryClient = useQueryClient();
 
+  const brokerStatusQuery = useQuery({
+    queryKey: ["system", "broker-status"],
+    queryFn: async () => (await getBrokerStatus()).data as BrokerStatusEntry[],
+    refetchInterval: HEARTBEAT_POLL_MS,
+    refetchOnWindowFocus: false,
+  });
+
   // Socket-primary streams. Falls back to the heartbeat poll if the socket
   // ever disconnects.
   const overviewQuery = useLiveSnapshotQuery<Record<string, unknown>>({
@@ -3348,11 +3357,21 @@ function CommodityMcxDesk({ section }: { section?: BottomTabKey | "watchlist" })
       ? "text-amber-300"
       : "text-text-muted";
 
-  // Broker badges from data_health.{fyers,upstox}_token_health
+  // The commodity state is shared between the core and strategy processes,
+  // but its per-process data_health snapshot is intentionally ephemeral. Use
+  // the canonical broker-status endpoint first so a healthy core-plane Upstox
+  // session is not rendered as disconnected after either process restarts.
   const dataHealth = (status as unknown as { data_health?: Record<string, Record<string, unknown>> })
     .data_health || {};
-  const fyersValid = Boolean(dataHealth.fyers_token_health?.valid);
-  const upstoxValid = Boolean(dataHealth.upstox_token_health?.valid);
+  const brokerStatuses = Array.isArray(brokerStatusQuery.data) ? brokerStatusQuery.data : [];
+  const fyersStatus = brokerStatuses.find((item) => item.broker === "fyers");
+  const upstoxStatus = brokerStatuses.find((item) => item.broker === "upstox");
+  const fyersValid = fyersStatus
+    ? isBrokerReady(fyersStatus)
+    : Boolean(dataHealth.fyers_token_health?.valid);
+  const upstoxValid = upstoxStatus
+    ? isBrokerReady(upstoxStatus)
+    : Boolean(dataHealth.upstox_token_health?.valid);
 
   return (
     <div className="flex h-full flex-col overflow-hidden bg-bg-primary text-text-primary">

@@ -1506,6 +1506,7 @@ def test_swing_agent_trades_eighty_percent_rule_long() -> None:
         value_area_overlap=0.58,
         poc_shift=-10.0,
         value_migration=-8.0,
+        consecutive_periods_in_prior_value=2,
     )
 
     decision = agent.evaluate(
@@ -1995,6 +1996,26 @@ def test_live_data_status_accepts_fresh_futures_book_reconstruction() -> None:
     assert status["tick_ready"] is True
     assert status["tick_history_count"] == 4
     assert status["execution_ready"] is True
+
+
+def test_live_data_status_never_labels_historical_replay_execution_ready() -> None:
+    old = datetime.now(timezone.utc) - timedelta(days=1)
+    status = _build_live_data_status(
+        current_rows=[{
+            "time": old.isoformat(), "open": 24200.0, "high": 24201.0,
+            "low": 24199.0, "close": 24200.5, "volume": 100.0,
+        }],
+        snapshot_mode="historical_replay",
+        quote_source="historical_bar_inference",
+        order_flow_source="bar_inference",
+        quote_history_payload=[],
+        trades_payload=[{"price": 24200.5}],
+        stale_data_seconds=0.0,
+    )
+
+    assert status["live_mode"] is False
+    assert status["execution_ready"] is False
+    assert status["degraded_reason"] == "historical_replay_only"
 
 
 def test_orderflow_tape_filter_drops_cross_symbol_price_clusters() -> None:
@@ -3186,6 +3207,43 @@ def test_market_cycle_skips_all_analysis_when_nse_is_closed(monkeypatch) -> None
     build.assert_not_awaited()
 
 
+def test_paper_cycle_blocks_historical_replay_before_any_durable_write(monkeypatch) -> None:
+    monkeypatch.setattr(auction_automation, "_nse_market_open", lambda: True)
+    monkeypatch.setattr(
+        auction_automation,
+        "_sync_order_flow_book_subscriptions",
+        AsyncMock(return_value={"status": "broker_not_supported"}),
+    )
+    monkeypatch.setattr(
+        auction_automation,
+        "build_live_analysis",
+        AsyncMock(return_value={
+            "symbol_code": "NIFTY",
+            "session_date": "2026-08-31",
+            "request": {
+                "session": {"session_date": "2026-08-31"},
+                "metadata": {
+                    "snapshot_mode": "historical_replay",
+                    "history_source": "timescaledb_spot_1minute",
+                },
+            },
+        }),
+    )
+
+    def _must_not_construct(*args, **kwargs):
+        raise AssertionError("paper service must not run on a replay")
+
+    monkeypatch.setattr(auction_automation, "AuctionIntelligenceService", _must_not_construct)
+
+    payload = asyncio.run(auction_automation.capture_live_paper_cycle("NIFTY"))
+
+    assert payload["status"] == "data_not_current"
+    assert payload["no_trade_gate"] == "historical_replay_blocked"
+    assert payload["execution_count"] == 0
+    assert payload["shadow_record_count"] == 0
+    assert payload["journal_path_count"] == 0
+
+
 def test_order_flow_subscription_reconciliation_rolls_contracts(monkeypatch) -> None:
     add = AsyncMock(return_value=2)
     remove = AsyncMock(return_value=2)
@@ -3220,6 +3278,7 @@ def test_order_flow_subscription_reconciliation_rolls_contracts(monkeypatch) -> 
 
 
 def test_paper_cycle_rechecks_session_before_trade_writes(monkeypatch) -> None:
+    session_date = auction_automation._now_ist().date().isoformat()
     market_state = iter([True, False])
     monkeypatch.setattr(auction_automation, "_nse_market_open", lambda: next(market_state))
     monkeypatch.setattr(
@@ -3233,11 +3292,11 @@ def test_paper_cycle_rechecks_session_before_trade_writes(monkeypatch) -> None:
         AsyncMock(
             return_value={
                 "symbol_code": "NIFTY",
-                "session_date": "2026-07-10",
+                "session_date": session_date,
                 "request": {
                     "session": {
                         "symbol": "NIFTY FUT",
-                        "session_date": "2026-07-10",
+                        "session_date": session_date,
                         "last_price": 24200.0,
                         "minutes_to_close": 0,
                         "broker_connected": True,
@@ -3245,7 +3304,7 @@ def test_paper_cycle_rechecks_session_before_trade_writes(monkeypatch) -> None:
                     },
                     "portfolio": {"net_liquidation": 1_000_000.0},
                     "quote": {
-                        "timestamp": "2026-07-10T15:29:59+05:30",
+                        "timestamp": f"{session_date}T15:29:59+05:30",
                         "bid": 24199.5,
                         "ask": 24200.5,
                         "bid_size": 10.0,
@@ -3287,6 +3346,43 @@ def test_paper_cycle_rechecks_session_before_trade_writes(monkeypatch) -> None:
     assert payload["journal_path_count"] == 0
     _Service.paper.record_analysis.assert_not_called()
     _Service.paper.sync_positions.assert_not_awaited()
+
+
+def test_paper_summary_separates_new_clean_cohort_from_legacy_ledger(tmp_path) -> None:
+    from auction_intelligence.paper.book import (
+        CURRENT_PERFORMANCE_COHORT,
+        PaperPositionBook,
+    )
+
+    book = PaperPositionBook(tmp_path)
+    state = {
+        "open_positions": [],
+        "closed_positions": [
+            {"realized_pnl": -1000.0, "closed_at": "2026-08-01T10:00:00+00:00"},
+            {
+                "realized_pnl": 250.0,
+                "closed_at": "2026-09-01T10:00:00+00:00",
+                "performance_cohort": CURRENT_PERFORMANCE_COHORT,
+            },
+        ],
+        "last_synced_at": "2026-09-01T10:00:00+00:00",
+    }
+
+    summary = book._summary(state)
+
+    assert summary["realized_pnl"] == -750.0
+    assert summary["performance_quality"] == "historical_ledger_contaminated"
+    assert summary["prospective_performance"] == {
+        "cohort": CURRENT_PERFORMANCE_COHORT,
+        "open_count": 0,
+        "closed_count": 1,
+        "realized_pnl": 250.0,
+        "unrealized_pnl": 0.0,
+        "total_pnl": 250.0,
+        "wins": 1,
+        "win_rate": 1.0,
+        "sample_ready": True,
+    }
 
 
 def test_mp_dashboard_endpoint_returns_aggregated_structure(monkeypatch) -> None:
@@ -3530,3 +3626,325 @@ def test_durable_mp_persist_spools_when_postgres_is_unavailable(monkeypatch, tmp
     assert persisted == 0
     assert spooled_rows[-1]["date"] == "2026-04-20"
     assert durable_rows[-1]["poc"] == row["poc"]
+
+
+def test_market_profile_rotation_factor_trend_and_balance() -> None:
+    config = clone_default_config()
+    engine = MarketProfileEngine(config["market_profile"])
+    start = datetime(2026, 4, 1, 9, 15)
+
+    trending = engine.build_profile(
+        "NIFTY FUT",
+        _make_bars(start, [(101, 102, 100.5, 101.8), (101.8, 103, 101.5, 102.8), (102.8, 104, 102.5, 103.8), (103.8, 105, 103.5, 104.8)]),
+    )
+    assert trending.rotation_factor == 6
+    assert trending.rotation_intensity == 1.0
+    assert trending.rotation_factors_by_period == [2, 2, 2]
+
+    balanced = engine.build_profile(
+        "NIFTY FUT",
+        _make_bars(start, [(100, 102, 99, 101), (101, 102, 99, 100), (100, 102, 99, 101), (101, 102, 99, 100)]),
+    )
+    assert balanced.rotation_factor == 0
+    assert balanced.rotation_intensity == 0.0
+
+
+def test_market_profile_counts_consecutive_periods_in_prior_value() -> None:
+    config = clone_default_config()
+    engine = MarketProfileEngine(config["market_profile"])
+    start = datetime(2026, 4, 1, 9, 15)
+    prior = _make_profile_snapshot(vah=105.0, val=101.0, poc=103.0)
+
+    current = engine.build_profile(
+        "NIFTY FUT",
+        _make_bars(start, [(99, 100, 98, 99), (100, 103, 99.5, 102), (102, 104.5, 101.5, 104)]),
+        prior_profile=prior,
+    )
+    assert current.consecutive_periods_in_prior_value == 2
+
+    outside_last = engine.build_profile(
+        "NIFTY FUT",
+        _make_bars(start, [(102, 103, 101, 102), (102, 104, 101.5, 103), (103, 108, 102.5, 107)]),
+        prior_profile=prior,
+    )
+    assert outside_last.consecutive_periods_in_prior_value == 0
+
+    no_prior = engine.build_profile(
+        "NIFTY FUT",
+        _make_bars(start, [(102, 103, 101, 102), (102, 104, 101.5, 103)]),
+    )
+    assert no_prior.consecutive_periods_in_prior_value == 0
+
+
+def test_regime_engine_rotation_confirms_trend_confidence() -> None:
+    config = clone_default_config()
+    regime_engine = RegimeEngine(config["regime"])
+    flow = _make_order_flow_snapshot()
+    trend_shape = {
+        "close_price": 22545.0,
+        "poc_shift": 20.0,
+        "value_area_overlap": 0.2,
+    }
+
+    confirming = regime_engine.classify(
+        current=_make_profile_snapshot(rotation_factor=6, rotation_intensity=0.8, **trend_shape),
+        prior=None,
+        order_flow=flow,
+    )
+    assert confirming.label == "trend_day"
+    assert round(confirming.confidence, 4) == 0.82
+    assert confirming.scorecard["rotation_intensity"] == 0.8
+
+    conflicting = regime_engine.classify(
+        current=_make_profile_snapshot(rotation_factor=-6, rotation_intensity=-0.8, **trend_shape),
+        prior=None,
+        order_flow=flow,
+    )
+    assert conflicting.label == "trend_day"
+    assert round(conflicting.confidence, 4) == 0.72
+
+
+def test_regime_engine_rotation_flags_balance() -> None:
+    config = clone_default_config()
+    regime_engine = RegimeEngine(config["regime"])
+    flow = _make_order_flow_snapshot()
+    balance_shape = {
+        "value_area_overlap": 0.75,
+        "range_extension_up": 30.0,
+        "range_extension_down": 20.0,
+        "poc_shift": 0.0,
+    }
+
+    quiet = regime_engine.classify(
+        current=_make_profile_snapshot(rotation_factor=0, rotation_intensity=0.0, **balance_shape),
+        prior=None,
+        order_flow=flow,
+    )
+    assert quiet.label == "balance"
+    assert round(quiet.confidence, 4) == 0.75
+
+    rotating = regime_engine.classify(
+        current=_make_profile_snapshot(rotation_factor=4, rotation_intensity=0.5, **balance_shape),
+        prior=None,
+        order_flow=flow,
+    )
+    assert rotating.label == "balance"
+    assert round(rotating.confidence, 4) == 0.72
+
+
+def _eighty_percent_context(config, consecutive_periods: int) -> AgentContext:
+    prior = _make_profile_snapshot(
+        high_price=22520.0,
+        low_price=22440.0,
+        close_price=22485.0,
+        poc=22478.0,
+        vah=22498.0,
+        val=22458.0,
+        value_area_overlap=None,
+        poc_shift=None,
+        value_migration=None,
+        prior_poc_untouched=None,
+    )
+    current = _make_profile_snapshot(
+        open_price=22428.0,
+        close_price=22472.0,
+        high_price=22488.0,
+        low_price=22418.0,
+        poc=22468.0,
+        vah=22490.0,
+        val=22452.0,
+        initial_balance_high=22482.0,
+        initial_balance_low=22428.0,
+        value_area_overlap=0.58,
+        poc_shift=-10.0,
+        value_migration=-8.0,
+        consecutive_periods_in_prior_value=consecutive_periods,
+    )
+    return AgentContext(
+        session=SessionContext(symbol="NIFTY FUT", session_date=date(2026, 4, 2), last_price=22472.0),
+        portfolio=PortfolioSnapshot(net_liquidation=1_000_000.0),
+        current_profile=current,
+        prior_profile=prior,
+        order_flow=_make_order_flow_snapshot(
+            mid_price=22472.0,
+            micro_price=22472.2,
+            delta=320.0,
+            trade_imbalance=0.42,
+            order_flow_imbalance=0.28,
+            book_pressure=0.46,
+            timing_confidence=0.86,
+        ),
+        regime=RegimeAssessment(
+            label="developing_balance",
+            confidence=0.68,
+            allowed_directions=["LONG", "SHORT"],
+            reasons=["Auction re-entered value from below."],
+        ),
+        config=config,
+    )
+
+
+def test_swing_agent_eighty_percent_rule_requires_value_acceptance() -> None:
+    config = clone_default_config()
+    config["agents"]["swing"]["enable_eighty_percent_rule"] = True
+    agent = SwingAgent(config["agents"]["swing"])
+
+    decision = agent.evaluate(_eighty_percent_context(config, consecutive_periods=1))
+
+    assert decision.action == "FLAT"
+    assert "value_acceptance_periods_missing" in decision.metadata["blocking_reasons"]
+
+
+def _ib_failure_context(config, *, side: str) -> AgentContext:
+    if side == "short":
+        current = _make_profile_snapshot(
+            open_price=22470.0,
+            high_price=22560.0,
+            low_price=22430.0,
+            close_price=22462.0,
+            poc=22470.0,
+            vah=22500.0,
+            val=22445.0,
+            initial_balance_high=22505.0,
+            initial_balance_low=22445.0,
+            period_count=5,
+        )
+        flow = _make_order_flow_snapshot(
+            delta=-420.0,
+            trade_imbalance=-0.35,
+            order_flow_imbalance=-0.22,
+            book_pressure=-0.30,
+            timing_confidence=0.8,
+        )
+        regime = RegimeAssessment(
+            label="developing_balance",
+            confidence=0.68,
+            allowed_directions=["LONG", "SHORT"],
+            reasons=["IB breakout failed."],
+        )
+    else:
+        current = _make_profile_snapshot(
+            open_price=22470.0,
+            high_price=22510.0,
+            low_price=22390.0,
+            close_price=22488.0,
+            poc=22480.0,
+            vah=22505.0,
+            val=22450.0,
+            initial_balance_high=22505.0,
+            initial_balance_low=22445.0,
+            period_count=5,
+        )
+        flow = _make_order_flow_snapshot(
+            delta=420.0,
+            trade_imbalance=0.35,
+            order_flow_imbalance=0.22,
+            book_pressure=0.30,
+            timing_confidence=0.8,
+        )
+        regime = RegimeAssessment(
+            label="developing_balance",
+            confidence=0.68,
+            allowed_directions=["LONG", "SHORT"],
+            reasons=["IB break lower failed."],
+        )
+    return AgentContext(
+        session=SessionContext(symbol="NIFTY FUT", session_date=date(2026, 4, 2), last_price=current.close_price),
+        portfolio=PortfolioSnapshot(net_liquidation=1_000_000.0),
+        current_profile=current,
+        prior_profile=None,
+        order_flow=flow,
+        regime=regime,
+        config=config,
+    )
+
+
+def test_swing_agent_trades_ib_failure_short_and_long() -> None:
+    config = clone_default_config()
+    config["agents"]["swing"]["enable_eighty_percent_rule"] = False
+    config["agents"]["swing"]["enable_ib_failure"] = True
+    agent = SwingAgent(config["agents"]["swing"])
+
+    short_decision = agent.evaluate(_ib_failure_context(config, side="short"))
+    assert short_decision.action == "SHORT"
+    assert short_decision.metadata["setup_name"] == "ib_failure_short"
+
+    long_decision = agent.evaluate(_ib_failure_context(config, side="long"))
+    assert long_decision.action == "LONG"
+    assert long_decision.metadata["setup_name"] == "ib_failure_long"
+
+
+def test_swing_agent_ib_failure_blocked_during_ib_formation() -> None:
+    config = clone_default_config()
+    config["agents"]["swing"]["enable_eighty_percent_rule"] = False
+    config["agents"]["swing"]["enable_ib_failure"] = True
+    agent = SwingAgent(config["agents"]["swing"])
+
+    context = _ib_failure_context(config, side="short")
+    context.current_profile.period_count = 2
+    decision = agent.evaluate(context)
+
+    assert decision.action == "FLAT"
+    assert decision.metadata["setup_name"] != "ib_failure_short"
+
+
+def _auction_rejection_context(config, *, with_response: bool) -> AgentContext:
+    current = _make_profile_snapshot(
+        open_price=22470.0,
+        high_price=22520.0,
+        low_price=22390.0,
+        close_price=22470.0,
+        poc=22480.0,
+        vah=22505.0,
+        val=22450.0,
+        initial_balance_high=22515.0,
+        initial_balance_low=22445.0,
+        period_count=5,
+    )
+    if with_response:
+        flow = _make_order_flow_snapshot(
+            delta=420.0,
+            trade_imbalance=0.35,
+            order_flow_imbalance=0.22,
+            book_pressure=0.30,
+            timing_confidence=0.8,
+        )
+    else:
+        flow = _make_order_flow_snapshot(
+            delta=-100.0,
+            trade_imbalance=-0.02,
+            order_flow_imbalance=-0.02,
+            book_pressure=-0.01,
+            timing_confidence=0.4,
+        )
+    regime = RegimeAssessment(
+        label="failed_auction",
+        confidence=0.76,
+        allowed_directions=["LONG"],
+        reasons=["Range extension below prior low failed to hold."],
+    )
+    return AgentContext(
+        session=SessionContext(symbol="NIFTY FUT", session_date=date(2026, 4, 2), last_price=22470.0),
+        portfolio=PortfolioSnapshot(net_liquidation=1_000_000.0),
+        current_profile=current,
+        prior_profile=None,
+        order_flow=flow,
+        regime=regime,
+        config=config,
+    )
+
+
+def test_swing_agent_auction_rejection_long_requires_positive_response() -> None:
+    config = clone_default_config()
+    config["agents"]["swing"]["enable_eighty_percent_rule"] = False
+    config["agents"]["swing"]["enable_ib_failure"] = False
+    config["agents"]["swing"]["enable_auction_rejection_long"] = True
+    agent = SwingAgent(config["agents"]["swing"])
+
+    accepted = agent.evaluate(_auction_rejection_context(config, with_response=True))
+    assert accepted.action == "LONG"
+    assert accepted.metadata["setup_name"] == "auction_rejection_long"
+
+    rejected = agent.evaluate(_auction_rejection_context(config, with_response=False))
+    assert rejected.action == "FLAT"
+    assert "positive_response_missing" in rejected.metadata["blocking_reasons"]

@@ -120,6 +120,10 @@ class MarketProfileSnapshot:
     value_migration: Optional[float] = None
     prior_poc_untouched: Optional[bool] = None
     bracket_state: Optional[str] = None
+    rotation_factor: int = 0
+    rotation_intensity: float = 0.0
+    rotation_factors_by_period: list[int] = field(default_factory=list)
+    consecutive_periods_in_prior_value: int = 0
 
 
 @dataclass

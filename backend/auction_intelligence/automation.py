@@ -249,6 +249,49 @@ async def capture_live_paper_cycle(
 
     snapshot = await build_live_analysis(symbol_code=symbol)
     request = snapshot["request"]
+    metadata = dict(request.get("metadata") or {})
+    snapshot_mode = str(metadata.get("snapshot_mode") or "unknown")
+    snapshot_session = str((request.get("session") or {}).get("session_date") or "")
+    current_session = _now_ist().date().isoformat()
+
+    # Never let the market-hours paper loop operate on the replay fallback.
+    # `build_live_analysis` deliberately returns the newest historical session
+    # when today's minute feed is absent so the UI can still explain the last
+    # auction. Before this guard the paper supervisor re-analysed that old noon
+    # snapshot every three minutes, persisted duplicate shadow observations and
+    # ran the position-management path with stale spot/regime state. A replay is
+    # valid research input, but it is not a current-session paper decision.
+    if snapshot_mode != "live_session" or snapshot_session != current_session:
+        result = {
+            "status": "data_not_current",
+            "symbol_code": str(snapshot.get("symbol_code") or symbol).upper(),
+            "session_date": snapshot_session or snapshot.get("session_date"),
+            "snapshot_mode": snapshot_mode,
+            "source": metadata.get("history_source"),
+            "decision_count": 0,
+            "non_flat_decision_count": 0,
+            "risk_allowed": False,
+            "risk_reasons": ["current_session_market_data_unavailable"],
+            "flat_reasons": {},
+            "no_trade_gate": "historical_replay_blocked",
+            "execution_count": 0,
+            "journal_paths": [],
+            "journal_path_count": 0,
+            "paper_positions_summary": None,
+            "shadow_record_count": 0,
+            "shadow_storage": None,
+            "guard_stage": "before_analysis",
+            "expected_session": current_session,
+        }
+        logger.warning(
+            "auction.cycle blocked stale replay symbol={symbol} snapshot_session={snapshot} "
+            "expected_session={expected} mode={mode}",
+            symbol=result["symbol_code"], snapshot=snapshot_session,
+            expected=current_session, mode=snapshot_mode,
+        )
+        return result
+
+    service = AuctionIntelligenceService(paper_mode=True)
     # Paper mode bypasses live-execution data-quality gates. The live-snapshot
     # builder sets session.broker_connected = data_status.execution_ready and
     # inflates stale_data_seconds past the budget whenever the order-flow path
@@ -261,25 +304,41 @@ async def capture_live_paper_cycle(
     session_payload = dict(request["session"])
     session_payload["broker_connected"] = True
     session_payload["stale_data_seconds"] = 0.0
-    # Paper-mode portfolio sizing fix (2026-06-03): _load_portfolio_snapshot
-    # populates net_liquidation from the LIVE broker funds (adapter.get_funds).
-    # This data/paper broker account is near-empty, so net_liquidation was a
-    # few thousand rupees → every agent's
-    #   quantity = floor(net_liq * sleeve_fraction / margin_per_lot) * lot_size
-    # floored to 0 → all three agents returned `insufficient_notional` every
-    # cycle → AI made 0 paper trades for its entire lifetime. Paper trading
-    # must size against the PAPER account's notional capital (the same
-    # shadow_net_liquidation the shadow path uses), exactly like every other
-    # paper desk uses its ₹1,000,000 PaperPortfolio — not the real broker
-    # balance. Override net_liquidation for the paper cycle only; live-money
-    # trading still sizes against real funds.
+    # Paper analysis must consume the PAPER ledger, not broker cash and not a
+    # fresh fixed-capital reset on every cycle. Otherwise open-count, daily P/L
+    # and realised drawdown never reach the risk governor and sizing continues
+    # as though earlier paper losses and positions did not exist.
     portfolio_payload = dict(request.get("portfolio", {}))
-    paper_capital = float(
+    configured_capital = float(
         clone_default_config().get("paper_trading", {}).get("shadow_net_liquidation", 1_000_000.0)
     )
-    if not portfolio_payload.get("net_liquidation") or float(portfolio_payload["net_liquidation"]) < paper_capital:
-        portfolio_payload["net_liquidation"] = paper_capital
-    service = AuctionIntelligenceService(paper_mode=True)
+    paper_state: dict[str, Any] = {}
+    try:
+        paper_state = await service.paper.status()
+    except Exception as exc:
+        logger.warning(f"auction paper-ledger snapshot unavailable; using configured capital: {exc}")
+    paper_summary = dict(paper_state.get("summary") or {})
+    open_positions = list(paper_state.get("open_positions") or [])
+    portfolio_payload["net_liquidation"] = max(
+        1.0, float(paper_summary.get("total_equity") or configured_capital)
+    )
+    portfolio_payload["daily_realized_pnl"] = float(
+        paper_summary.get("daily_realized_pnl") or 0.0
+    )
+    portfolio_payload["open_positions"] = int(paper_summary.get("open_count") or 0)
+    premium_by_underlying: dict[str, float] = {}
+    for position in open_positions:
+        underlying = str(position.get("underlying_symbol") or "").upper().replace(" FUT", "").strip()
+        premium_by_underlying[underlying] = premium_by_underlying.get(underlying, 0.0) + (
+            float(position.get("entry_premium") or 0.0)
+            * float(position.get("quantity") or 0.0)
+        )
+    session_symbol = str(session_payload.get("symbol") or "")
+    session_underlying = session_symbol.upper().replace(" INDEX", "").replace(" FUT", "").strip()
+    symbol_exposure = dict(portfolio_payload.get("symbol_exposure") or {})
+    symbol_exposure[session_symbol] = premium_by_underlying.get(session_underlying, 0.0)
+    portfolio_payload["symbol_exposure"] = symbol_exposure
+    portfolio_payload["correlated_exposure"] = sum(premium_by_underlying.values())
     bundle = await service.analyze_with_options(
         session=SessionContext(**session_payload),
         bars=[MarketBar(**_parse_bar(item)) for item in request.get("bars", [])],

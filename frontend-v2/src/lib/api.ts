@@ -797,6 +797,11 @@ export const uploadBacktestCsv = (formData: FormData) =>
 // "run a cycle" action to call from a browser — `make daily-cycle` on the
 // research host is the only thing that advances it.
 export const getVanguardSummary = () => api.get("/api/vanguard/summary");
+export const getVanguardModel = () => api.get("/api/vanguard/model");
+export const getVanguardWatchlist = (sessions = 20, source_session?: string) =>
+  api.get("/api/vanguard/watchlist", { params: { sessions, source_session } });
+export const getVanguardStrategyJournals = (source_session?: string, limit = 200) =>
+  api.get("/api/vanguard/strategy-journals", { params: { source_session, limit } });
 export const getVanguardFunnel = (ts?: string) =>
   api.get("/api/vanguard/funnel", { params: { ts } });
 export const getVanguardSelection = (ts?: string, limit = 100) =>
@@ -830,3 +835,8 @@ export const getVanguardCrossSection = (horizon?: number) =>
 // class with no per-symbol dimension, so this can never be a symbol column.
 export const getVanguardSentiment = (limit = 60) =>
   api.get("/api/vanguard/sentiment", { params: { limit } });
+// True stock/index FUTURES open interest (per-contract, Upstox candle OI) —
+// complements /sentiment's aggregate participant OI and /market's MWPL leg.
+export const getVanguardOiFutures = () => api.get("/api/vanguard/oi-futures");
+export const getVanguardOiFuturesSymbol = (symbol: string, sessions = 120) =>
+  api.get(`/api/vanguard/oi-futures/${encodeURIComponent(symbol)}`, { params: { sessions } });

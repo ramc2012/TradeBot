@@ -112,6 +112,12 @@ DEFAULT_COMMODITY_ARCHIVE_DIR = Path(__file__).resolve().parent.parent / "runtim
 DEFAULT_COMMODITY_SCAN_TIMEOUT_SECONDS = 120
 DEFAULT_COMMODITY_SYMBOL_SCAN_TIMEOUT_SECONDS = 12
 DEFAULT_COMMODITY_SCAN_TIMEOUT_HEADROOM_SECONDS = 60
+# Closed-market preparation resolves contracts and refreshes the retained
+# watchlist, but does not manage positions or admit entries. Running that
+# broker/history-heavy pass every 30 seconds overnight only creates timeouts
+# and authentication traffic. The loop heartbeat still advances at the normal
+# cadence; the expensive preparation is throttled independently.
+DEFAULT_COMMODITY_CLOSED_REFRESH_SECONDS = 30 * 60
 
 # FAST-lane timeframe policy (2026-07-15): the signal evaluator runs on closed
 # 3-minute bars (was 1-minute). MP TPO construction (15-min periods) and the
@@ -1093,6 +1099,7 @@ class CommodityStrategyAgent(BaseStrategyAgent):
         self._commentary: list[CommodityCommentaryEntry] = []
         self._state_synced_at: Optional[datetime] = None
         self._fyers_ltp_backoff_until: Optional[datetime] = None
+        self._last_closed_market_preparation_at: Optional[datetime] = None
         # Phase-1 split seam: scan-loop heartbeat persisted in the control blob
         # so the CORE plane can derive loop_active without the local task.
         self._loop_heartbeat_at: Optional[str] = None
@@ -3318,6 +3325,12 @@ class CommodityStrategyAgent(BaseStrategyAgent):
         self._append_commentary("info", self._last_message)
         return self.get_status(refresh=False)
 
+    def _closed_market_preparation_due(self, started_at: datetime, *, force: bool) -> bool:
+        if force or self._last_closed_market_preparation_at is None:
+            return True
+        elapsed = (started_at - self._last_closed_market_preparation_at).total_seconds()
+        return elapsed < 0 or elapsed >= DEFAULT_COMMODITY_CLOSED_REFRESH_SECONDS
+
     async def _analyze_option_row(self, row: dict[str, Any]) -> Optional[dict[str, Any]]:
         # Options sleeve removed; method retained as a no-op safety stub.
         return None
@@ -3339,6 +3352,9 @@ class CommodityStrategyAgent(BaseStrategyAgent):
                     return self.get_status(refresh=False)
 
                 if not _in_commodity_hours(started_at):
+                    if not self._closed_market_preparation_due(started_at, force=force):
+                        return self.get_status(refresh=False)
+                    self._last_closed_market_preparation_at = started_at
                     self._append_commentary("idle", "Commodity market closed. Refreshing next-session preparation state.")
                     return await self._prepare_closed_market_state(started_at)
 

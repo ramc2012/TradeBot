@@ -516,9 +516,7 @@ async def _build_analysis_from_session_rows(
                     // 60
                 ),
             ),
-            "broker_connected": bool(
-                data_status["execution_ready"] if snapshot_mode == "live_session" else True
-            ),
+            "broker_connected": bool(data_status["execution_ready"]),
         },
         "portfolio": portfolio_payload,
         "quote": {
@@ -1675,27 +1673,30 @@ def _build_live_data_status(
     minute_history_ready = bool(current_rows)
     if live_mode and minute_history_age_seconds is not None:
         minute_history_ready = minute_history_age_seconds <= 180.0
-    tick_ready = (not live_mode) or (
+    tick_ready = live_mode and (
         order_flow_source in {"tick_reconstruction", "tick_reconstruction_book"}
         and len(quote_history_payload) >= 4
         and len(trades_payload) >= 1
     )
-    quote_ready = (not live_mode) or quote_source in {
+    quote_ready = live_mode and (quote_source in {
         "market_ticks",
         "websocket_tick",
         "rest_quote",
     } or (
         order_flow_source == "tick_reconstruction_book"
         and bool(str(quote_source or "").strip())
-    )
+    ))
     execution_ready = (
-        minute_history_ready
+        live_mode
+        and minute_history_ready
         and tick_ready
         and quote_ready
         and float(stale_data_seconds) <= stale_limit
     )
     degraded_reason = None
-    if not minute_history_ready:
+    if not live_mode:
+        degraded_reason = "historical_replay_only"
+    elif not minute_history_ready:
         degraded_reason = "minute_history_stale_or_missing"
     elif not tick_ready:
         degraded_reason = "tick_order_flow_unavailable"

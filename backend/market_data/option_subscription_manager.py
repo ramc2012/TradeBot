@@ -567,11 +567,15 @@ async def refresh_held_position_subscriptions() -> dict[str, Any]:
     # desk's watchlist needs their live ticks to stream instead of
     # step-changing on the periodic snapshot write. Trivial WS load.
     watchlist_resolved = 0
-    try:
-        wl_legs = await _strategy1_watchlist_legs()
-    except Exception as exc:  # noqa: BLE001
-        logger.debug(f"[OptionWS] watchlist-leg resolve failed: {exc}")
-        wl_legs = []
+    wl_legs: list[dict[str, Any]] = []
+    # Resolved independently: a failure in either source must not take the
+    # other's legs down with it (one shared try would have let a missing
+    # vanguard table silently unsubscribe the S1 watchlist).
+    for source in (_strategy1_watchlist_legs, _vanguard_swing_watchlist_legs):
+        try:
+            wl_legs.extend(await source())
+        except Exception as exc:  # noqa: BLE001
+            logger.debug(f"[OptionWS] {source.__name__} resolve failed: {exc}")
     for leg in wl_legs:
         app_symbol = await _resolve_held_option_app_symbol(
             underlying=leg["underlying"],
@@ -588,8 +592,8 @@ async def refresh_held_position_subscriptions() -> dict[str, Any]:
         for key in (leg.get("trading_symbol"), leg.get("instrument_key")):
             if key:
                 live_marks.register_position_symbol(str(key), app_symbol)
+                active_symbols.append(str(key))
         desired.append(app_symbol)
-        active_symbols.append(str(leg.get("trading_symbol") or app_symbol))
         watchlist_resolved += 1
 
     # Drop registry entries for positions/legs no longer tracked.
@@ -668,6 +672,34 @@ async def _strategy1_watchlist_legs() -> list[dict[str, Any]]:
                 }
             )
     return legs
+
+
+async def _vanguard_swing_watchlist_legs() -> list[dict[str, Any]]:
+    """Exact contracts from the newest active Vanguard swing list.
+
+    The whole published list, not half of it: the daily research ranking is
+    top-ten CE AND top-ten PE, so a LIMIT 10 left ten rows on the desk with no
+    live quote at all -- and which ten depended on the arbitrary global rank.
+
+    The selector writes Upstox instrument keys because those identify the
+    archived candles. This feed-owned layer resolves them to Fyers symbols,
+    subscribes them, and registers the alias used by the read-only API/UI.
+    """
+    from db.database import AsyncSessionLocal
+    from sqlalchemy import text
+
+    async with AsyncSessionLocal() as session:
+        result = await session.execute(text("""
+            SELECT i.symbol underlying,i.option_type,i.expiry::text,i.strike,
+                   i.instrument instrument_key,NULL::text trading_symbol
+            FROM vanguard_swing_watchlist_items i
+            WHERE i.source_session=(SELECT max(source_session)
+                                    FROM vanguard_swing_watchlist_runs
+                                    WHERE status IN ('awaiting_entry','tracking'))
+              AND i.status IN ('awaiting_entry','tracking')
+            ORDER BY i.actionable DESC,i.rank LIMIT 20
+        """))
+        return [dict(row) for row in result.mappings().all()]
 
 
 async def run_held_position_subscription_loop(interval_seconds: float = 45.0) -> None:

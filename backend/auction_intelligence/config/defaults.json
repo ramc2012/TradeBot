@@ -63,7 +63,9 @@
     "rotational_extension_min_fraction": 0.18,
     "rotational_middle_low": 0.3,
     "rotational_middle_high": 0.7,
-    "no_trade_confidence_max": 0.55
+    "no_trade_confidence_max": 0.55,
+    "rotation_trend_min": 0.5,
+    "rotation_balance_max": 0.25
   },
   "agents": {
     "positional": {
@@ -107,9 +109,11 @@
       "trend_pullback_tolerance_min_points": 8.0,
       "trend_pullback_tolerance_max_points": 60.0,
       "trend_pullback_timing_floor": 0.28,
-      "enable_eighty_percent_rule": false,
-      "enable_ib_failure": false,
-      "enable_auction_rejection_long": false,
+      "value_acceptance_min_periods": 2,
+      "initial_balance_periods": 2,
+      "enable_eighty_percent_rule": true,
+      "enable_ib_failure": true,
+      "enable_auction_rejection_long": true,
       "enable_auction_rejection_short": true,
       "enable_acceptance_continuation_long": true,
       "enable_acceptance_continuation_short": true,

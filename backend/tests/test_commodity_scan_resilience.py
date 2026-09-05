@@ -242,6 +242,24 @@ def test_scan_timeout_scales_with_symbol_count(monkeypatch) -> None:
     assert agent._scan_timeout_seconds() == 120
 
 
+def test_closed_market_preparation_is_throttled_but_force_bypasses() -> None:
+    agent = CommodityStrategyAgent()
+    started_at = datetime(2026, 9, 3, 1, 0, tzinfo=commodity_module.IST)
+
+    assert agent._closed_market_preparation_due(started_at, force=False) is True
+
+    agent._last_closed_market_preparation_at = started_at
+    assert agent._closed_market_preparation_due(
+        started_at + timedelta(minutes=29), force=False
+    ) is False
+    assert agent._closed_market_preparation_due(
+        started_at + timedelta(minutes=30), force=False
+    ) is True
+    assert agent._closed_market_preparation_due(
+        started_at + timedelta(minutes=1), force=True
+    ) is True
+
+
 def test_get_status_does_not_refresh_store_while_scan_running() -> None:
     agent = CommodityStrategyAgent()
     agent.update_symbols(["MCX:GOLD26AUGFUT"])

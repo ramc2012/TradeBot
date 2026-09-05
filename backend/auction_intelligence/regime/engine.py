@@ -21,6 +21,19 @@ class RegimeEngine:
         self.rotational_middle_low = float(config.get("rotational_middle_low", 0.30))
         self.rotational_middle_high = float(config.get("rotational_middle_high", 0.70))
         self.no_trade_confidence_max = float(config.get("no_trade_confidence_max", 0.55))
+        self.rotation_trend_min = float(config.get("rotation_trend_min", 0.5))
+        self.rotation_balance_max = float(config.get("rotation_balance_max", 0.25))
+
+    def _rotation_adjustment(self, current: MarketProfileSnapshot, direction: str) -> float:
+        intensity = current.rotation_intensity
+        if direction == "BALANCE":
+            return 0.03 if abs(intensity) <= self.rotation_balance_max else 0.0
+        signed = intensity if direction == "LONG" else -intensity
+        if signed >= self.rotation_trend_min:
+            return 0.04
+        if signed <= -self.rotation_trend_min:
+            return -0.06
+        return 0.0
 
     def classify(
         self,
@@ -45,6 +58,8 @@ class RegimeEngine:
             "value_area_overlap": round(overlap, 4),
             "poc_shift": round(poc_shift, 4),
             "timing_confidence": round(order_flow.timing_confidence, 4),
+            "rotation_factor": current.rotation_factor,
+            "rotation_intensity": round(current.rotation_intensity, 4),
         }
 
         if prior is not None:
@@ -103,7 +118,7 @@ class RegimeEngine:
                 label = "trend_continuation" if delta_bias > 0 else "breakout_acceptance"
                 return RegimeAssessment(
                     label=label,
-                    confidence=0.8,
+                    confidence=_clamp(0.8 + self._rotation_adjustment(current, "LONG"), 0.0, 1.0),
                     allowed_directions=["LONG"],
                     reasons=reasons,
                     scorecard=scorecard,
@@ -113,7 +128,7 @@ class RegimeEngine:
                 label = "trend_continuation" if delta_bias < 0 else "breakout_acceptance"
                 return RegimeAssessment(
                     label=label,
-                    confidence=0.8,
+                    confidence=_clamp(0.8 + self._rotation_adjustment(current, "SHORT"), 0.0, 1.0),
                     allowed_directions=["SHORT"],
                     reasons=reasons,
                     scorecard=scorecard,
@@ -124,7 +139,7 @@ class RegimeEngine:
                 reasons.append("Session closed near the high after meaningful range extension.")
                 return RegimeAssessment(
                     label="trend_day",
-                    confidence=0.78,
+                    confidence=_clamp(0.78 + self._rotation_adjustment(current, "LONG"), 0.0, 1.0),
                     allowed_directions=["LONG"],
                     reasons=reasons,
                     scorecard=scorecard,
@@ -133,7 +148,7 @@ class RegimeEngine:
                 reasons.append("Session closed near the low after meaningful range extension.")
                 return RegimeAssessment(
                     label="trend_day",
-                    confidence=0.78,
+                    confidence=_clamp(0.78 + self._rotation_adjustment(current, "SHORT"), 0.0, 1.0),
                     allowed_directions=["SHORT"],
                     reasons=reasons,
                     scorecard=scorecard,
@@ -143,7 +158,7 @@ class RegimeEngine:
             reasons.append("Auction rotated through both sides of the initial balance and closed back near the middle.")
             return RegimeAssessment(
                 label="rotational_day",
-                confidence=0.74,
+                confidence=_clamp(0.74 + self._rotation_adjustment(current, "BALANCE"), 0.0, 1.0),
                 allowed_directions=["LONG", "SHORT"],
                 reasons=reasons,
                 scorecard=scorecard,
@@ -153,7 +168,7 @@ class RegimeEngine:
             reasons.append("Value overlap remains high and directional extension is muted.")
             return RegimeAssessment(
                 label="balance",
-                confidence=0.72,
+                confidence=_clamp(0.72 + self._rotation_adjustment(current, "BALANCE"), 0.0, 1.0),
                 allowed_directions=["LONG", "SHORT"],
                 reasons=reasons,
                 scorecard=scorecard,
