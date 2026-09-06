@@ -44,6 +44,9 @@ from pathlib import Path
 # modules they import), so _resolve_strategy_state_file() sees the throwaway path.
 _TEST_STATE_DIR = Path(tempfile.mkdtemp(prefix="tradebot-test-state-"))
 _TEST_NSE_STATE_FILE = _TEST_STATE_DIR / "nse_strategy_state.json"
+os.environ["DATABASE_URL"] = "postgresql+asyncpg://test:test@127.0.0.1:1/test"
+os.environ["REDIS_URL"] = "redis://127.0.0.1:1/0"
+os.environ["TRADING_CALENDAR_FILE"] = str(_TEST_STATE_DIR / "calendar.json")
 os.environ["NSE_STRATEGY_STATE_FILE"] = str(_TEST_NSE_STATE_FILE)
 
 # Point the sector-interaction ingestion store at a throwaway dir: the REAL

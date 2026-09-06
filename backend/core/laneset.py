@@ -95,6 +95,7 @@ CORE_SUBSYSTEMS = frozenset(
         "runner:token_readiness",
         "runner:market_intelligence",
         "runner:stock_spot_sweep",
+        "runner:stock_spot_intraday",
         # Post-close sector-interaction ingestion + NSE constituent sync
         # (2026-08-02). Core plane: data ingestion, no broker REST, no position.
         "runner:sector_ingestion",

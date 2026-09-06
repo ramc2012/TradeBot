@@ -86,6 +86,7 @@ def test_planned_runner_inventory_matches_supervisor(monkeypatch):
         "token_readiness",
         "market_intelligence",
         "stock_spot_sweep",
+        "stock_spot_intraday",
         "sector_ingestion",
         "macd_preopen_watchlist",
         "preopen_spot_snapshot",
@@ -117,7 +118,7 @@ def test_supervisor_runner_partition_by_laneset(monkeypatch):
     # capture lane, 2026-08-27). CORE-plane data: reads committed rows only.
     # 24 = 23 + candidate_training (post-close model fit + promotion gates,
     # 2026-08-27). CORE-plane data: reads the labelled set, holds no position.
-    assert len(all_keys) == 24
+    assert len(all_keys) == 25
 
     monkeypatch.setattr(settings, "LANESET", "core", raising=False)
     core_keys = set(MarketHoursPaperSupervisor(enabled=False)._runners)
@@ -126,6 +127,7 @@ def test_supervisor_runner_partition_by_laneset(monkeypatch):
         "token_readiness",
         "market_intelligence",
         "stock_spot_sweep",
+        "stock_spot_intraday",
         "sector_ingestion",
         "macd_preopen_watchlist",
         "preopen_spot_snapshot",

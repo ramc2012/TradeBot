@@ -1,0 +1,53 @@
+# Vanguard cycle daemon — OPT-IN, kept out of the main docker-compose.yml.
+#
+# Deliberately a SEPARATE file. The root compose describes the production
+# trading stack; Vanguard is a research lane living in a git worktree on its own
+# branch, and adding a service to the root file would put a research process
+# into everyone's default `docker compose up`. Opting in is one flag:
+#
+#   docker compose -f docker-compose.yml -f .claude/worktrees/vanguard-phase-1/vanguard/docker-compose.vanguard.yml up -d vanguard-cycle
+#
+# Or, from the repo root with the path exported:
+#   VANGUARD_DIR=$PWD/.claude/worktrees/vanguard-phase-1/vanguard \
+#     docker compose -f docker-compose.yml -f $VANGUARD_DIR/docker-compose.vanguard.yml up -d vanguard-cycle
+#
+# It reuses the BACKEND IMAGE rather than building its own: that image already
+# carries every dependency Vanguard needs (pandas 2.2.2, numpy 1.26.4, scipy
+# 1.13.0, psycopg2 2.9.9, httpx — verified in the running container), so a
+# second image would be pure duplication. Vanguard's own code is bind-mounted
+# from the worktree, so editing it on the branch takes effect on restart with no
+# rebuild.
+#
+# It does NOT import the backend or touch its Alembic chain — it only runs
+# Vanguard's own modules against the same database, exactly as the Makefile
+# does on a laptop.
+
+services:
+  vanguard-cycle:
+    image: tradebot-backend
+    container_name: nomadcurie_vanguard_cycle
+    environment:
+      # Container-internal address. Vanguard's own DEFAULT_DSN points at
+      # localhost:5433 (the host-side mapping), which is wrong from inside the
+      # network; every Vanguard module reads this env var in preference.
+      VANGUARD_DATABASE_URL: postgresql://nomadcurie:nomadcurie@db:5432/nomadcurie
+      VANGUARD_PYTHON: python
+      # Seconds to wait past a 30-minute boundary before deriving that bar,
+      # giving the upstream candle writers time to land it.
+      VANGUARD_LIVE_PASS_DELAY_S: "120"
+      VANGUARD_STEP_TIMEOUT_S: "1500"
+      PYTHONUNBUFFERED: "1"
+    volumes:
+      # The worktree checkout of the vanguard/ package.
+      - ${VANGUARD_DIR:-./.claude/worktrees/vanguard-phase-1/vanguard}:/vanguard
+    working_dir: /vanguard
+    command: ["python", "scripts/cycle_daemon.py"]
+    depends_on:
+      db:
+        condition: service_healthy
+    restart: unless-stopped
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"

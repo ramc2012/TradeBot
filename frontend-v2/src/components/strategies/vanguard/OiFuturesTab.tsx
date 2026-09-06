@@ -57,6 +57,7 @@ const STATE_FILTERS = [
 ] as const;
 
 const num = (v: unknown): number | null => {
+  if (v == null || v === "" || typeof v === "boolean") return null;
   const n = Number(v);
   return Number.isFinite(n) ? n : null;
 };
@@ -142,7 +143,7 @@ export default function OiFuturesTab({ data }: { data?: any }) {
         <MetricTile label="Short buildup" value={String(summary?.states?.short_buildup ?? 0)} color="text-accent-red" />
         <MetricTile label="Short covering" value={String(summary?.states?.short_covering ?? 0)} />
         <MetricTile label="Long unwind" value={String(summary?.states?.long_unwind ?? 0)} />
-        <MetricTile label="Activity surges" value={String(summary?.surges ?? 0)} detail="ΔOI z & vol z ≥ 1.5" color={(summary?.surges ?? 0) > 0 ? "text-accent-amber" : undefined} />
+        <MetricTile label="Activity surges" value={summary?.baseline_ready ? String(summary?.surges ?? 0) : "—"} detail={`${summary?.baseline_ready ?? 0}/${summary?.names ?? 0} baselines ready · ΔOI z & vol z ≥ 1.5`} color={(summary?.surges ?? 0) > 0 ? "text-accent-amber" : undefined} />
       </section>
 
       {symbol ? (
@@ -170,7 +171,7 @@ export default function OiFuturesTab({ data }: { data?: any }) {
         <Section
           title="Futures OI cross-section"
           icon={<Layers size={16} />}
-          description={`Latest scored session per symbol (as of ${data?.latest_session ?? "—"}). Intraday rows are today's running OI scored against settled baselines; z-windows use ${rows[0]?.lookback_sessions ?? 60} sessions.`}
+          description={`Latest scored session per symbol (as of ${data?.latest_session ?? "—"}). Intraday rows are today's running OI scored against settled baselines; baselines use up to 60 prior sessions. ${summary?.warming_up ?? 0} names are warming up; unavailable measurements are shown as —.`}
         >
           <div className="mb-2 flex flex-wrap items-center gap-1.5">
             {STATE_FILTERS.map((f) => (

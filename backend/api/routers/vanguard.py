@@ -1724,6 +1724,10 @@ async def oi_futures() -> dict[str, Any]:
             "states": states,
             "surges": sum(1 for r in rows if r.get("activity_surge")),
             "rollovers": sum(1 for r in rows if r.get("is_rollover")),
+            "baseline_ready": sum(1 for r in rows if all(r.get(k) is not None
+                                  for k in ("d_oi_pct_z", "volume_z", "oi_z"))),
+            "warming_up": sum(1 for r in rows if any(r.get(k) is None
+                              for k in ("d_oi_pct_z", "volume_z", "oi_z"))),
         },
         "latest_session": (freshness or {}).get("latest_session"),
         "computed_at": (freshness or {}).get("computed_at"),

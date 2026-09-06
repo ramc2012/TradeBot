@@ -147,7 +147,7 @@ def _open_row(
     direction: str = "CE",
     opened_seconds_ago: float = 3600.0,
     entry_premium: float = 132.0,
-    expiry: str = "2026-08-27",
+    expiry: str | None = None,
     position_id: str = "pos-1",
 ) -> dict:
     now = datetime.now(timezone.utc)
@@ -165,7 +165,7 @@ def _open_row(
         "trading_symbol": f"{underlying} 22500 {direction}",
         "instrument_key": f"NSE:{underlying}22500{direction}",
         "option_type": direction,
-        "expiry": expiry,
+        "expiry": expiry or (datetime.now(timezone.utc) + timedelta(days=30)).date().isoformat(),
         "strike": 22500.0,
         "quantity_lots": 1,
         "quantity_units": 75,
@@ -231,7 +231,7 @@ def _actionable_payload(
                 "trading_symbol": f"{underlying} {int(strike)} {direction}",
                 "instrument_key": f"NSE:{underlying}{int(strike)}{direction}",
                 "option_type": direction,
-                "expiry": "2026-08-27",
+                "expiry": (datetime.now(timezone.utc) + timedelta(days=30)).date().isoformat(),
                 "strike": strike,
                 "option_price": option_price,
                 "expected_pnl": 1800.0,

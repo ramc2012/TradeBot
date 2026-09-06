@@ -901,6 +901,10 @@ def test_forced_close_note_is_gated_by_the_same_flag_as_the_closure(
     assert "forced_expiry_roll_2td_due" in row["notes"]
 
 
+from freezegun import freeze_time
+
+
+@freeze_time("2026-07-24")
 def test_release_repicks_on_the_cycle_expiry_not_the_held_one(monkeypatch) -> None:
     """DISCRIMINATING, through the REAL production caller.
 

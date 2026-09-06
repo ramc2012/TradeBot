@@ -116,6 +116,17 @@ def get_registry() -> tuple[LaneSpec, ...]:
             ),
         ),
         LaneSpec(
+            key="stock_spot_intraday",
+            label="F&O Stock Spot Intraday Sweep",
+            kind="data", execution_mode="none", status_source="supervisor",
+            cadence_seconds=float(settings.STOCK_SPOT_INTRADAY_SECONDS),
+            broker_profile="default", exchange_session=nse,
+            enabled_flag_name="STOCK_SPOT_INTRADAY_ENABLED",
+            runner_keys=("stock_spot_intraday",),
+            status_endpoint="/api/system/automation-status",
+            notes="Public candle collection for the current stock decision grid; no orders.",
+        ),
+        LaneSpec(
             key="sector_ingestion",
             label="Sector-Interaction Durable Ingestion",
             kind="data",
@@ -717,7 +728,7 @@ def supervisor_runner_keys() -> set[str]:
 # resolver for the capture lane. Default OFF, no broker call, no position.
 # 2026-08-27: 36 -> 37 with candidate_training, the post-close model fit +
 # promotion-gate pass. Default OFF, no broker call, no position.
-EXPECTED_LANE_TOTAL = 37
+EXPECTED_LANE_TOTAL = 38
 
 
 def registry_counts() -> dict[str, int]:

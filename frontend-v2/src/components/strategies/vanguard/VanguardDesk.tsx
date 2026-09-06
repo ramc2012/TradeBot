@@ -533,7 +533,7 @@ function CurrentSwingRow({ row, provisional, sharedReason }: {
 }) {
   const quote = useQuote(row.live_symbol ?? row.instrument);
   const persisted = num(row.latest_mark ?? row.source_mark);
-  const liveMark = num(quote?.ltp) ?? persisted;
+  const liveMark = row.status === "closed" ? persisted : num(quote?.ltp) ?? persisted;
   const entry = num(row.entry_mark);
   const liveReturn = entry != null && entry > 0 && liveMark != null ? liveMark / entry - 1 : num(row.return_pct);
   const pct = (value: unknown) => {
@@ -554,7 +554,7 @@ function CurrentSwingRow({ row, provisional, sharedReason }: {
     <td className="py-2 pr-3 text-right font-mono">{formatNumber(entry, 2)}</td>
     <td className="py-2 pr-3 text-right font-mono">
       {formatNumber(liveMark, 2)}
-      {quote?.ltp != null && <div className="text-[10px] text-accent-green">live · ≤150 ms batch</div>}
+      {row.status !== "closed" && quote?.ltp != null && <div className="text-[10px] text-accent-green">live · ≤150 ms batch</div>}
     </td>
     <td className={`py-2 pr-3 text-right font-mono ${tone(liveReturn)}`}>{pct(liveReturn)}</td>
     <td className="py-2 pr-3"><StatusBadge
@@ -695,7 +695,7 @@ function WatchlistTab({ data, strategies, selectedSession, onSession, onBtst }: 
                 <th className="py-2 pr-3 text-right">{swingRun ? "Combined rank" : "Directional margin"}</th>
                 <th className="py-2 pr-3 text-right">Entry</th>
                 <th className="py-2 pr-3 text-right">Latest</th>
-                <th className="py-2 pr-3 text-right">Live return</th>
+                <th className="py-2 pr-3 text-right">Gross return</th>
                 <th className="py-2 pr-3">Tracker state</th>
                 <th className="py-2 pr-3">Qualification</th>
               </tr>

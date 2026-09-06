@@ -604,6 +604,8 @@ def test_run_once_s1_scans_only_monthly_index_rows(monkeypatch) -> None:
 
 def test_get_status_exposes_next_scan_and_runtime_timestamps() -> None:
     agent = PaperStrategyAgent()
+    agent._auto_run_enabled = True
+    agent.scan_interval_seconds = 60
     agent._last_run_at = "2026-04-09T09:15:00+05:30"
     agent._strategy.last_scan_at = "2026-04-09T09:15:00+05:30"
     agent._strategy.last_message = "Scanned 218 instruments."

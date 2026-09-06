@@ -1,0 +1,37 @@
+# Pinned paper release. Use with the main project's docker-compose.yml.
+services:
+  backend:
+    build:
+      context: /Users/ramachandran/CLAUDE PROJECTS/Nomad Curie/TradeBot/.claude/worktrees/vanguard-fixes/backend
+    volumes:
+      - /Users/ramachandran/CLAUDE PROJECTS/Nomad Curie/TradeBot/.claude/worktrees/vanguard-fixes/backend:/app
+      - /Users/ramachandran/CLAUDE PROJECTS/Nomad Curie/TradeBot/backend/runtime:/app/runtime
+      - /Users/ramachandran/CLAUDE PROJECTS/Nomad Curie/TradeBot/backend/credentials.json:/app/credentials.json
+      - /Users/ramachandran/CLAUDE PROJECTS/Nomad Curie/TradeBot/backend/nse_strategy_state.json:/app/nse_strategy_state.json
+      - /Users/ramachandran/CLAUDE PROJECTS/Nomad Curie/TradeBot/backend/commodity_strategy.json:/app/commodity_strategy.json
+  frontend-v2:
+    image: tradebot-frontend-v2:vanguard-review-fixes
+    build:
+      context: /Users/ramachandran/CLAUDE PROJECTS/Nomad Curie/TradeBot/.claude/worktrees/vanguard-fixes/frontend-v2
+  vanguard-cycle:
+    image: tradebot-backend
+    container_name: nomadcurie_vanguard_cycle
+    environment:
+      VANGUARD_DATABASE_URL: postgresql://nomadcurie:nomadcurie@db:5432/nomadcurie
+      VANGUARD_PYTHON: python
+      VANGUARD_LIVE_PASS_DELAY_S: '120'
+      VANGUARD_STEP_TIMEOUT_S: '1500'
+      VANGUARD_FYERS_CREDENTIALS: /run/fyers-credentials.json
+      PYTHONUNBUFFERED: '1'
+    volumes:
+      - /Users/ramachandran/CLAUDE PROJECTS/Nomad Curie/TradeBot/.claude/worktrees/vanguard-fixes/vanguard:/vanguard:ro
+      - /Users/ramachandran/CLAUDE PROJECTS/Nomad Curie/TradeBot/.claude/worktrees/vanguard-fixes/backend:/app:ro
+      - /Users/ramachandran/CLAUDE PROJECTS/MACD mini/runtime/credentials.json:/run/fyers-credentials.json:ro
+    working_dir: /vanguard
+    command: ['python', 'scripts/cycle_daemon.py']
+    restart: unless-stopped
+    logging:
+      driver: json-file
+      options:
+        max-size: '10m'
+        max-file: '3'

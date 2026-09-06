@@ -355,6 +355,8 @@ def test_get_expiries_reports_catalog_fallback_when_saved_ladder_is_used(monkeyp
 
 @freeze_time(_EXPIRY_LADDER_TODAY)
 def test_get_expiries_prefers_live_fyers_ladders_over_saved_catalog_when_upstox_is_offline(monkeypatch) -> None:
+    from core.config import settings
+    monkeypatch.setattr(settings, "EXPIRY_POLICY_ENABLED", True)
     service = ATMWatchlistService()
     redis = _FakeRedis()
 
@@ -417,6 +419,8 @@ def test_get_expiries_prefers_live_fyers_ladders_over_saved_catalog_when_upstox_
 
 @freeze_time(_EXPIRY_LADDER_TODAY)
 def test_get_expiries_uses_common_nse_monthlies_even_when_live_ladders_are_stale(monkeypatch) -> None:
+    from core.config import settings
+    monkeypatch.setattr(settings, "EXPIRY_POLICY_ENABLED", True)
     service = ATMWatchlistService()
     redis = _FakeRedis()
 
