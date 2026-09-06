@@ -159,7 +159,8 @@ def underlying_keys_for_discovery(master: list[dict], underlyings: list[str]) ->
     keys = dict(INDEX_UNDERLYING_KEYS)
     wanted = {u.upper() for u in underlyings} - set(keys)
     for row in master:
-        if str(row.get("segment") or "").upper() != "NSE_EQ":
+        if (str(row.get("segment") or "").upper() != "NSE_EQ"
+                or str(row.get("instrument_type") or "").upper() != "EQ"):
             continue
         symbol = str(row.get("trading_symbol") or "").upper()
         if symbol in wanted:

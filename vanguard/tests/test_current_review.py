@@ -108,3 +108,11 @@ def test_history_throttle_honours_the_long_window(monkeypatch):
 def test_contract_expiry_must_cover_the_actual_second_nse_session():
     from model.preclose_swing import _business_day
     assert _business_day(date(2026,9,11),2)==date(2026,9,16)
+
+
+def test_futures_discovery_never_uses_a_same_symbol_debt_security():
+    from ingest.futures_oi import underlying_keys_for_discovery
+    rows=[dict(segment='NSE_EQ',trading_symbol='MOTHERSON',instrument_type='D1',instrument_key='debt'),
+          dict(segment='NSE_EQ',trading_symbol='MOTHERSON',instrument_type='EQ',instrument_key='equity')]
+    assert underlying_keys_for_discovery(rows,['MOTHERSON'])['MOTHERSON']=='equity'
+    assert 'MOTHERSON' not in underlying_keys_for_discovery(rows[:1],['MOTHERSON'])

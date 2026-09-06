@@ -9,6 +9,8 @@ no model was promoted and no broker-order integration was added.
 - The API, frontend and cycle service use this release checkout, independent
   of the root checkout's selected branch. Original runtime books and credential
   files are mounted separately. The original Claude worktree is preserved.
+- Futures discovery selects equity securities, excluding debt aliases that share
+  a trading symbol (the cause of MOTHERSON's missing history).
 - Futures history imports deduplicate provider days, roll back failed writes,
   retry temporary HTTP failures, and respect both short and 30-minute request
   limits. Partial imports are repaired with full-window upserts, not skipped
