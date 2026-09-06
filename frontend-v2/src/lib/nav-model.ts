@@ -211,15 +211,15 @@ const INTRADAY_DESKS: NavDesk[] = [
   },
   {
     href: "/strategies/mp",
-    label: "MP + OF · index",
+    label: "MP Intelligence",
     policy: "mpof",
-    policyScope: "index long premium",
+    policyScope: "indices + F&O stocks",
     // s2_index_mp_macd RETIRED from the lane registry 2026-07-20 (owner: only
     // MACD and MACD-refined survive). The desk stays as a read-only board; it
     // simply no longer claims a registry lane.
     laneKeys: [],
     status: "active",
-    note: "Index market-profile + order-flow board. Read-only: it has no registry lane and no paper book.",
+    note: "Shared Auction insights for indices and F&O stocks. Read-only intelligence; simulated positions belong to the Auction paper book.",
     book: null,
     noBookReason:
       "The s2_index_mp_macd lane was retired 2026-07-20; the backend serves no paper-book endpoint for the index MP lane (/api/mp-intelligence/paper-summary 404s).",

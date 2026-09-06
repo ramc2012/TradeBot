@@ -1,3 +1,4 @@
+import type { AuctionInsightsData } from "./AuctionInsights";
 /**
  * Shared TS shapes for the Auction Intelligence desk, derived from the prod
  * `/api/auction-intelligence/live-snapshot` payload. Every numeric field is
@@ -165,6 +166,7 @@ export type RagContext = {
 } | null;
 
 export type Snapshot = {
+  auction_insights?: AuctionInsightsData;
   mode?: string;
   symbol_code?: string;
   session_date?: string;

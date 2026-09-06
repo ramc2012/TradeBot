@@ -264,6 +264,17 @@ async def _fetch_fyers_quote(symbol: str) -> dict[str, Any] | None:
 
 
 async def build_live_analysis(symbol_code: str = "NIFTY") -> dict[str, Any]:
+    from mp_core.shared_live import shared_live
+    return await shared_live(symbol_code.upper(), lambda: _build_live_analysis(symbol_code))
+
+
+async def _build_live_analysis(symbol_code: str = "NIFTY") -> dict[str, Any]:
+    from auction_intelligence.universe import refresh_universe
+    if symbol_code.upper() not in SYMBOL_MAP:
+        try:
+            await refresh_universe()
+        except Exception as exc:
+            raise ValueError(f"Unsupported live symbol: {symbol_code}") from exc
     normalized_symbol = symbol_code.upper()
     if normalized_symbol not in SYMBOL_MAP:
         raise ValueError(f"Unsupported live symbol: {symbol_code}")
@@ -404,6 +415,7 @@ async def _build_analysis_from_session_rows(
     snapshot_cutoff: time | None = None,
 ) -> dict[str, Any]:
     config = SYMBOL_MAP[normalized_symbol]
+    cadence = int(current_session_rows[-1].get("interval_minutes", 1))
     app_symbol = str(config["app_symbol"])
     tick_size = float(config["tick_size"])
     session_open, session_close = _session_bounds(normalized_symbol)
@@ -423,7 +435,7 @@ async def _build_analysis_from_session_rows(
         if snapshot_mode == "live_session"
         else 120
     )
-    if len(current_rows) < min_rows:
+    if len(current_rows) * cadence < min_rows:
         raise RuntimeError("The selected live snapshot does not have enough minute history yet.")
 
     current_bars = _aggregate_rows(
@@ -445,7 +457,7 @@ async def _build_analysis_from_session_rows(
         raise RuntimeError("Insufficient 30-minute bars were built from the broker history.")
 
     current_quote_tick = market_data_router.get_latest_tick(app_symbol)
-    futures_quote = await _fetch_fyers_quote(history_symbol) if is_futures_source and snapshot_mode == "live_session" else None
+    futures_quote = None  # quote_bus / market_ticks own live quotes; chart reads never fetch broker data
     order_flow_inputs = await _build_order_flow_inputs(
         app_symbol=app_symbol,
         current_rows=current_rows,
@@ -536,6 +548,7 @@ async def _build_analysis_from_session_rows(
             "scenario": "live_snapshot",
             "scenario_label": "Live broker validation snapshot",
             "lot_size": config["lot_size"],
+            "bar_interval_minutes": cadence,
             "history_source": history_source,
             "history_symbol": history_symbol,
             "quote_source": quote_source,
@@ -553,7 +566,9 @@ async def _build_analysis_from_session_rows(
         },
     }
 
-    service = AuctionIntelligenceService()
+    service_config = clone_default_config()
+    service_config["market_profile"]["tick_size"] = tick_size
+    service = AuctionIntelligenceService(service_config)
     enrichment_timeout_seconds = float(
         DEFAULT_CONFIG.get("options_mapping", {}).get(
             "live_enrichment_timeout_seconds",
@@ -575,7 +590,10 @@ async def _build_analysis_from_session_rows(
         quote_history=[QuoteSnapshot(**_parse_quote(item)) for item in quote_history_payload],
         enrichment_timeout_seconds=enrichment_timeout_seconds,
     )
+    from auction_intelligence.insights import build_insights
+    insights = await asyncio.to_thread(build_insights, request, bundle, service_config)
     return {
+        "auction_insights": insights,
         "mode": "live",
         "scenario": "live_snapshot",
         "scenario_label": "Live broker validation snapshot",
@@ -699,6 +717,10 @@ async def _fetch_recent_minute_rows(
                 return selected
         except Exception:
             pass
+
+    if config.get("instrument_proxy") == "cash_equity":
+        rows = await _fetch_stock_rows(symbol_code, from_date=from_date)
+        return _filter_symbol_rows(rows), "timescaledb_spot_3minute", app_symbol
 
     persisted_rows = await _fetch_persisted_spot_rows(symbol_code.upper(), from_date=from_date)
     selected = _choose_source(persisted_rows, "timescaledb_spot_1minute", app_symbol)
@@ -837,6 +859,21 @@ async def _fetch_recent_minute_rows(
     return [], "none", futures_symbol
 
 
+async def _fetch_stock_rows(symbol_code: str, *, from_date: date) -> list[dict]:
+    async with AsyncSessionLocal() as session:
+        result = await session.execute(text("""
+            SELECT DISTINCT ON (c.time) c.time, c.open, c.high, c.low, c.close, c.volume
+            FROM underlying_spot_candles c
+            JOIN fo_underlying_catalog u ON u.symbol=c.underlying
+            WHERE c.underlying=:symbol AND c.interval='3minute'
+              AND c.time >= :start AND c.time + interval '3 minutes' <= now()
+              AND (u.spot_instrument_key IS NULL OR c.instrument_key=u.spot_instrument_key)
+            ORDER BY c.time, c.synced_at DESC
+        """), {"symbol": symbol_code, "start": datetime.combine(from_date, time.min, tzinfo=IST)})
+        return [{**{k: float(r[k] or 0) for k in ("open", "high", "low", "close", "volume")},
+                 "time": r["time"].isoformat(), "interval_minutes": 3} for r in result.mappings()]
+
+
 async def _fetch_persisted_spot_rows(
     symbol_code: str,
     *,
@@ -847,12 +884,13 @@ async def _fetch_persisted_spot_rows(
         result = await session.execute(
             text(
                 """
-                SELECT time, open, high, low, close, volume, source, synced_at
+                SELECT DISTINCT ON (time) time, open, high, low, close, volume, source, synced_at
                 FROM underlying_spot_candles
                 WHERE underlying = :underlying
                   AND interval = '1minute'
+                  AND time + interval '1 minute' <= now()
                   AND time >= :from_time
-                ORDER BY time ASC
+                ORDER BY time ASC, synced_at DESC, instrument_key
                 """
             ),
             {
@@ -1039,7 +1077,7 @@ def _group_rows_by_session(
     for row in rows:
         timestamp = _row_time(row)
         local_time = timestamp.astimezone(IST)
-        if local_time.time() < session_open or local_time.time() > session_close:
+        if local_time.time() < session_open or local_time.time() >= session_close:
             continue
         minute = local_time.replace(second=0, microsecond=0)
         source = str(row.get("source") or "").strip().lower()
@@ -1052,6 +1090,7 @@ def _group_rows_by_session(
             "close": float(row.get("close", 0.0) or 0.0),
             "volume": float(row.get("volume", 0.0) or 0.0),
             "_source_priority": source_priority,
+            **({"interval_minutes": int(row["interval_minutes"])} if "interval_minutes" in row else {}),
         }
         existing = session_minutes.setdefault(local_time.date(), {}).get(minute)
         if existing is None:
@@ -1076,12 +1115,12 @@ def _group_rows_by_session(
     return {
         key: value
         for key, value in sessions.items()
-        if len(value) >= 180
+        if len(value) * int(value[-1].get("interval_minutes", 1)) >= 180
         or (
             allow_partial_live_session
             and key == now_ist.date()
             and session_open <= now_ist.time() < session_close
-            and len(value) >= MIN_LIVE_SESSION_MINUTE_ROWS
+            and len(value) * int(value[-1].get("interval_minutes", 1)) >= MIN_LIVE_SESSION_MINUTE_ROWS
         )
     }
 
@@ -1149,7 +1188,10 @@ def _select_snapshot_rows(
             if selected:
                 return selected, _row_time(selected[-1]), "historical_replay"
 
-    target_time = snapshot_cutoff or time(12, 20)
+    if snapshot_cutoff is None:
+        return rows, latest_time, "historical_replay"
+
+    target_time = snapshot_cutoff
     eligible = [row for row in rows if _row_time(row).time() <= target_time]
     if eligible:
         snapshot_time = _row_time(eligible[-1])
@@ -1500,12 +1542,10 @@ def _build_trade_prints_from_ticks(
         prev_price = float(prev.get("ltp") or 0.0)
         volume_delta = max(float(row.get("volume") or 0.0) - float(prev.get("volume") or 0.0), 0.0)
         side = _classify_trade_side(row, prev, tick_size=tick_size)
-        if volume_delta <= 0 and side == "unknown":
+        if volume_delta <= 0:
             prev = row
             continue
-        quantity = volume_delta if volume_delta > 0 else 1.0
-        if quantity <= 0 and price != prev_price:
-            quantity = 1.0
+        quantity = volume_delta
         prints.append(
             {
                 "timestamp": _row_time_from_value(row["timestamp"]).astimezone(timezone.utc).isoformat(),
@@ -1734,7 +1774,9 @@ def _infer_trade_prints(rows: list[dict[str, Any]], lookback: int = 24) -> list[
     for row in rows[-lookback:]:
         open_price = float(row["open"])
         close_price = float(row["close"])
-        quantity = max(float(row.get("volume", 0.0) or 0.0) / 10.0, 1.0)
+        quantity = float(row.get("volume", 0.0) or 0.0)
+        if quantity <= 0:
+            continue
         side = "unknown"
         if close_price > open_price:
             side = "buy"

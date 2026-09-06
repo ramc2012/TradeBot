@@ -177,6 +177,12 @@ def value_area_from_bars(lows: list[float], highs: list[float], n_bins: int = N_
     print-only opening tick) -- callers must treat a zero-width value area
     as "not yet meaningful", not divide by it.
     """
+    from model.shared_mp_cache import cached_json
+    return tuple(cached_json("m5-fixed-bin-va-v1", [lows, highs, n_bins, fraction],
+                             lambda: _value_area_from_bars(lows, highs, n_bins, fraction)))
+
+
+def _value_area_from_bars(lows, highs, n_bins, fraction):
     lo, hi = min(lows), max(highs)
     if hi <= lo:
         return lo, lo, lo

@@ -448,7 +448,7 @@ def _auction_session(minutes_to_close: int = 180):
     )
 
 
-def test_auction_governor_caps_bypassed_in_paper_when_flag_true(monkeypatch) -> None:
+def test_auction_governor_enforces_paper_caps_despite_global_validation_flag(monkeypatch) -> None:
     monkeypatch.setattr(settings, "SIGNAL_VALIDATION_UNCAPPED", True)
     governor = _auction_governor(paper_mode=True)
 
@@ -457,10 +457,11 @@ def test_auction_governor_caps_bypassed_in_paper_when_flag_true(monkeypatch) -> 
         portfolio=_auction_breached_portfolio(),
         decisions=[_auction_decision()],
     )
-    assert allowed.allowed is True
+    assert allowed.allowed is False
+    assert "Daily loss limit breached." in allowed.reasons
     assert allowed.kill_switch is False
 
-    # Same breached book, flag off → every cap fires again.
+    # Paper module limits remain enforced with either global flag value.
     monkeypatch.setattr(settings, "SIGNAL_VALIDATION_UNCAPPED", False)
     blocked = governor.evaluate(
         session=_auction_session(),

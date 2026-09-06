@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import replace
-from datetime import date
+from datetime import date, datetime, timezone
 from math import isfinite
 from typing import Any, Optional
 
@@ -258,7 +258,7 @@ class OptionStrategyMapper:
         )
 
     async def _get_option_adapters(self) -> tuple[Optional[BrokerAdapter], Optional[BrokerAdapter]]:
-        if settings.MARKET_INTELLIGENCE_STRATEGY_LOCAL_ONLY or settings.PAPER_TRADING_ONLY:
+        if self.config.get("local_data_only", True) or settings.MARKET_INTELLIGENCE_STRATEGY_LOCAL_ONLY or settings.PAPER_TRADING_ONLY:
             return None, None
         upstox_adapter = get_active_adapter("upstox")
         fyers_adapter = get_active_adapter("fyers")
@@ -352,8 +352,7 @@ class OptionStrategyMapper:
         if eligible:
             return eligible[0]
 
-        future_expiries = [expiry for expiry in expiries if expiry >= session_date]
-        return future_expiries[0] if future_expiries else None
+        return None  # Insufficient DTE is a refusal, never a nearer-expiry substitution.
 
     @staticmethod
     def _coerce_session_date(value: date | str) -> date:
@@ -383,7 +382,7 @@ class OptionStrategyMapper:
         except Exception as exc:
             logger.debug(f"[AuctionIQ] Local option-chain cache lookup failed for {app_symbol} {expiry_iso}: {exc}")
             cached_payload = None
-        if cached_payload and (cached_payload.get("data_quality") or {}).get("execution_ready") is not False:
+        if cached_payload and self._fresh_quote(cached_payload.get("timestamp")) and (cached_payload.get("data_quality") or {}).get("execution_ready") is not False:
             chain = OptionChain(
                 symbol=str(cached_payload.get("symbol") or app_symbol),
                 expiry=expiry_iso,
@@ -413,7 +412,7 @@ class OptionStrategyMapper:
                 self._chain_cache[cache_key] = chain
                 return chain
 
-        if settings.MARKET_INTELLIGENCE_STRATEGY_LOCAL_ONLY or settings.PAPER_TRADING_ONLY:
+        if self.config.get("local_data_only", True) or settings.MARKET_INTELLIGENCE_STRATEGY_LOCAL_ONLY or settings.PAPER_TRADING_ONLY:
             fallback_chain = await self._load_local_atm_watchlist_chain(app_symbol, expiry_iso)
             if fallback_chain is not None:
                 self._chain_cache[cache_key] = fallback_chain
@@ -444,7 +443,7 @@ class OptionStrategyMapper:
         app_symbol: str,
         expiry_iso: str,
     ) -> Optional[OptionChain]:
-        underlying = str(DISPLAY_NAMES.get(app_symbol) or "").upper().strip()
+        underlying = str(DISPLAY_NAMES.get(app_symbol) or app_symbol.split(":")[-1].removesuffix("-EQ")).upper().strip()
         if not underlying:
             return None
         payload = await atm_watchlist_service.get_watchlist(
@@ -467,6 +466,8 @@ class OptionStrategyMapper:
         for side_key, option_type in (("ce", "CE"), ("pe", "PE")):
             side = row.get(side_key) or {}
             ltp = float(side.get("ltp") or 0.0)
+            if not self._fresh_quote(side.get("as_of")):
+                continue
             if ltp <= 0:
                 continue
             entries.append(
@@ -476,8 +477,8 @@ class OptionStrategyMapper:
                     ltp=ltp,
                     oi=int(side.get("oi") or 0),
                     volume=int(side.get("volume") or 0),
-                    bid=float(side.get("bid") or ltp),
-                    ask=float(side.get("ask") or ltp),
+                    bid=float(side.get("bid") or 0),
+                    ask=float(side.get("ask") or 0),
                     iv=float(side["iv"]) if side.get("iv") is not None else None,
                     delta=float(side["delta"]) if side.get("delta") is not None else None,
                     gamma=float(side["gamma"]) if side.get("gamma") is not None else None,
@@ -778,6 +779,8 @@ class OptionStrategyMapper:
     ) -> list[tuple[float, dict[str, Any]]]:
         scored: list[tuple[float, dict[str, Any]]] = []
         for entry in option_entries:
+            if not (isfinite(float(entry.ask or 0)) and 0 < float(entry.bid or 0) <= float(entry.ask or 0)):
+                continue
             strike = float(entry.strike)
             contract = contracts.get((strike, option_type), {})
             premium = self._buy_touch_price(entry)
@@ -949,6 +952,17 @@ class OptionStrategyMapper:
         if month_expiries and expiry == max(month_expiries):
             return "monthly"
         return "weekly"
+
+    @staticmethod
+    def _fresh_quote(value: Any, *, max_age: float = 120) -> bool:
+        try:
+            stamp = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+            if stamp.tzinfo is None:
+                return False
+            age = (datetime.now(timezone.utc) - stamp).total_seconds()
+            return -5 <= age <= max_age
+        except (TypeError, ValueError):
+            return False
 
     def _extract_underlying(self, symbol: str) -> str:
         normalized = str(symbol or "").upper().replace(" INDEX", "").replace(" FUT", "").strip()

@@ -1,0 +1,56 @@
+# Pinned paper release. Use with the main project's docker-compose.yml.
+services:
+  backend:
+    environment:
+      LANESET: core
+      BROKER_REST_BUDGET_FRACTION: '0.7'
+      PAPER_TRADING_ONLY: 'true'
+      MARKET_INTELLIGENCE_STRATEGY_LOCAL_ONLY: 'true'
+      SHARED_MP_REDIS_URL: redis://redis:6379/0
+    build:
+      context: /Users/ramachandran/CLAUDE PROJECTS/Nomad Curie/TradeBot/.claude/worktrees/auction-shared/backend
+    volumes:
+      - /Users/ramachandran/CLAUDE PROJECTS/Nomad Curie/TradeBot/.claude/worktrees/auction-shared/backend:/app
+      - /Users/ramachandran/CLAUDE PROJECTS/Nomad Curie/TradeBot/backend/runtime:/app/runtime
+      - /Users/ramachandran/CLAUDE PROJECTS/Nomad Curie/TradeBot/backend/credentials.json:/app/credentials.json
+      - /Users/ramachandran/CLAUDE PROJECTS/Nomad Curie/TradeBot/backend/nse_strategy_state.json:/app/nse_strategy_state.json
+      - /Users/ramachandran/CLAUDE PROJECTS/Nomad Curie/TradeBot/backend/commodity_strategy.json:/app/commodity_strategy.json
+  backend-strategies:
+    environment:
+      LANESET: strategies
+      PAPER_TRADING_ONLY: 'true'
+      MARKET_INTELLIGENCE_STRATEGY_LOCAL_ONLY: 'true'
+      SHARED_MP_REDIS_URL: redis://redis:6379/0
+    volumes:
+      - /Users/ramachandran/CLAUDE PROJECTS/Nomad Curie/TradeBot/.claude/worktrees/auction-shared/backend:/app
+      - /Users/ramachandran/CLAUDE PROJECTS/Nomad Curie/TradeBot/backend/runtime:/app/runtime
+      - /Users/ramachandran/CLAUDE PROJECTS/Nomad Curie/TradeBot/backend/credentials.json:/app/credentials.json
+      - /Users/ramachandran/CLAUDE PROJECTS/Nomad Curie/TradeBot/backend/nse_strategy_state.json:/app/nse_strategy_state.json
+      - /Users/ramachandran/CLAUDE PROJECTS/Nomad Curie/TradeBot/backend/commodity_strategy.json:/app/commodity_strategy.json
+  frontend-v2:
+    image: tradebot-frontend-v2:auction-shared
+    build:
+      context: /Users/ramachandran/CLAUDE PROJECTS/Nomad Curie/TradeBot/.claude/worktrees/auction-shared/frontend-v2
+  vanguard-cycle:
+    image: tradebot-backend
+    container_name: nomadcurie_vanguard_cycle
+    environment:
+      VANGUARD_DATABASE_URL: postgresql://nomadcurie:nomadcurie@db:5432/nomadcurie
+      SHARED_MP_REDIS_URL: redis://redis:6379/0
+      VANGUARD_PYTHON: python
+      VANGUARD_LIVE_PASS_DELAY_S: '120'
+      VANGUARD_STEP_TIMEOUT_S: '1500'
+      VANGUARD_FYERS_CREDENTIALS: /run/fyers-credentials.json
+      PYTHONUNBUFFERED: '1'
+    volumes:
+      - /Users/ramachandran/CLAUDE PROJECTS/Nomad Curie/TradeBot/.claude/worktrees/auction-shared/vanguard:/vanguard:ro
+      - /Users/ramachandran/CLAUDE PROJECTS/Nomad Curie/TradeBot/.claude/worktrees/auction-shared/backend:/app:ro
+      - /Users/ramachandran/CLAUDE PROJECTS/MACD mini/runtime/credentials.json:/run/fyers-credentials.json:ro
+    working_dir: /vanguard
+    command: ['python', 'scripts/cycle_daemon.py']
+    restart: unless-stopped
+    logging:
+      driver: json-file
+      options:
+        max-size: '10m'
+        max-file: '3'

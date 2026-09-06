@@ -159,6 +159,7 @@ async def lifespan(app: FastAPI):
     research_sync_task: asyncio.Task | None = None
     loop_lag_task: asyncio.Task | None = None
     sdk_log_guard_task: asyncio.Task | None = None
+    fno_membership_task: asyncio.Task | None = None
 
     # Third-party SDK log cap (2026-07-27). fyers_apiv3 installs its own,
     # never-rotated FileHandler; with log_path="" it wrote into the /app bind
@@ -210,6 +211,8 @@ async def lifespan(app: FastAPI):
     # ── CORE plane: tick construction + the ONE broker WS ────────────────────
     # (LANESET=all keeps every guard True — byte-identical single-process boot.)
     if boots_core():
+        from market_data.fno_membership import run_membership_loop
+        fno_membership_task = asyncio.create_task(run_membership_loop(), name="fno-membership")
         # Catalog integrity invariant: no two F&O underlyings may share a
         # spot_instrument_key. They key the same row in underlying_spot_candles
         # (PK = instrument_key/interval/time), so a collision makes the two names
@@ -522,6 +525,7 @@ async def lifespan(app: FastAPI):
     # kept running after `yield`, leaking DB/Redis connections into the next boot and
     # hanging restarts. All three re-raise CancelledError, so this is clean.
     for _name, _task in (
+        ("fno-membership", fno_membership_task),
         ("option-ws", option_ws_task),
         ("held-position-ws", held_position_ws_task),
         ("held-position-candles", held_position_candle_task),

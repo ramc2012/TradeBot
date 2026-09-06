@@ -41,19 +41,11 @@ class RiskGovernor:
             "paper_mode": self.paper_mode,
         }
 
-        # OWNER DIRECTIVE 2026-07-17 (signal validation, PAPER mode only):
-        # the governor's CAPITAL / LOSS / DRAWDOWN entry caps — daily-loss,
-        # per-agent drawdown, symbol/projected-margin exposure and
-        # correlated-exposure — are skipped while validating signals so
-        # 'risk_blocked: projected margin exposure would exceed cap' never
-        # suppresses a strategy signal. KEPT: broker/stale-data infra checks,
-        # max-concurrent-positions, model-confidence floor, the 15-min
-        # session-close buffer, and every regime/setup/scalp gate upstream.
-        # Live mode (paper_mode=False) is entirely unaffected.
-        # (Hard-set to False in a 2026-07-17 experiment; restored the same
-        # day by owner directive — the flag-driven paper-only bypass IS the
-        # standing validation doctrine, see core/config.py.)
-        validation_uncapped = bool(settings.SIGNAL_VALIDATION_UNCAPPED and self.paper_mode)
+        # The shared app flag still governs other experimental lanes. Auction's
+        # paper module enforces its own portfolio limits by default; only an
+        # explicit offline configuration may opt back into uncapped validation.
+        validation_uncapped = bool(settings.SIGNAL_VALIDATION_UNCAPPED and self.paper_mode
+                                   and not self.config.get("enforce_paper_limits", True))
 
         if not session.broker_connected and not self.paper_mode:
             reasons.append("Broker connectivity unavailable.")

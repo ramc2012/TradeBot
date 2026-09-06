@@ -27,12 +27,12 @@ def test_symbol_capital_clamp_caps_premium_outgo_to_fraction():
     assert book._clamp_quantity_to_symbol_cap(lot, premium, lot) == lot
 
 
-def test_symbol_capital_clamp_keeps_one_lot_when_a_single_lot_exceeds_cap():
+def test_symbol_capital_clamp_refuses_when_a_single_lot_exceeds_cap():
     # Documented escape hatch: if even ONE lot's outgo exceeds the cap, keep one lot
     # (rather than skip) so the symbol can still trade. premium=8000 x lot 75 = 600k
     # outgo > 10% cap (500k).
     book = _book(max_symbol_capital_fraction=0.1)
-    assert book._clamp_quantity_to_symbol_cap(75, 8000.0, 75) == 75
+    assert book._clamp_quantity_to_symbol_cap(75, 8000.0, 75) == 0
 
 
 def test_hard_stop_triggers_at_premium_drawdown_threshold():

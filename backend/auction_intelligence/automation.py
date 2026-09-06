@@ -66,7 +66,8 @@ async def _sync_order_flow_book_subscriptions() -> dict[str, Any]:
     broker_name = str(
         getattr(getattr(market_data_router, "_broker", None), "broker_name", "") or ""
     ).lower()
-    if broker_name != "fyers":
+    from core.laneset import boots_core
+    if boots_core() and broker_name not in {"fyers", "upstox"}:
         return {
             "status": "broker_not_supported",
             "broker": broker_name or None,
@@ -291,19 +292,23 @@ async def capture_live_paper_cycle(
         )
         return result
 
-    service = AuctionIntelligenceService(paper_mode=True)
-    # Paper mode bypasses live-execution data-quality gates. The live-snapshot
-    # builder sets session.broker_connected = data_status.execution_ready and
-    # inflates stale_data_seconds past the budget whenever the order-flow path
-    # is bar_inference (which is the only path in live_session mode without a
-    # tick subscription). For real-money trading those gates are correct, but
-    # they make paper trades impossible on bar-inferred sessions even though
-    # the regime + agent logic is perfectly valid on bar data. Override only
-    # for the paper cycle so the risk governor judges the trade on regime,
-    # exposure, and confidence — not on tick freshness.
+    from auction_intelligence.live import SYMBOL_MAP
+    paper_config = clone_default_config()
+    paper_config["market_profile"]["tick_size"] = float(SYMBOL_MAP.get(symbol, {}).get("tick_size", 0.5))
+    service = AuctionIntelligenceService(paper_config, paper_mode=True)
+    # Paper uses completed bars (including explicitly labelled bar inference).
+    # Being simulated does not make yesterday's or delayed prices tradeable.
     session_payload = dict(request["session"])
-    session_payload["broker_connected"] = True
-    session_payload["stale_data_seconds"] = 0.0
+    from datetime import timedelta
+    from auction_intelligence.live import _row_time_from_value
+    source_time = metadata.get("snapshot_time")
+    interval_minutes = int(metadata.get("bar_interval_minutes") or 1)
+    max_age = float(clone_default_config()["paper_trading"].get("max_bar_age_seconds", 240))
+    age = float("inf")
+    if source_time:
+        age = (_now_ist() - (_row_time_from_value(source_time) + timedelta(minutes=interval_minutes))).total_seconds()
+    data_blocked = age < -5 or age > max_age
+    session_payload["stale_data_seconds"] = max(0, age)
     # Paper analysis must consume the PAPER ledger, not broker cash and not a
     # fresh fixed-capital reset on every cycle. Otherwise open-count, daily P/L
     # and realised drawdown never reach the risk governor and sizing continues
@@ -316,7 +321,7 @@ async def capture_live_paper_cycle(
     try:
         paper_state = await service.paper.status()
     except Exception as exc:
-        logger.warning(f"auction paper-ledger snapshot unavailable; using configured capital: {exc}")
+        raise RuntimeError("Paper ledger unavailable; refusing new entries") from exc
     paper_summary = dict(paper_state.get("summary") or {})
     open_positions = list(paper_state.get("open_positions") or [])
     portfolio_payload["net_liquidation"] = max(
@@ -373,6 +378,18 @@ async def capture_live_paper_cycle(
         )
         return result
 
+    if source_time:
+        age = (_now_ist() - (_row_time_from_value(source_time) + timedelta(minutes=interval_minutes))).total_seconds()
+        data_blocked = age < -5 or age > max_age
+    if data_blocked:
+        bundle.execution_plan = []
+        bundle.risk.allowed = False
+        bundle.risk.reasons = ["Paper source bars are stale or unavailable."]
+        # Preserve held positions; stale signals must not trigger discretionary exits.
+        return {"symbol_code": symbol, "no_trade_gate": "paper_bars_stale",
+                "risk_allowed": False, "risk_reasons": bundle.risk.reasons,
+                "bar_age_seconds": age if source_time else None, "execution_count": 0}
+
     journal_paths = service.paper.record_analysis(bundle)
     paper_positions = await service.paper.sync_positions(bundle)
     records = build_shadow_records_from_snapshot(snapshot, shadow_options)
@@ -403,7 +420,7 @@ async def capture_live_paper_cycle(
     risk_reasons = list(getattr(bundle.risk, "reasons", []) or [])
     exec_count = len(list(bundle.execution_plan or []))
     if exec_count > 0:
-        gate = "executed"
+        gate = "proposal_mapped"
     elif not non_flat:
         gate = "all_decisions_flat"
     elif not risk_allowed:
@@ -435,7 +452,7 @@ async def capture_live_paper_cycle(
         "execution_count": exec_count,
         "journal_paths": journal_paths,
         "journal_path_count": len(journal_paths),
-        "paper_positions_summary": paper_positions.get("summary") if isinstance(paper_positions, dict) else None,
+        "paper_positions_summary": paper_positions if isinstance(paper_positions, dict) else None,
         "shadow_record_count": len(records),
         "shadow_storage": storage,
     }
@@ -448,12 +465,31 @@ async def run_market_hours_cycle(
 ) -> dict[str, Any]:
     from time import monotonic
 
-    requested = list(dict.fromkeys(symbols or auto_symbols()))
+    from auction_intelligence.universe import refresh_universe, INDEX_SYMBOLS
+    if symbols is None:
+        stocks = await refresh_universe()
+        all_symbols = [*INDEX_SYMBOLS, *sorted(stocks)]
+        from auction_intelligence.paper import PaperTradingService
+        state = await PaperTradingService(clone_default_config()["paper_trading"]["journal_root"]).status()
+        held = list(dict.fromkeys(str(p.get("underlying_symbol") or p.get("underlying") or "").replace(" FUT", "")
+                                  for p in state.get("open_positions", [])))
+        held = [s for s in held if s]
+        # Deterministic wall-clock rotation: no symbol starvation after restarts.
+        import time
+        batch_size = int(clone_default_config()["paper_trading"].get("scan_batch_size", 24))
+        names = sorted(stocks)
+        start = (int(time.time() // 180) * batch_size) % max(len(names), 1)
+        batch = (names + names)[start:start + batch_size]
+        requested = list(dict.fromkeys([*held, *INDEX_SYMBOLS, *batch]))
+    else:
+        all_symbols = list(dict.fromkeys(symbols))
+        requested = all_symbols
     if not _nse_market_open():
         results = [_market_closed_result(symbol, stage="cycle_start") for symbol in requested]
         return {
             "status": "market_closed",
-            "symbols_requested": requested,
+            "universe_size": len(all_symbols),
+        "symbols_requested": requested,
             "symbols_completed": [],
             "result_count": len(results),
             "failure_count": 0,
@@ -492,6 +528,7 @@ async def run_market_hours_cycle(
         gate_breakdown[gate] = gate_breakdown.get(gate, 0) + 1
 
     return {
+        "universe_size": len(all_symbols),
         "symbols_requested": requested,
         "symbols_completed": [item["symbol_code"] for item in results],
         "result_count": len(results),

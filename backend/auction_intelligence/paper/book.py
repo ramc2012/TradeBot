@@ -25,7 +25,7 @@ from market_data.option_history import option_history_service
 # becoming the binding constraint. Override via env AI_INITIAL_CAPITAL.
 AI_INITIAL_CAPITAL = float(os.environ.get("AI_INITIAL_CAPITAL", 5_000_000.0))
 IST = ZoneInfo("Asia/Kolkata")
-CURRENT_PERFORMANCE_COHORT = "exact_contract_current_session_v1"
+CURRENT_PERFORMANCE_COHORT = "shared_auction_costs_v2"
 
 
 def _utc_now() -> str:
@@ -107,6 +107,8 @@ class PaperPositionBook:
         #   max_symbol_capital_fraction -> clamp qty so premium outgo <= frac * capital.
         #   hard_stop_premium_fraction  -> exit when the option premium falls this far.
         self.limits = dict(limits or {})
+        from auction_intelligence.config import clone_default_config
+        self.costs = clone_default_config()["paper_trading"]
 
     def _exit_signal_confirmed(self, position: dict[str, Any], action: str, *, now: str) -> bool:
         """Require minimum hold time and repeated flat/flip observations."""
@@ -281,13 +283,25 @@ class PaperPositionBook:
         }
 
     async def sync_analysis(self, bundle: AnalysisBundle) -> dict[str, Any]:
-        async with self._lock:
+        from auction_intelligence.paper.locking import book_lock
+        async with self._lock, book_lock(self.root / "paper_positions.lock"):
             state = await self._load_state()
             open_positions = list(state.get("open_positions", []))
             closed_positions = list(state.get("closed_positions", []))
 
             decisions_by_agent = {decision.agent_name: decision for decision in bundle.agent_decisions}
             executions_by_agent = {execution.agent_name: execution for execution in bundle.execution_plan if execution.action != "FLAT"}
+            # Re-check durable capital inside the cross-process lock.
+            available = self._summary(state).get("available_capital", 0)
+            from auction_intelligence.config import clone_default_config
+            max_positions = int(clone_default_config()["risk"]["max_concurrent_positions"])
+            symbol_is_held = any(_normalize_underlying(p.get("underlying_symbol")) == _normalize_underlying(bundle.market_profile.symbol) for p in open_positions)
+            executions_by_agent = {
+                agent: execution for agent, execution in executions_by_agent.items()
+                if bundle.risk.allowed and (symbol_is_held or len(open_positions) < max_positions) and 0 < self._clamp_quantity_to_symbol_cap(
+                    int(execution.quantity or 0), float(execution.premium or execution.limit_price or 0), execution.lot_size
+                ) * float(execution.premium or execution.limit_price or 0) <= available
+            }
             underlying = _normalize_underlying(
                 next(
                     (
@@ -337,7 +351,7 @@ class PaperPositionBook:
             closed_positions.sort(key=lambda item: str(item.get("closed_at") or ""), reverse=True)
             state = {
                 "open_positions": open_positions,
-                "closed_positions": closed_positions[:250],
+                "closed_positions": closed_positions,
                 "last_synced_at": now,
             }
             await self._save_state(state)
@@ -710,7 +724,7 @@ class PaperPositionBook:
         position["execution_style"] = getattr(execution, "style", None) or position.get("execution_style")
         entry_premium = float(position.get("entry_premium") or latest_premium or 0.0)
         quantity = int(position.get("quantity") or 0)
-        position["unrealized_pnl"] = round((latest_premium - entry_premium) * quantity, 2)
+        position["unrealized_pnl"] = round((latest_premium - entry_premium) * quantity - float((position.get("cost_model") or {}).get("fees_per_order", 0)), 2)
 
     def _exit_reason_for_position(
         self,
@@ -813,6 +827,8 @@ class PaperPositionBook:
         exit_premium = await self._resolve_premium(
             position=position, execution=execution, for_close=True
         )
+        costs = position.get("cost_model") or {}
+        exit_premium *= 1 - float(costs.get("slippage_bps", 0)) / 10000
         exit_spot = self._spot_from_execution_or_bundle(bundle=bundle, execution=execution, fallback=position.get("latest_spot_price"))
         entry_premium = float(position.get("entry_premium") or exit_premium or 0.0)
         quantity = int(position.get("quantity") or 0)
@@ -826,7 +842,9 @@ class PaperPositionBook:
         position["latest_spot_price"] = exit_spot
         position["regime_last"] = str(bundle.regime.label)
         position["unrealized_pnl"] = 0.0
-        position["realized_pnl"] = round((exit_premium - entry_premium) * quantity, 2)
+        position["gross_pnl"] = round((exit_premium - entry_premium) * quantity, 2)
+        position["fees"] = 2 * float(costs.get("fees_per_order", 0))
+        position["realized_pnl"] = round(position["gross_pnl"] - position["fees"], 2)
         try:
             await paper_trade_recorder.record_event(
                 strategy="auction_intelligence",
@@ -901,9 +919,7 @@ class PaperPositionBook:
         if lot > 0:
             max_qty = (max_qty // lot) * lot  # floor to whole lots
         if max_qty <= 0:
-            # One lot already exceeds the cap — keep a single lot rather than skip,
-            # so the symbol can still be traded (only relevant at very small capital).
-            return lot if lot > 0 else 0
+            return 0  # An unaffordable lot is a refusal, not a cap exception.
         return min(quantity, max_qty)
 
     def _build_open_position(
@@ -916,6 +932,7 @@ class PaperPositionBook:
         underlying: str,
     ) -> dict[str, Any]:
         entry_premium = float(getattr(execution, "premium", None) or getattr(execution, "limit_price", None) or 0.0)
+        entry_premium *= 1 + float(self.costs.get("slippage_bps", 1)) / 10000
         spot_price = self._spot_from_execution_or_bundle(bundle=bundle, execution=execution, fallback=None)
         raw_quantity = int(getattr(execution, "quantity", None) or decision.quantity or 0)
         lot_size = getattr(execution, "lot_size", None)
@@ -961,6 +978,9 @@ class PaperPositionBook:
         # performance sample. Existing ledger rows deliberately remain
         # untagged so historical defects cannot leak into the new estimate.
         payload["performance_cohort"] = CURRENT_PERFORMANCE_COHORT
+        payload["cost_model"] = {"slippage_bps": float(self.costs.get("slippage_bps", 1)),
+                                 "fees_per_order": float(self.costs.get("fees_per_order", 20)),
+                                 "label": "estimated slippage and fixed fees; statutory charges excluded"}
         return payload
 
     async def _resolve_premium(
@@ -1211,14 +1231,23 @@ class PaperPositionBook:
 
         try:
             return await asyncio.to_thread(_read, self.path)
-        except (OSError, json.JSONDecodeError):
-            return {"open_positions": [], "closed_positions": [], "last_synced_at": None}
+        except (OSError, json.JSONDecodeError) as exc:
+            raise RuntimeError("Paper ledger unreadable; refusing to reset capital or positions") from exc
 
     async def _save_state(self, state: dict[str, Any]) -> None:
         self.root.mkdir(parents=True, exist_ok=True)
 
         def _write(path: Path, payload: dict[str, Any]) -> None:
-            with path.open("w", encoding="utf-8") as handle:
-                json.dump(payload, handle, ensure_ascii=True, indent=2)
+            import tempfile
+            descriptor, temporary = tempfile.mkstemp(prefix=".paper-", suffix=".json", dir=path.parent)
+            try:
+                with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
+                    json.dump(payload, handle, ensure_ascii=True, indent=2, allow_nan=False)
+                    handle.flush()
+                    os.fsync(handle.fileno())
+                os.replace(temporary, path)
+            finally:
+                if os.path.exists(temporary):
+                    os.unlink(temporary)
 
         await asyncio.to_thread(_write, self.path, state)

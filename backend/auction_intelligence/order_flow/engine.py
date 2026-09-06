@@ -32,6 +32,13 @@ class OrderFlowEngine:
         tick_size: float = 0.5,
         quote_history: Optional[list[QuoteSnapshot]] = None,
     ) -> OrderFlowSnapshot:
+        from dataclasses import asdict
+        from mp_core.cache import cached_json
+        data = cached_json("auction-flow-v1", [self.config, quote, trades, depth, tick_size, quote_history],
+                           lambda: asdict(self._compute(quote, trades, depth, tick_size, quote_history)), ttl=120)
+        return OrderFlowSnapshot(**data)
+
+    def _compute(self, quote, trades, depth=None, tick_size=0.5, quote_history=None):
         recent_trades = trades[-self.trade_lookback :]
         recent_quotes = (quote_history or [quote])[-self.quote_lookback :]
         spread = max(quote.ask - quote.bid, 0.0)

@@ -121,6 +121,14 @@ async def ensure_fo_underlying_catalog(
     """
     global _last_bootstrap_checked_at, _last_bootstrap_result
 
+    import os
+    if os.environ.get("SHARED_MP_REDIS_URL"):
+        try:
+            from market_data.fno_membership import sync_membership
+            await sync_membership(force=force)
+        except Exception as exc:
+            logger.warning(f"Canonical F&O membership refresh deferred: {exc}")
+
     now = monotonic()
     if not force and _last_bootstrap_result and (now - _last_bootstrap_checked_at) < BOOTSTRAP_TTL_SECONDS:
         counts = dict(_last_bootstrap_result.get("counts_after") or {})

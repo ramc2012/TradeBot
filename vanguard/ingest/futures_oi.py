@@ -110,18 +110,21 @@ class Contract:
 # Instrument master
 # --------------------------------------------------------------------------
 def load_master(client: httpx.Client) -> list[dict]:
-    if MASTER_CACHE.exists() and time.time() - MASTER_CACHE.stat().st_mtime < MASTER_TTL_SECONDS:
-        return json.loads(MASTER_CACHE.read_text())
-    response = client.get(MASTER_URL, headers={"Accept-Encoding": "gzip"}, timeout=120)
-    response.raise_for_status()
-    raw = response.content
-    rows = json.loads((gzip.decompress(raw) if raw[:2] == b"\x1f\x8b" else raw).decode("utf-8"))
-    rows = [r for r in rows if isinstance(r, dict)]
-    try:
-        MASTER_CACHE.write_text(json.dumps(rows))
-    except OSError:
-        pass
-    return rows
+    from model.shared_mp_cache import cached_json
+    def fetch():
+        if MASTER_CACHE.exists() and time.time() - MASTER_CACHE.stat().st_mtime < MASTER_TTL_SECONDS:
+            return json.loads(MASTER_CACHE.read_text())
+        response = client.get(MASTER_URL, headers={"Accept-Encoding": "gzip"}, timeout=120)
+        response.raise_for_status()
+        raw = response.content
+        rows = json.loads((gzip.decompress(raw) if raw[:2] == b"\x1f\x8b" else raw).decode("utf-8"))
+        rows = [r for r in rows if isinstance(r, dict)]
+        try:
+            MASTER_CACHE.write_text(json.dumps(rows))
+        except OSError:
+            pass
+        return rows
+    return cached_json("instrument-master-v1", [int(time.time() // 21600)], fetch, ttl=21600)
 
 
 def _master_expiry(raw: object) -> date | None:

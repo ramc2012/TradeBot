@@ -80,15 +80,19 @@ class Profile:
         self.hi = float(np.max(high))
         n = max(int(round((self.hi - self.lo) / tick)) + 1, 1)
         self.n = n
-        self.counts = np.zeros(n)
-        # every period marks each bin its range touches: that is a TPO
-        for l, h in zip(low, high):
-            a = int(round((l - self.lo) / tick))
-            b = int(round((h - self.lo) / tick))
-            a, b = max(min(a, n - 1), 0), max(min(b, n - 1), 0)
-            if b < a:
-                a, b = b, a
-            self.counts[a:b + 1] += 1.0
+        # Same shared content cache as Auction/MP, separate formula version.
+        # Research uses a relative grid; keep model feature semantics stable.
+        from model.shared_mp_cache import cached_json
+        def calculate():
+            counts = np.zeros(n)
+            for l, h in zip(low, high):
+                a = max(min(int(round((l - self.lo) / tick)), n - 1), 0)
+                b = max(min(int(round((h - self.lo) / tick)), n - 1), 0)
+                if b < a:
+                    a, b = b, a
+                counts[a:b + 1] += 1.0
+            return counts.tolist()
+        self.counts = np.asarray(cached_json("research-relative-tpo-v1", [low.tolist(), high.tolist(), tick], calculate))
 
     def price(self, i: int) -> float:
         return self.lo + i * self.tick

@@ -64,6 +64,9 @@ import { CandleChart, CHART, MarketProfileChart, OrderFlowPanel, type ChartPrice
 import { SignalQualityTab } from "@/components/strategies/overview/SignalQualityTab";
 import { StrategyLiveStream } from "@/components/strategies/shared/StrategyLiveStream";
 import { api as apiClient } from "@/lib/api";
+import { AuctionInsights, type AuctionInsightsData } from "../auction/AuctionInsights";
+import { UniversePicker } from "../auction/UniversePicker";
+import { useAuctionUniverse } from "@/hooks/useAuctionUniverse";
 import { useSystemState } from "@/hooks/useSystemState";
 import { classifySourceGrade, deriveFreshness, liveVerdict, sourceGradeLabel, sourceGradeVariant } from "@/lib/market-semantics";
 
@@ -203,6 +206,7 @@ type AgentDecision = {
 };
 
 type LiveSnapshot = {
+  auction_insights?: AuctionInsightsData;
   symbol_code?: string;
   session_date?: string;
   request?: { metadata?: { order_flow_source?: string; snapshot_time?: string; snapshot_mode?: string } };
@@ -283,6 +287,7 @@ function ofBadgeOf(source: string): { label: string; variant: "success" | "warn"
 }
 
 const TABS = [
+  { key: "auction", label: "Auction lens", icon: Compass },
   { key: "live-stream", label: "Live stream", icon: Activity },
   { key: "live", label: "Live Profile", icon: Compass },
   { key: "structure", label: "Structure", icon: Layers3 },
@@ -298,13 +303,16 @@ const shortDate = (s?: string) => (s ? s.slice(5) : "");
 const directionVariant = (d?: string) => (d === "CE" ? "success" : d === "PE" ? "error" : "neutral");
 
 export default function MpDesk() {
-  const [activeTab, setActiveTab] = useUrlTab("live-stream");
+  const [activeTab, setActiveTab] = useUrlTab("auction");
   const [, startTransition] = useTransition();
   const [underlying, setUnderlying] = useState("NIFTY");
   const [lookback, setLookback] = useState(60);
+  const universeQuery = useAuctionUniverse();
+  const symbols = universeQuery.data?.symbols ?? UNDERLYINGS;
 
   const analyticsQuery = useQuery({
     queryKey: ["mp", "analytics", underlying, lookback],
+    enabled: ["structure", "migration", "drift"].includes(activeTab),
     queryFn: async () =>
       (await apiClient.get("/api/auction-intelligence/mp-analytics", { params: { underlying, lookback } })).data as MpAnalytics,
     refetchInterval: REFRESH_MS.summary,
@@ -312,7 +320,7 @@ export default function MpDesk() {
   });
 
   const liveQuery = useQuery({
-    queryKey: ["mp", "live", underlying],
+    queryKey: ["auction", "live", underlying],
     queryFn: async () =>
       (await apiClient.get("/api/auction-intelligence/live-snapshot", { params: { symbol: underlying } })).data as LiveSnapshot,
     refetchInterval: REFRESH_MS.live,
@@ -321,6 +329,7 @@ export default function MpDesk() {
 
   const signalQuery = useQuery({
     queryKey: ["mp", "open-signal", underlying],
+    enabled: activeTab === "live",
     queryFn: async () =>
       (await apiClient.get("/api/auction-intelligence/mp-open-signal", { params: { underlying } })).data as OpenSignalPayload,
     refetchInterval: REFRESH_MS.snapshot,
@@ -396,13 +405,15 @@ export default function MpDesk() {
       rightSlot={
         <div className="flex items-center gap-2">
           <DataModeBadge mode={mpDataMode} title={`order-flow source: ${ofSource} · ${ofBadge.note}`} />
-          <Picker label="Symbol" value={underlying} options={UNDERLYINGS} onChange={(v) => startTransition(() => setUnderlying(v))} />
+          <UniversePicker value={underlying} symbols={symbols} onChange={(v) => startTransition(() => setUnderlying(v))} />
           <Picker label="Lookback" value={String(lookback)} options={LOOKBACKS.map((l) => `${l}`)} suffix="d" onChange={(v) => startTransition(() => setLookback(Number(v)))} />
         </div>
       }
     >
-      {/* KPI strip — visible on every tab */}
-      <section className="grid grid-cols-2 gap-3 md:grid-cols-4 xl:grid-cols-7">
+      {activeTab === "auction" ? <AuctionInsights data={liveSnap?.auction_insights} decisions={live?.agent_decisions} /> : null}
+      {liveQuery.error ? <Section title="Snapshot unavailable"><p className="text-sm text-accent-amber">Shared auction history is unavailable for {underlying}. Data readiness is required before paper entry.</p></Section> : null}
+      {/* Historical research metrics are separate from the current auction. */}
+      {activeTab !== "auction" ? <section className="grid grid-cols-2 gap-3 md:grid-cols-4 xl:grid-cols-7">
         <MetricTile label="Live POC" value={formatNumber(liveProfile?.poc, 1)} detail={`VA ${formatNumber(liveProfile?.val, 0)}–${formatNumber(liveProfile?.vah, 0)}`} color="text-accent-amber" />
         <MetricTile label="Regime" value={regime?.label ? regime.label.replace(/_/g, " ") : "—"} detail={regime?.confidence != null ? `conf ${formatPct(regime.confidence)}` : undefined} />
         <MetricTile label="Open signal" value={signal?.direction ?? "—"} detail={signal?.day_type?.replace(/_/g, " ") ?? signalQuery.data?.skip_reason ?? "no setup"} color={directionTone(signal?.direction)} />
@@ -410,7 +421,7 @@ export default function MpDesk() {
         <MetricTile label="Cum POC shift" value={formatNumber(migration?.summary?.cumulative_poc_shift, 0)} detail={`up ${formatPct(migration?.summary?.upward_migration_pct, 0, { asPercent: true })}`} color={tone(migration?.summary?.cumulative_poc_shift)} />
         <MetricTile label="Net CVD" value={formatNumber(analytics?.orderflow_proxy?.summary?.net_cvd, 2)} detail={`${analytics?.orderflow_proxy?.summary?.total_bull_days ?? 0}↑ / ${analytics?.orderflow_proxy?.summary?.total_bear_days ?? 0}↓`} color={tone(analytics?.orderflow_proxy?.summary?.net_cvd)} />
         <MetricTile label="Drift state" value={drift?.current_state ? drift.current_state.toUpperCase() : "—"} detail={`roll ${formatPct(drift?.current_rolling_win_rate, 0, { asPercent: true })}`} color={drift?.current_state === "drift" ? "text-accent-red" : drift?.current_state === "stable" ? "text-accent-green" : "text-accent-amber"} />
-      </section>
+      </section> : null}
 
       <div className="mt-4">
         {analytics?.error ? (
@@ -453,7 +464,7 @@ export default function MpDesk() {
       {activeTab === "live-stream" ? (
           <StrategyLiveStream
             title="Market Profile"
-            watchlist={UNDERLYINGS.map((symbol) => ({ symbol }))}
+            watchlist={symbols.map((symbol) => ({ symbol }))}
             positionSources={["mp"]}
           />
         ) : null}

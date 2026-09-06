@@ -41,6 +41,9 @@ import { createStrategySnapshotSocket } from "@/lib/websocket";
 import type { PaperPosition, PositionsPayload } from "@/lib/strategy-stats";
 import { api as apiClient } from "@/lib/api";
 
+import { AuctionInsights } from "./AuctionInsights";
+import { UniversePicker } from "./UniversePicker";
+import { useAuctionUniverse } from "@/hooks/useAuctionUniverse";
 import { AgentDecisions } from "./AgentDecisions";
 import { GatesPanel } from "./GatesPanel";
 import { RagMemory } from "./RagMemory";
@@ -76,6 +79,7 @@ export default function AuctionDesk() {
   const [activeTab, setActiveTab] = useUrlTab("performance");
   const [, startTransition] = useTransition();
   const [symbol, setSymbol] = useState("NIFTY");
+  const universeQuery = useAuctionUniverse();
 
   // Live auction snapshot (market profile + order flow + regime): 8s WS push
   // with polling fallback, via the generic /ws/strategy-snapshot channel.
@@ -108,10 +112,10 @@ export default function AuctionDesk() {
   const snap = liveQuery.data;
   const analysis = snap?.analysis;
   const mp = analysis?.market_profile;
-  const of = analysis?.order_flow;
+  const of = snap?.request?.trades?.length ? analysis?.order_flow : undefined;
   const regime = analysis?.regime;
   const spot = snap?.request?.session?.last_price ?? mp?.close_price ?? null;
-  const universe = snap?.available_symbols?.length ? snap.available_symbols : DEFAULT_SYMBOLS;
+  const universe = universeQuery.data?.symbols ?? DEFAULT_SYMBOLS;
   const status = statusQuery.data as
     | { summary?: Record<string, number>; open_positions?: unknown[]; closed_positions?: unknown[] }
     | undefined;
@@ -156,7 +160,7 @@ export default function AuctionDesk() {
   // longer read green just because `live_mode` was true.
   const { nseOpen, mcxOpen, feedOnline } = useSystemState();
   const asOf = (snap?.request?.quote?.timestamp as string | undefined) ?? undefined;
-  const sessionOpen = nseOpen || mcxOpen;
+  const sessionOpen = symbol === "CRUDEOIL" ? mcxOpen : nseOpen;
   const dataMode = classifyDataMode(ds);
   const { freshness } = deriveFreshness(asOf, { staleAfterSeconds: 90 });
   const verdict = liveVerdict({
@@ -197,10 +201,11 @@ export default function AuctionDesk() {
           <StatusBadge label={dataBadge.label} variant={dataBadge.variant} />
           {ds?.snapshot_mode ? <StatusBadge label={ds.snapshot_mode.replace(/_/g, " ")} variant="info" /> : null}
           <OfSourceBadge source={ds?.order_flow_source} size="sm" />
-          <Picker label="Symbol" value={symbol} options={universe} onChange={(v) => startTransition(() => setSymbol(v))} />
+          <UniversePicker value={symbol} symbols={universe} onChange={(v) => startTransition(() => setSymbol(v))} />
         </div>
       }
     >
+      {liveQuery.error ? <Section title="Snapshot unavailable"><p className="text-sm text-accent-amber">Shared history is unavailable for {symbol}. Entries remain blocked until candles and exact-contract quotes are ready.</p></Section> : null}
       {activeTab === "auction" ? (
         <AuctionTab snap={snap} spot={spot} regime={regime} dataMode={dataMode} mp={mp} of={of} />
       ) : null}
@@ -272,6 +277,7 @@ function AuctionTab({
   const asOf = (snap?.request?.quote?.timestamp as string | undefined) ?? meta?.snapshot_time ?? null;
   return (
     <div className="space-y-4">
+      <AuctionInsights data={snap?.auction_insights} decisions={analysis?.agent_decisions} riskReasons={analysis?.risk?.reasons} />
       <section className="grid grid-cols-2 gap-3 md:grid-cols-4 xl:grid-cols-8">
         <MetricTile label="Spot" value={formatNumber(spot, 1)} detail={snap?.symbol_code} />
         <MetricTile label="Regime" value={regime?.label?.replace(/_/g, " ") || "—"} detail={`conf ${formatPct(regime?.confidence, 0)}`} color={regime?.label?.includes("breakout") || regime?.label?.includes("trend") ? "text-accent-green" : regime?.label?.includes("failed") ? "text-accent-red" : undefined} />
@@ -315,11 +321,13 @@ function AuctionTab({
         <RegimeCard regime={regime} risk={analysis?.risk} />
       </div>
 
+      {snap?.request?.trades?.length ? <>
       <OrderFlowPanel of={of} source={ofSource} asOf={asOf} />
       <Section title="Tape aggression & absorption" icon={<Waves size={16} />} description="Three-minute buy/sell pulses from the same quote stream the auction decision uses; sides are inferred (no aggressor tape) and low-efficiency high-volume bars are marked as absorption.">
         <OrderFlowPulse trades={(snap?.request?.trades ?? []) as FlowTrade[]} source={ofSource} asOf={asOf} dataMode={dataMode} />
       </Section>
 
+      </> : <Section title="Order-flow volume unavailable"><p className="text-sm text-text-muted">No traded-volume increments are available from this source. CVD and absorption are not inferred from price-only updates.</p></Section>}
       <AgentDecisions decisions={analysis?.agent_decisions} />
 
       <div className="grid gap-4 lg:grid-cols-2">
@@ -373,7 +381,7 @@ function RegimeCard({ regime, risk }: { regime?: Regime; risk?: Risk }) {
 function ExecutionPlanCard({ steps }: { steps?: ExecutionStep[] }) {
   const rows = steps || [];
   return (
-    <Section title="Execution plan" icon={<Activity size={16} />} description="How a triggered decision would route to the broker">
+    <Section title="Execution plan" icon={<Activity size={16} />} description="Proposed simulated option fills; this lane cannot route broker orders">
       {rows.length ? (
         <div className="space-y-2.5">
           {rows.map((s, i) => (

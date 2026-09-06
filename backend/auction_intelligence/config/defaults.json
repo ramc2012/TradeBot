@@ -1,7 +1,11 @@
 {
   "mvp_scope": {
-    "primary_underlyings": ["NIFTY"],
-    "secondary_underlyings": ["BANKNIFTY"],
+    "primary_underlyings": [
+      "NIFTY",
+      "BANKNIFTY",
+      "SENSEX"
+    ],
+    "secondary_underlyings": [],
     "instrument_type": "options_buy",
     "option_buy_price_fraction": 0.02,
     "session": {
@@ -11,7 +15,8 @@
     },
     "latency_budget_ms": 500,
     "slippage_bps": 1.5,
-    "commission_bps": 0.5
+    "commission_bps": 0.5,
+    "include_all_fno_stocks": true
   },
   "contract_specs": {
     "NIFTY": {
@@ -102,7 +107,7 @@
       "prior_value_reentry_tolerance_fraction": 0.25,
       "prior_value_reentry_tolerance_min_points": 8.0,
       "prior_value_reentry_tolerance_max_points": 55.0,
-      "ib_break_tolerance_fraction": 0.20,
+      "ib_break_tolerance_fraction": 0.2,
       "ib_break_tolerance_min_points": 8.0,
       "ib_break_tolerance_max_points": 55.0,
       "trend_pullback_tolerance_fraction": 0.35,
@@ -127,14 +132,18 @@
       "min_confidence": 0.5,
       "risk_multiple": 1.2,
       "lot_size": 25,
-      "value_tolerance_fraction": 0.20,
+      "value_tolerance_fraction": 0.2,
       "value_tolerance_min_points": 6.0,
       "value_tolerance_max_points": 32.0
     }
   },
   "meta_controller": {
     "mode": "sleeve",
-    "hierarchy": ["positional", "swing", "scalp"],
+    "hierarchy": [
+      "positional",
+      "swing",
+      "scalp"
+    ],
     "allow_countertrend_scalp_in_balance": true
   },
   "risk": {
@@ -145,7 +154,8 @@
     "max_concurrent_positions": 8,
     "session_close_buffer_minutes": 15,
     "stale_data_seconds": 10,
-    "min_model_confidence": 0.55
+    "min_model_confidence": 0.55,
+    "enforce_paper_limits": true
   },
   "position_limits": {
     "one_position_per_symbol": true,
@@ -158,7 +168,9 @@
     "journal_root": "runtime/auction_intelligence",
     "shadow_net_liquidation": 5000000.0,
     "slippage_bps": 1.0,
-    "fees_per_order": 20.0
+    "fees_per_order": 20.0,
+    "max_bar_age_seconds": 240,
+    "scan_batch_size": 24
   },
   "live_snapshot": {
     "portfolio_timeout_seconds": 1.5,
@@ -166,7 +178,10 @@
   },
   "sniper_overlay": {
     "enabled": false,
-    "apply_to_agents": ["positional", "swing"],
+    "apply_to_agents": [
+      "positional",
+      "swing"
+    ],
     "aligned_confidence_boost": 0.08,
     "conflict_confidence_penalty": 0.1,
     "min_signal_confidence": 0.5,
@@ -223,11 +238,41 @@
     "strong_confidence": 0.78,
     "very_strong_confidence": 0.86,
     "preferred_moneyness": {
-      "scalp": ["ATM", "OTM1", "ITM1", "OTM2", "ITM2"],
-      "swing": ["ATM", "ITM1", "OTM1", "ITM2", "OTM2"],
-      "swing_strong": ["ITM1", "ATM", "ITM2", "OTM1", "OTM2"],
-      "positional": ["ITM1", "ATM", "ITM2", "OTM1", "OTM2"],
-      "positional_strong": ["ITM2", "ITM1", "ATM", "OTM1", "OTM2"]
+      "scalp": [
+        "ATM",
+        "OTM1",
+        "ITM1",
+        "OTM2",
+        "ITM2"
+      ],
+      "swing": [
+        "ATM",
+        "ITM1",
+        "OTM1",
+        "ITM2",
+        "OTM2"
+      ],
+      "swing_strong": [
+        "ITM1",
+        "ATM",
+        "ITM2",
+        "OTM1",
+        "OTM2"
+      ],
+      "positional": [
+        "ITM1",
+        "ATM",
+        "ITM2",
+        "OTM1",
+        "OTM2"
+      ],
+      "positional_strong": [
+        "ITM2",
+        "ITM1",
+        "ATM",
+        "OTM1",
+        "OTM2"
+      ]
     }
   },
   "rl": {
@@ -245,8 +290,12 @@
     "max_fill_drift_worsening_ticks": 0.5
   },
   "live_canary": {
-    "allowed_symbols": ["BANKNIFTY"],
-    "allowed_agents": ["swing"],
+    "allowed_symbols": [
+      "BANKNIFTY"
+    ],
+    "allowed_agents": [
+      "swing"
+    ],
     "manual_approval_required": true,
     "max_live_lots": 1,
     "daily_loss_limit": 25000.0,

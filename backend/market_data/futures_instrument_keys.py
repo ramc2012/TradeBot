@@ -66,14 +66,8 @@ async def _load_nse_fo_instruments() -> list[dict[str, Any]]:
     if cached_rows and monotonic() - cached_at < _NSE_FO_TTL_SECONDS:
         return cached_rows
     try:
-        async with httpx.AsyncClient(timeout=60, follow_redirects=True) as client:
-            response = await client.get(_NSE_FO_URL, headers={"Accept-Encoding": "gzip"})
-        response.raise_for_status()
-        raw = response.content
-        payload = json.loads(
-            (gzip.decompress(raw) if raw[:2] == b"\x1f\x8b" else raw).decode("utf-8")
-        )
-        rows = [dict(item) for item in list(payload or []) if isinstance(item, dict)]
+        from market_data.instrument_master import load_master
+        rows = await asyncio.to_thread(load_master)
         _nse_fo_cache = (monotonic(), rows)
         return rows
     except Exception as exc:  # noqa: BLE001

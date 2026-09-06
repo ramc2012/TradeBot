@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import pytest
 import json
 from dataclasses import replace
 from datetime import date, datetime, timedelta, timezone
@@ -522,7 +523,7 @@ class _FakeOptionAdapter:
 
 def test_option_mapper_selects_atm_put_for_scalp_short(monkeypatch) -> None:
     config = clone_default_config()
-    mapper = OptionStrategyMapper(config["options_mapping"], config["contract_specs"])
+    mapper = OptionStrategyMapper({**config["options_mapping"], "local_data_only": False}, config["contract_specs"])
     expiry = "2026-04-09"
     adapter = _FakeOptionAdapter(
         expiries=[{"expiry": expiry}, {"expiry": "2026-04-16"}],
@@ -598,7 +599,7 @@ def test_option_mapper_selects_atm_put_for_scalp_short(monkeypatch) -> None:
 def test_option_mapper_sizes_quantity_from_selected_contract_lot(monkeypatch) -> None:
     config = clone_default_config()
     config["contract_specs"]["NIFTY"]["lot_size"] = 65
-    mapper = OptionStrategyMapper(config["options_mapping"], config["contract_specs"])
+    mapper = OptionStrategyMapper({**config["options_mapping"], "local_data_only": False}, config["contract_specs"])
     expiry = "2026-04-09"
     adapter = _FakeOptionAdapter(
         expiries=[{"expiry": expiry}],
@@ -666,7 +667,7 @@ def test_option_mapper_sizes_quantity_from_selected_contract_lot(monkeypatch) ->
 
 def test_option_mapper_select_expiry_accepts_string_session_date() -> None:
     config = clone_default_config()
-    mapper = OptionStrategyMapper(config["options_mapping"], config["contract_specs"])
+    mapper = OptionStrategyMapper({**config["options_mapping"], "local_data_only": False}, config["contract_specs"])
 
     expiry = mapper._select_expiry(
         expiries=[date(2026, 4, 9), date(2026, 4, 16)],
@@ -684,7 +685,7 @@ def test_option_mapper_select_expiry_accepts_string_session_date() -> None:
 
 def test_option_mapper_prefers_itm_call_for_high_confidence_positional_signal(monkeypatch) -> None:
     config = clone_default_config()
-    mapper = OptionStrategyMapper(config["options_mapping"], config["contract_specs"])
+    mapper = OptionStrategyMapper({**config["options_mapping"], "local_data_only": False}, config["contract_specs"])
     expiry = "2026-04-16"
     adapter = _FakeOptionAdapter(
         expiries=[{"expiry": "2026-04-09"}, {"expiry": expiry}],
@@ -759,7 +760,7 @@ def test_option_mapper_prefers_itm_call_for_high_confidence_positional_signal(mo
 def test_option_mapper_rejects_overpriced_contracts(monkeypatch) -> None:
     config = clone_default_config()
     config["options_mapping"]["enable_relaxed_fallback"] = False
-    mapper = OptionStrategyMapper(config["options_mapping"], config["contract_specs"])
+    mapper = OptionStrategyMapper({**config["options_mapping"], "local_data_only": False}, config["contract_specs"])
     expiry = "2026-04-16"
     adapter = _FakeOptionAdapter(
         expiries=[{"expiry": expiry}],
@@ -827,7 +828,7 @@ def test_option_mapper_rejects_overpriced_contracts(monkeypatch) -> None:
 
 def test_option_mapper_relaxed_fallback_allows_paper_trade_when_primary_filters_fail(monkeypatch) -> None:
     config = clone_default_config()
-    mapper = OptionStrategyMapper(config["options_mapping"], config["contract_specs"])
+    mapper = OptionStrategyMapper({**config["options_mapping"], "local_data_only": False}, config["contract_specs"])
     expiry = "2026-04-16"
     adapter = _FakeOptionAdapter(
         expiries=[{"expiry": expiry}],
@@ -895,7 +896,7 @@ def test_option_mapper_relaxed_fallback_allows_paper_trade_when_primary_filters_
 
 def test_option_mapper_can_fall_back_to_local_atm_watchlist_chain(monkeypatch) -> None:
     config = clone_default_config()
-    mapper = OptionStrategyMapper(config["options_mapping"], config["contract_specs"])
+    mapper = OptionStrategyMapper({**config["options_mapping"], "local_data_only": False}, config["contract_specs"])
 
     async def _fake_cached_chain(symbol: str, expiry: str):
         return None
@@ -910,6 +911,7 @@ def test_option_mapper_can_fall_back_to_local_atm_watchlist_chain(monkeypatch) -
                     "atm_strike": 22500.0,
                     "ce": {
                         "strike": 22500.0,
+                        "as_of": datetime.now(timezone.utc).isoformat(),
                         "ltp": 82.0,
                         "oi": 24000,
                         "volume": 20000,
@@ -918,6 +920,7 @@ def test_option_mapper_can_fall_back_to_local_atm_watchlist_chain(monkeypatch) -
                     },
                     "pe": {
                         "strike": 22500.0,
+                        "as_of": datetime.now(timezone.utc).isoformat(),
                         "ltp": 79.0,
                         "oi": 18000,
                         "volume": 16000,
@@ -996,7 +999,7 @@ def test_service_ntm_volx_blocks_weak_counter_bias_signal() -> None:
 
 def test_option_mapper_ntm_volx_can_shift_selection_toward_atm_pressure(monkeypatch) -> None:
     config = clone_default_config()
-    mapper = OptionStrategyMapper(config["options_mapping"], config["contract_specs"])
+    mapper = OptionStrategyMapper({**config["options_mapping"], "local_data_only": False}, config["contract_specs"])
     expiry = "2026-04-16"
     adapter = _FakeOptionAdapter(
         expiries=[{"expiry": expiry}],
@@ -1264,7 +1267,8 @@ def test_paper_position_book_closes_open_position_on_flat_signal(tmp_path, monke
     assert close_summary["closed_count"] == 1
     assert state["open_positions"] == []
     assert state["closed_positions"][0]["close_reason"] == "flat_signal"
-    assert state["closed_positions"][0]["realized_pnl"] == 750.0
+    assert state["closed_positions"][0]["realized_pnl"] == pytest.approx(708.56)
+    assert state["closed_positions"][0]["fees"] == 40.0
 
 
 def test_paper_position_book_closes_on_underlying_stop_without_reopening(tmp_path, monkeypatch) -> None:
@@ -1348,7 +1352,8 @@ def test_paper_position_book_closes_on_underlying_stop_without_reopening(tmp_pat
     assert close_summary["open_count"] == 0
     assert close_summary["closed_count"] == 1
     assert state["closed_positions"][0]["close_reason"] == "stop_loss"
-    assert state["closed_positions"][0]["realized_pnl"] == -1050.0
+    assert state["closed_positions"][0]["realized_pnl"] == pytest.approx(-1091.26)
+    assert state["closed_positions"][0]["fees"] == 40.0
 
 
 def test_swing_agent_uses_contract_aware_margin_sizing() -> None:
@@ -3322,13 +3327,14 @@ def test_paper_cycle_rechecks_session_before_trade_writes(monkeypatch) -> None:
     )
 
     class _Paper:
+        status = AsyncMock(return_value={"summary": {}, "open_positions": []})
         record_analysis = AsyncMock()
         sync_positions = AsyncMock()
 
     class _Service:
         paper = _Paper()
 
-        def __init__(self, paper_mode=False):
+        def __init__(self, config=None, paper_mode=False):
             pass
 
         async def analyze_with_options(self, **kwargs):

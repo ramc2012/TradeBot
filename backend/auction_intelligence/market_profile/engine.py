@@ -46,6 +46,15 @@ class MarketProfileEngine:
         bars: list[MarketBar],
         prior_profile: Optional[MarketProfileSnapshot] = None,
     ) -> MarketProfileSnapshot:
+        from dataclasses import asdict
+        from mp_core.cache import cached_json
+        data = cached_json("auction-profile-v2", [{k: v for k, v in vars(self).items() if k != "config"}, symbol, bars, prior_profile],
+                           lambda: asdict(self._build_profile(symbol, bars, prior_profile)))
+        for key in ("tpo_counts", "tpo_letters"):
+            data[key] = {float(price): value for price, value in data[key].items()}
+        return MarketProfileSnapshot(**data)
+
+    def _build_profile(self, symbol, bars, prior_profile=None):
         if not bars:
             raise ValueError("MarketProfileEngine requires at least one bar")
 
@@ -53,12 +62,9 @@ class MarketProfileEngine:
         period_letters = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz"
         period_map: dict[int, list[MarketBar]] = defaultdict(list)
 
-        anchor = ordered_bars[0].timestamp.replace(
-            hour=ordered_bars[0].timestamp.hour,
-            minute=(ordered_bars[0].timestamp.minute // self.period_minutes) * self.period_minutes,
-            second=0,
-            microsecond=0,
-        )
+        # Input bars are session anchored (09:15 for NSE, 09:00 for MCX).
+        # Rounding 09:15 down to 09:00 splits the initial balance incorrectly.
+        anchor = ordered_bars[0].timestamp.replace(second=0, microsecond=0)
 
         for bar in ordered_bars:
             diff_minutes = int((bar.timestamp - anchor).total_seconds() // 60)

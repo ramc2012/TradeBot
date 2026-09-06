@@ -78,13 +78,25 @@ async def _load_two_sessions(symbol: str) -> tuple[list[dict], list[dict], str]:
 
 @router.get("/snapshot")
 async def snapshot(symbol: str = Query("BANKNIFTY")) -> dict[str, Any]:
-    sym = symbol.upper().strip()
-    current, prior, table = await _load_two_sessions(sym)
-    tick = max(round(float(current[-1]["close"]) * 0.0004, 2), 0.05)
-    payload = unified_snapshot(sym, current, tick_size=tick,
-                               prior_bars=prior or None)
-    payload["source_table"] = table
-    return payload
+    from auction_intelligence.live import build_live_analysis
+    try:
+        shared = await build_live_analysis(symbol)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except RuntimeError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+    analysis = shared["analysis"]
+    profile = dict(analysis["market_profile"])
+    prior = analysis.get("prior_market_profile")
+    if prior:
+        profile["prior"] = {"poc": prior["poc"], "vah": prior["vah"], "val": prior["val"],
+                            "high": prior["high_price"], "low": prior["low_price"], "close": prior["close_price"]}
+    insights = shared["auction_insights"]
+    return {"symbol": shared["symbol_code"], "session_date": shared["session_date"],
+            "profile": profile, "order_flow": analysis["order_flow"],
+            "intelligence": insights["intelligence"], "auction_insights": insights,
+            "source_table": insights["source"], "cache": cache_stats(),
+            "comparatives": {k: profile.get(k) for k in ("value_area_overlap", "poc_shift", "value_migration", "prior_poc_untouched", "bracket_state")}}
 
 
 @router.get("/verdicts")

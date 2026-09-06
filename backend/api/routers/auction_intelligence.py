@@ -2980,3 +2980,9 @@ async def mp_orderflow_proxy(
         orderflow_proxy=result,
     )
     return result
+
+
+@router.get("/universe")
+async def auction_universe() -> dict:
+    from auction_intelligence.universe import universe_payload
+    return await universe_payload()
