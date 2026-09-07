@@ -229,6 +229,15 @@ EOD_STEPS: list[tuple[str, list[str]]] = [
 # browser overlays the quote bus at sub-second cadence between persisted marks.
 REALTIME_MARK_SECONDS = int(os.environ.get("VANGUARD_REALTIME_MARK_SECONDS", "60"))
 REALTIME_STEPS: list[tuple[str, list[str]]] = [
+    # The watchlist marks belong here, not only in the 30-minute live pass.
+    # The comment above has always described them as refreshing every minute,
+    # but the step lived solely in LIVE_STEPS, so `vanguard_watchlist_items`
+    # only advanced at a bar close: measured on 2026-09-07 at 12:55 IST, every
+    # tracked contract's newest mark was the 12:15 bar -- 39 minutes old --
+    # while `updated_at` said 30 seconds because the journal sync beside it
+    # kept touching the row. The stale mark was invisible behind a fresh
+    # timestamp.
+    ("model watchlist marks", ["model/watchlist.py", "--track"]),
     ("strategy journals", ["journal/strategy_lanes.py", "--sync", "--track-swing"]),
 ]
 

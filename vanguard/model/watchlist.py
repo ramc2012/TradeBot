@@ -11,7 +11,7 @@ import argparse
 import json
 import os
 import sys
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 from typing import Any, Iterable
 
 import psycopg2
@@ -22,6 +22,12 @@ from model.watchlist_exits import POLICY, HARD_STOP_POLICY, analyse_path, policy
 
 DEFAULT_DSN = "postgresql://nomadcurie:nomadcurie@localhost:5433/nomadcurie"
 TOP_N = int(os.environ.get("VANGUARD_WATCHLIST_TOP_N", "10"))
+# A mark older than this is flagged in the payload. Chosen against the
+# measured pipeline: the option-chain sweep lands 45-60 minutes behind its
+# bar, so anything past ~20 minutes means no fine-grained print is arriving
+# for that contract and the mark is running on the 30-minute grid alone.
+STALE_MARK_MINUTES = float(os.environ.get("VANGUARD_STALE_MARK_MINUTES", "20"))
+IST_TZ = timezone(timedelta(hours=5, minutes=30))
 SELECTION_RULE = (
     "final session horizon-specific model ranking; qualification is ranking_score >= versioned threshold; "
     "same completed-bar exact-contract mark required; best CE/PE per underlying; descending score; "
@@ -232,6 +238,17 @@ def track_open_watchlists(connection, refresh_session: date | None = None) -> di
                 "SELECT * FROM vanguard_watchlist_items WHERE source_session=%s ORDER BY rank",
                 (run["source_session"],))
             items = cursor.fetchall()
+            # The IST session as explicit UTC bounds. The date expression alone
+            # wraps the partitioning column in a function, which defeats chunk
+            # exclusion on a hypertable with hundreds of chunks -- a diagnostic
+            # query shaped exactly like this once SIGKILLed this database
+            # mid-session. Direct literal bounds on o.time restore pruning; the
+            # date equality stays only as an exact filter inside them.
+            day_start = datetime.combine(track_session, datetime.min.time(),
+                                         tzinfo=IST_TZ).astimezone(timezone.utc)
+            day_end = day_start + timedelta(days=1)
+            bounds = {"source": run["source_session"], "track": track_session,
+                      "lower": day_start, "upper": day_end}
             cursor.execute(
                 """SELECT DISTINCT ON (i.id, o.time) i.id, o.time,
                           o.open, o.high, o.low, o.close, o.volume
@@ -239,10 +256,31 @@ def track_open_watchlists(connection, refresh_session: date | None = None) -> di
                      ON o.underlying=i.symbol AND o.option_type=i.option_type
                     AND o.strike=i.strike AND o.expiry=i.expiry AND o.interval='30minute'
                    WHERE i.source_session=%(source)s
+                     AND o.time >= %(lower)s AND o.time < %(upper)s
                      AND (o.time AT TIME ZONE 'Asia/Kolkata')::date=%(track)s
                    ORDER BY i.id, o.time, (o.source='upstox') DESC, o.source ASC""",
-                {"source": run["source_session"], "track": track_session})
+                bounds)
             quotes = cursor.fetchall()
+            # The freshest print on ANY archived interval, per contract. The
+            # 30-minute grid is the excursion path -- mixing bar sizes into the
+            # high/low would corrupt MFE and MAE -- but it is not the freshest
+            # thing available, and marking a live position off a bar that is a
+            # completed 30-minute candle plus a 45-60 minute chain-sweep lag
+            # means the mark can be an hour old while `updated_at` says
+            # seconds. This row is used to advance the LATEST mark only.
+            cursor.execute(
+                """SELECT DISTINCT ON (i.id) i.id, o.time, o.close, o.interval
+                   FROM vanguard_watchlist_items i JOIN option_premium_candles o
+                     ON o.underlying=i.symbol AND o.option_type=i.option_type
+                    AND o.strike=i.strike AND o.expiry=i.expiry
+                   WHERE i.source_session=%(source)s
+                     AND o.interval IN ('1minute','3minute','5minute','15minute','30minute')
+                     AND o.time >= %(lower)s AND o.time < %(upper)s
+                     AND (o.time AT TIME ZONE 'Asia/Kolkata')::date=%(track)s
+                     AND o.close IS NOT NULL
+                   ORDER BY i.id, o.time DESC, (o.source='upstox') DESC, o.source ASC""",
+                bounds)
+            freshest = {row["id"]: dict(row) for row in cursor.fetchall()}
         paths = {}
         for row in quotes:
             paths.setdefault(row["id"], []).append(dict(row))
@@ -268,6 +306,35 @@ def track_open_watchlists(connection, refresh_session: date | None = None) -> di
                 analysis["source_mark_age_minutes"] = (
                     (run["prediction_ts"] - item["source_mark_ts"]).total_seconds() / 60
                     if item["source_mark_ts"] else None)
+
+                # Advance the latest mark to the freshest archived print, while
+                # the excursion path stays on the 30-minute grid.
+                analysis["latest_mark_interval"] = "30minute"
+                tip = freshest.get(item["id"])
+                if (tip and analysis.get("status") != "closed"
+                        and analysis.get("latest_ts") and analysis.get("entry_mark")
+                        and tip["time"] > analysis["latest_ts"]):
+                    analysis["latest_ts"] = tip["time"]
+                    analysis["latest_mark"] = float(tip["close"])
+                    analysis["latest_mark_interval"] = tip["interval"]
+                    analysis["return_pct"] = (
+                        analysis["latest_mark"] / analysis["entry_mark"] - 1.0)
+                    # A fresher print can extend an excursion but never retract
+                    # one already observed on the 30-minute path.
+                    analysis["max_return_pct"] = max(
+                        analysis["max_return_pct"], analysis["return_pct"])
+                    analysis["min_return_pct"] = min(
+                        analysis["min_return_pct"], analysis["return_pct"])
+
+                # Record how old the mark actually is. Without this the row's
+                # `updated_at` -- refreshed every pass regardless -- reads as
+                # data freshness, and a consumer cannot tell a live mark from
+                # an hour-old one.
+                if analysis.get("latest_ts"):
+                    analysis["latest_mark_age_minutes"] = round(
+                        (as_of - analysis["latest_ts"]).total_seconds() / 60, 1)
+                    analysis["mark_is_stale"] = (
+                        analysis["latest_mark_age_minutes"] > STALE_MARK_MINUTES)
                 state = analysis["status"]
                 if session_ended and state != "closed":
                     state = "missing_contract"
