@@ -6,6 +6,12 @@ That separation is the whole design — the recurring failure in this stack is a
 "journal" that looks like a book, strands rows at status='open', and then gets
 believed.
 
+The FACTOR journal is what turns this lane into an instrument. Every factor
+records its value at every decision — acting or shadowed, available or not — so
+a per-factor information coefficient can be computed months later against
+outcomes this lane actually experienced, rather than by re-fitting on the same
+history that suggested the factor. A factor with weight zero is still measured.
+
 The decision journal is the one that earns its keep.  A lane that records only
 its fills cannot answer "why did nothing trade this week", and the answer is
 usually one gate doing all the killing.  Every evaluation lands here with the
@@ -288,4 +294,99 @@ async def gate_tally(
                 _GATE_TALLY, {"lower": lower, "upper": upper, "run_id": run_id}
             )
         ).mappings().all()
+    return [dict(r) for r in rows]
+
+
+_UPSERT_FACTOR = text(
+    """
+    INSERT INTO index_paper_factors (
+        bar_ts, underlying, factor, run_id, session_date, family, role, value,
+        score, sign, confidence, weight, status, acting, direction_score,
+        size_score, detail
+    ) VALUES (
+        :bar_ts, :underlying, :factor, :run_id, :session_date, :family, :role, :value,
+        :score, :sign, :confidence, :weight, :status, :acting, :direction_score,
+        :size_score, :detail
+    )
+    ON CONFLICT (bar_ts, underlying, factor) DO UPDATE SET
+        run_id = EXCLUDED.run_id,
+        value = EXCLUDED.value,
+        score = EXCLUDED.score,
+        weight = EXCLUDED.weight,
+        status = EXCLUDED.status,
+        acting = EXCLUDED.acting,
+        direction_score = EXCLUDED.direction_score,
+        size_score = EXCLUDED.size_score,
+        detail = EXCLUDED.detail
+    """
+)
+
+
+async def record_factor_panel(panel: Any, *, run_id: str | None, bar_ts: datetime) -> int:
+    """Write every factor in the panel, including the ones that did nothing."""
+    payload = panel.as_dict()
+    direction_score = payload.get("direction_score")
+    size_score = payload.get("size_score")
+    rows = [
+        {
+            "bar_ts": bar_ts,
+            "underlying": panel.underlying,
+            "factor": name,
+            "run_id": run_id,
+            "session_date": panel.session_date,
+            "family": f.get("family"),
+            "role": f.get("role"),
+            "value": f.get("value"),
+            "score": f.get("score"),
+            "sign": f.get("sign"),
+            "confidence": f.get("confidence"),
+            "weight": f.get("weight"),
+            "status": f.get("status"),
+            "acting": f.get("acting"),
+            "direction_score": direction_score,
+            "size_score": size_score,
+            "detail": (f.get("detail") or "")[:500],
+        }
+        for name, f in (payload.get("factors") or {}).items()
+    ]
+    if not rows:
+        return 0
+    async with AsyncSessionLocal() as session:
+        await session.execute(_UPSERT_FACTOR, rows)
+        await session.commit()
+    return len(rows)
+
+
+_FACTOR_IC_SQL = text(
+    """
+    SELECT f.factor,
+           count(*)                                   AS n,
+           corr(f.score, o.signed_outcome)            AS ic_signed,
+           corr(f.score, abs(o.signed_outcome))       AS ic_magnitude,
+           avg(f.weight)                              AS avg_weight
+    FROM index_paper_factors f
+    JOIN (
+        SELECT underlying, session_date,
+               CASE WHEN option_type = 'CE' THEN 1 ELSE -1 END
+                 * (realized_pnl / NULLIF(entry_premium * quantity, 0)) AS signed_outcome
+        FROM index_paper_positions
+        WHERE status = 'closed'
+    ) o ON o.underlying = f.underlying AND o.session_date = f.session_date
+    WHERE f.score IS NOT NULL
+    GROUP BY f.factor
+    HAVING count(*) >= :min_n
+    ORDER BY abs(coalesce(corr(f.score, o.signed_outcome), 0)) DESC
+    """
+)
+
+
+async def factor_ic(min_n: int = 20) -> list[dict[str, Any]]:
+    """Per-factor information coefficient against this lane's own outcomes.
+
+    The whole point of the factor journal. Returns nothing useful until enough
+    trades have closed — which is the honest state for months, and is why the
+    `min_n` floor refuses rather than reporting a correlation over five points.
+    """
+    async with AsyncSessionLocal() as session:
+        rows = (await session.execute(_FACTOR_IC_SQL, {"min_n": min_n})).mappings().all()
     return [dict(r) for r in rows]

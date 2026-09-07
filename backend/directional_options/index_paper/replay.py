@@ -1,21 +1,22 @@
-"""Bar-by-bar historical replay of the index paper lane.
+"""Bar-by-bar historical replay of the index directional swing lane.
 
-Two uses, and the second is the one that matters.
+Three uses:
 
   1. It exercises the whole lifecycle — entry, mark, stop, target, max-hold,
-     expiry close, attribution — against real bars, so those paths are proven
-     rather than merely written.
+     expiry settlement, attribution — against real bars, so those paths are
+     proven rather than merely written.
 
-  2. It measures the COST FLOOR.  Replaying a deliberately uninformative view
-     answers "what does this lane lose per trade purely to spread, slippage and
-     charges?", and every candidate signal has to beat that floor before it is
-     interesting.  A strategy evaluated without knowing its own cost floor is
-     being graded against zero, which is the wrong bar.
+  2. It measures the COST FLOOR: what the lane loses per trade purely to
+     spread, slippage, charges and decay. Every candidate signal has to beat
+     that floor before it is interesting, and a strategy evaluated without
+     knowing its own floor is being graded against zero.
 
-`spot_momentum_view` is supplied as the harness baseline for (2).  It is NOT a
-recommendation: this stack's own walk-forward work found intraday momentum
-anti-predictive in every regime tested, and the entry edge, where one existed
-at all, was on the fade.  Its value here is precisely that it is uninformative.
+  3. It fills the FACTOR JOURNAL, which is the only route by which a factor
+     currently carrying a small shadow weight can ever earn a real one.
+
+Direction is no longer injected. It comes from the factor panel, which is the
+whole point of the rebuild: the lane decides from everything it can see, and
+the record shows what each input contributed.
 
     python -m directional_options.index_paper.replay --bars 60 --reset
 """
@@ -33,91 +34,15 @@ from sqlalchemy import text
 
 from db.database import AsyncSessionLocal
 from directional_options.index_paper import book, journal
-from directional_options.index_paper.adapters import flat_view
 from directional_options.index_paper.engine import (
     IndexPaperConfig,
     PassResult,
     run_underlying,
 )
-from directional_options.index_paper.schemas import DirectionalView
 from directional_options.index_paper.store import ensure_tables
 from directional_options.vol.builder import usable_bars
+from directional_options.vol.realized import load_daily_series
 from directional_options.vol.surface import INDEX_UNIVERSE
-
-_SPOT_WINDOW_SQL = text(
-    """
-    WITH dominant AS (
-        SELECT instrument_key
-        FROM underlying_spot_candles
-        WHERE underlying = :underlying
-          AND interval = :interval
-          AND time >= :lower
-          AND time <= :upper
-        GROUP BY instrument_key
-        ORDER BY count(*) DESC
-        LIMIT 1
-    )
-    SELECT DISTINCT ON (c.time) c.time, c.close
-    FROM underlying_spot_candles c
-    JOIN dominant d ON d.instrument_key = c.instrument_key
-    WHERE c.underlying = :underlying
-      AND c.interval = :interval
-      AND c.time >= :lower
-      AND c.time <= :upper
-      AND (c.time AT TIME ZONE 'Asia/Kolkata')::time BETWEEN TIME '09:15' AND TIME '15:30'
-    ORDER BY c.time,
-             CASE c.source WHEN 'upstox_spot' THEN 0 WHEN 'live_tick' THEN 1 ELSE 2 END,
-             c.synced_at DESC
-    """
-)
-
-
-async def spot_momentum_view(
-    underlying: str,
-    bar_ts: datetime,
-    *,
-    lookback_bars: int = 6,
-    confidence: float = 0.55,
-    interval: str = "30minute",
-) -> DirectionalView:
-    """A deliberately uninformative baseline view. See the module docstring.
-
-    Sign of the trailing return over `lookback_bars`.  Uses only bars STRICTLY
-    BEFORE `bar_ts`, so the view cannot see the bar it trades on — a one-bar
-    lookahead is exactly what flipped a measured fade edge from positive to
-    negative in this stack's earlier research.
-    """
-    upper = bar_ts - timedelta(seconds=1)
-    lower = bar_ts - timedelta(days=6)
-    async with AsyncSessionLocal() as session:
-        rows = (
-            await session.execute(
-                _SPOT_WINDOW_SQL,
-                {"underlying": underlying, "interval": interval, "lower": lower, "upper": upper},
-            )
-        ).all()
-
-    closes = [float(r.close) for r in rows if r.close is not None]
-    if len(closes) < lookback_bars + 1:
-        return flat_view(underlying, f"only {len(closes)} prior spot bars", source="replay_baseline")
-
-    window = closes[-(lookback_bars + 1):]
-    change = (window[-1] - window[0]) / window[0] if window[0] else 0.0
-    if abs(change) < 1e-6:
-        return flat_view(underlying, "flat trailing window", source="replay_baseline")
-
-    return DirectionalView(
-        underlying=underlying,
-        direction="long" if change > 0 else "short",
-        confidence=confidence,
-        horizon_bars=3,
-        expected_move_pct=abs(change),
-        source="replay_baseline",
-        thesis=f"trailing {lookback_bars}-bar return {change * 100:+.2f}% (uninformative baseline)",
-        regime="replay",
-        metadata={"trailing_return": change, "lookback_bars": lookback_bars},
-    )
-
 
 @dataclass
 class ReplayReport:
@@ -162,7 +87,6 @@ async def replay(
     bars: int = 40,
     lookback_days: int = 45,
     config: IndexPaperConfig | None = None,
-    view_provider=None,
     reset: bool = False,
     run_id: str | None = None,
 ) -> dict[str, Any]:
@@ -176,21 +100,24 @@ async def replay(
     if reset:
         await book.reset(actor="replay", confirm_token="RESET-INDEX-PAPER-BOOK")
 
-    provider = view_provider or (lambda u, t: spot_momentum_view(u, t))
-
     # Bars are replayed in strict chronological order ACROSS underlyings, so
     # the shared exposure cap behaves the way it would live rather than letting
     # whichever index happens to be iterated first take every slot.
     timeline: list[tuple[datetime, str]] = []
+    series_cache: dict[str, Any] = {}
     for symbol in underlyings:
         for ts in await usable_bars(symbol, limit=bars, lookback_days=lookback_days):
             timeline.append((ts, symbol))
+        # Loaded once per symbol; run_underlying slices it to the sessions that
+        # closed before each bar, so caching cannot leak future bars into a
+        # factor.
+        series_cache[symbol] = await load_daily_series(symbol)
     timeline.sort()
 
     report = ReplayReport(bars=len({ts for ts, _ in timeline}))
     for ts, symbol in timeline:
         result = await run_underlying(
-            symbol, config=cfg, bar_ts=ts, view_provider=provider, run_id=run_id
+            symbol, config=cfg, bar_ts=ts, run_id=run_id, daily_series=series_cache.get(symbol)
         )
         report.absorb(result)
 
@@ -209,6 +136,8 @@ async def replay(
         "rejections": await journal.rejection_tally(tally_lower, tally_upper, run_id),
         "gates": await journal.gate_tally(tally_lower, tally_upper, run_id),
         "cost_floor": await cost_floor(),
+        "factor_ic": await journal.factor_ic(min_n=20),
+        "factor_coverage": await factor_coverage(run_id),
         "window": {"from": lower.isoformat(), "to": upper.isoformat()},
     }
 
@@ -282,6 +211,32 @@ async def attribution_rollup() -> dict[str, Any]:
     return data
 
 
+_FACTOR_COVERAGE = text(
+    """
+    SELECT factor, role, confidence,
+           count(*) AS decisions,
+           count(*) FILTER (WHERE acting) AS acting,
+           count(*) FILTER (WHERE status <> 'ok') AS unavailable,
+           avg(weight) AS avg_weight
+    FROM index_paper_factors
+    WHERE (CAST(:run_id AS text) IS NULL OR run_id = CAST(:run_id AS text))
+    GROUP BY factor, role, confidence
+    ORDER BY acting DESC, factor
+    """
+)
+
+
+async def factor_coverage(run_id: str | None) -> list[dict[str, Any]]:
+    """How often each factor was actually available to act.
+
+    A factor that is unavailable on most decisions is not contributing,
+    whatever its weight says — and that is invisible unless it is counted.
+    """
+    async with AsyncSessionLocal() as session:
+        rows = (await session.execute(_FACTOR_COVERAGE, {"run_id": run_id})).mappings().all()
+    return [dict(r) for r in rows]
+
+
 def _parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Replay the index paper lane over historical bars.")
     parser.add_argument("--underlying", action="append")
@@ -289,6 +244,7 @@ def _parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--lookback-days", type=int, default=45)
     parser.add_argument("--reset", action="store_true", help="Archive and clear the book first.")
     parser.add_argument("--spread-multiplier", type=float, default=1.0)
+    parser.add_argument("--horizon-sessions", type=int, default=3)
     return parser.parse_args(argv)
 
 
@@ -296,7 +252,7 @@ def main(argv: Sequence[str] | None = None) -> None:
     from dataclasses import replace as dc_replace
 
     args = _parse_args(argv)
-    cfg = IndexPaperConfig()
+    cfg = IndexPaperConfig(horizon_sessions=args.horizon_sessions)
     if args.spread_multiplier != 1.0:
         cfg.cost_model = dc_replace(cfg.cost_model, spread_multiplier=args.spread_multiplier)
 

@@ -14,7 +14,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 from dataclasses import dataclass, field
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 from typing import Any, Sequence
 
 from loguru import logger
@@ -22,8 +22,10 @@ from sqlalchemy import text
 
 from db.database import AsyncSessionLocal
 from directional_options.vol.realized import (
+    DEFAULT_CONE_WINDOWS,
     DailySeries,
     VolCone,
+    build_cone,
     realized_context,
     variance_risk_premium,
 )
@@ -43,6 +45,8 @@ from directional_options.vol.surface import (
 )
 
 DEFAULT_RV_ESTIMATOR = "garman_klass"
+
+IST = timezone(timedelta(hours=5, minutes=30))
 
 
 @dataclass
@@ -115,6 +119,39 @@ async def usable_bars(
     return [row.ts for row in rows]
 
 
+@dataclass
+class _AsOfCache:
+    """Realised context sliced to what was knowable before each session.
+
+    The first version of this builder loaded the realised context ONCE per
+    underlying and reused it for every bar of a backfill.  `realized_vol` then
+    took `bars[-window:]` — the most recent bars of the WHOLE series — so every
+    historical bar was stamped with future realised vol.  It showed in the data:
+    index_vol_tenor_metrics.realized_vol for NIFTY was 0.05942 identically on
+    2026-08-31, 09-02, 09-03 and 09-04, and that number fed vrp_risk_multiplier,
+    so every replayed position was sized on information from after its own
+    entry.
+
+    Slicing is by SESSION DATE and strictly less-than: a bar inside session D
+    may use realised vol through D-1 and no further.
+    """
+
+    series: DailySeries
+    estimator: str
+    windows: Sequence[int] = DEFAULT_CONE_WINDOWS
+    _by_session: dict[date, tuple[DailySeries, VolCone]] = field(default_factory=dict)
+
+    def for_session(self, session_date: date) -> tuple[DailySeries, VolCone]:
+        cached = self._by_session.get(session_date)
+        if cached is not None:
+            return cached
+        bars = [b for b in self.series.bars if b.day < session_date]
+        sliced = DailySeries(underlying=self.series.underlying, bars=bars, rejected=self.series.rejected)
+        cone = build_cone(self.series.underlying, bars, windows=self.windows, estimator=self.estimator)
+        self._by_session[session_date] = (sliced, cone)
+        return sliced, cone
+
+
 async def build_bar(
     underlying: str,
     bar_ts: datetime,
@@ -124,9 +161,12 @@ async def build_bar(
     tenors_days: Sequence[int] = DEFAULT_TENORS_DAYS,
     rv_estimator: str = DEFAULT_RV_ESTIMATOR,
     persist: bool = True,
+    max_age_minutes: float | None = 240.0,
 ) -> BuildResult:
     rows = await load_chain_bar(underlying, bar_ts)
-    snapshot = build_snapshot_from_rows(underlying, bar_ts, rows)
+    snapshot = build_snapshot_from_rows(
+        underlying, bar_ts, rows, max_age_minutes=max_age_minutes
+    )
 
     result = BuildResult(underlying=underlying, bar_ts=bar_ts, status=snapshot.status)
     if not snapshot.ok:
@@ -213,18 +253,22 @@ async def build_underlying(
             )
         ]
 
-    # Realised context is per-underlying, not per-bar — load it once.
-    series, cone = await realized_context(symbol, as_of=as_of, estimator=rv_estimator)
+    # The daily series is loaded once, but each bar sees only the sessions that
+    # closed BEFORE it — see _AsOfCache for why that distinction is not academic.
+    series, _ = await realized_context(symbol, as_of=as_of, estimator=rv_estimator)
+    as_of_cache = _AsOfCache(series=series, estimator=rv_estimator)
 
     results: list[BuildResult] = []
     for ts in sorted(timestamps):
         try:
+            session_date = ts.astimezone(IST).date()
+            bar_series, bar_cone = as_of_cache.for_session(session_date)
             results.append(
                 await build_bar(
                     symbol,
                     ts,
-                    series=series,
-                    cone=cone,
+                    series=bar_series,
+                    cone=bar_cone,
                     tenors_days=tenors_days,
                     rv_estimator=rv_estimator,
                     persist=persist,

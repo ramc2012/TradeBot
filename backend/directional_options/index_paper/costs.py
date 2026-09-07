@@ -35,6 +35,7 @@ Intent = Literal["entry", "exit"]
 Side = Literal["buy", "sell"]
 
 TICK_SIZE = 0.05
+TRADING_DAYS_PER_YEAR = 252.0
 
 
 @dataclass(frozen=True)
@@ -180,13 +181,20 @@ class CostModel:
         reference_price: float,
         sigma: float | None,
     ) -> float:
-        """Square-root impact in rupees per unit, not in fraction of price."""
+        """Square-root impact in rupees per unit, not in fraction of price.
+
+        `sigma` arrives ANNUALISED, as implied vol always does here, but the
+        square-root law is conventionally stated in DAILY volatility — impact
+        is a one-day phenomenon.  Feeding the annualised number straight in
+        overstates impact by a factor of sqrt(252), roughly 16x.
+        """
         adv = max(float(adv_contracts or 0.0), self.min_adv_contracts)
         participation = max(int(quantity), 0) / adv
-        vol = float(sigma) if sigma and sigma > 0 else 0.0
-        if vol <= 0 or participation <= 0:
+        annual_vol = float(sigma) if sigma and sigma > 0 else 0.0
+        if annual_vol <= 0 or participation <= 0:
             return 0.0
-        return self.impact_eta * vol * math.sqrt(participation) * float(reference_price)
+        daily_vol = annual_vol / math.sqrt(TRADING_DAYS_PER_YEAR)
+        return self.impact_eta * daily_vol * math.sqrt(participation) * float(reference_price)
 
 
 @dataclass(frozen=True)

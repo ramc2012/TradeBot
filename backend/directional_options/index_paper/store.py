@@ -7,6 +7,7 @@ Five tables, and the split between them is the point:
   index_paper_fills        what each entry and exit actually cost
   index_paper_marks        the mark-to-market trail while a position is open
   index_paper_attribution  the greek decomposition of each closed trade
+  index_paper_factors      every factor value at every decision, acting or not
 
 The separation exists because this stack has repeatedly been misled by
 write-only journals — `agent_positions` and `agent_signals` strand rows at
@@ -152,6 +153,31 @@ _DDL: tuple[str, ...] = (
     )
     """,
     "CREATE INDEX IF NOT EXISTS idx_ipa_closed ON index_paper_attribution (closed_at DESC)",
+    """
+    CREATE TABLE IF NOT EXISTS index_paper_factors (
+        bar_ts          timestamptz NOT NULL,
+        underlying      text        NOT NULL,
+        factor          text        NOT NULL,
+        run_id          text,
+        session_date    date        NOT NULL,
+        family          text,
+        role            text,
+        value           double precision,
+        score           double precision,
+        sign            integer,
+        confidence      text,
+        weight          double precision,
+        status          text,
+        acting          boolean,
+        direction_score double precision,
+        size_score      double precision,
+        detail          text,
+        created_at      timestamptz NOT NULL DEFAULT now(),
+        PRIMARY KEY (bar_ts, underlying, factor)
+    )
+    """,
+    "CREATE INDEX IF NOT EXISTS idx_ipfac_lookup ON index_paper_factors (underlying, factor, session_date DESC)",
+    "CREATE INDEX IF NOT EXISTS idx_ipfac_run ON index_paper_factors (run_id, session_date DESC)",
 )
 
 

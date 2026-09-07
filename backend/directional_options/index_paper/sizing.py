@@ -24,9 +24,9 @@ import math
 from dataclasses import dataclass, field
 from typing import Any
 
-# A trading day of 6.25 hours (09:15-15:30) and 252 of them a year.
-MINUTES_PER_SESSION = 375.0
+# 252 trading sessions a year.
 SESSIONS_PER_YEAR = 252.0
+CALENDAR_DAYS_PER_YEAR = 365.0
 
 # Prior: one session's change in an index's implied vol has a standard
 # deviation of roughly 5% of the IV LEVEL (a 12% IV moves ~0.6 vol points a
@@ -70,10 +70,6 @@ class SizingDecision:
         }
 
 
-def horizon_sessions(horizon_bars: int, bar_minutes: float) -> float:
-    return max(float(horizon_bars) * float(bar_minutes) / MINUTES_PER_SESSION, 1e-6)
-
-
 def adverse_premium_move(
     *,
     spot: float,
@@ -82,6 +78,7 @@ def adverse_premium_move(
     vega: float,
     theta_per_day: float,
     sessions: float,
+    calendar_days: float,
     stop_sigmas: float = 1.0,
     daily_iv_relative_move: float = DAILY_IV_RELATIVE_MOVE,
 ) -> tuple[float, dict[str, float]]:
@@ -92,7 +89,15 @@ def adverse_premium_move(
     combined, because it is not a shock at all — it is a certainty the position
     pays for waiting, and it is the reason long premium is structurally hard.
 
-    Gamma is deliberately omitted.  For a long option it cushions the adverse
+    TWO CLOCKS, and they are not interchangeable. Diffusion runs on TRADING
+    SESSIONS: the index does not move over a weekend, so a 3-session move is
+    sqrt(3/252) of annual vol. Decay runs on CALENDAR DAYS: the option does
+    decay over that weekend. The first version charged theta per trading
+    session, which over a 5-session hold understated seven calendar days of
+    decay as five — a 40% error on precisely the term that makes this strategy
+    hard.
+
+    Gamma is deliberately omitted. For a long option it cushions the adverse
     side, so leaving it out makes the estimate conservative in the direction
     that matters.
 
@@ -107,7 +112,7 @@ def adverse_premium_move(
 
     delta_term = abs(delta) * spot_move
     vega_term = abs(vega) * iv_move
-    theta_term = abs(theta_per_day) * sessions
+    theta_term = abs(theta_per_day) * max(calendar_days, 0.0)
 
     shock = math.hypot(delta_term, vega_term) * max(stop_sigmas, 0.0)
     total = shock + theta_term
@@ -118,6 +123,8 @@ def adverse_premium_move(
         "vega_term": vega_term,
         "theta_term": theta_term,
         "shock": shock,
+        "sessions": sessions,
+        "calendar_days": calendar_days,
     }
 
 
@@ -131,8 +138,8 @@ def size_position(
     delta: float,
     vega: float,
     theta_per_day: float,
-    horizon_bars: int,
-    bar_minutes: float = 30.0,
+    horizon_sessions: int,
+    horizon_calendar_days: float | None = None,
     risk_fraction: float = 0.004,
     risk_multiplier: float = 1.0,
     stop_sigmas: float = 1.0,
@@ -143,6 +150,10 @@ def size_position(
     tick_size: float = 0.05,
 ) -> SizingDecision:
     """Lots to buy, or an explicit refusal with the shortfall attached.
+
+    `horizon_sessions` is the intended hold in TRADING SESSIONS and
+    `horizon_calendar_days` the calendar span it covers; pass both, because
+    diffusion and decay run on different clocks.
 
     `risk_multiplier` is where a vol-regime view enters — a variance risk
     premium that says premium is expensive shrinks the budget rather than
@@ -161,10 +172,19 @@ def size_position(
             reason=f"premium={premium}, lot_size={lot_size}, capital={capital}",
         )
 
-    sessions = horizon_sessions(horizon_bars, bar_minutes)
+    sessions = float(max(horizon_sessions, 0))
+    # Fall back to the 7/5 calendar ratio only when the caller has no real
+    # calendar; `horizon.calendar_days_for_sessions` gives the true span and
+    # charges a long weekend at its actual cost.
+    calendar_days = (
+        float(horizon_calendar_days)
+        if horizon_calendar_days is not None
+        else sessions * CALENDAR_DAYS_PER_YEAR / SESSIONS_PER_YEAR
+    )
     adverse, components = adverse_premium_move(
         spot=spot, atm_iv=atm_iv, delta=delta, vega=vega,
-        theta_per_day=theta_per_day, sessions=sessions, stop_sigmas=stop_sigmas,
+        theta_per_day=theta_per_day, sessions=sessions,
+        calendar_days=calendar_days, stop_sigmas=stop_sigmas,
     )
 
     # The stop cannot sit below the tick grid, and cannot sit below zero — a

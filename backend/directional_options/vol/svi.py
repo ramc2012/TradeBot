@@ -202,8 +202,19 @@ def fit_svi_slice(
     fit.n_points = n
     fit.n_used = n - len(quarantined)
     fit.quarantined = quarantined
-    fit.k_min = float(np.min(k))
-    fit.k_max = float(np.max(k))
+
+    # The k-range must describe the points the model was actually FITTED on,
+    # not every point that was offered.  These bounds are the only thing
+    # stopping downstream code extrapolating: `series` uses them to refuse an
+    # invented wing and the paper engine uses them to gate a theoretical mark.
+    # Taking them from the full set means that if the widest strike is the one
+    # that was quarantined, both checks would accept a k the model never saw.
+    quarantined_k = {round(float(q["log_moneyness"]), 12) for q in quarantined}
+    fitted_k = [float(v) for v in k if round(float(v), 12) not in quarantined_k]
+    if not fitted_k:
+        fitted_k = [float(v) for v in k]
+    fit.k_min = float(min(fitted_k))
+    fit.k_max = float(max(fitted_k))
 
     grid = np.linspace(fit.k_min, fit.k_max, _ARB_GRID)
     g = gatheral_g(fit.params, grid)

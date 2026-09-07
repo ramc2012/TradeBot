@@ -1,90 +1,143 @@
-# Index directional long-options lane
+# Index directional long-options swing lane
 
-Scope: **NIFTY, BANKNIFTY, SENSEX only.** Long premium only — the lane buys
-calls or puts, it never writes them.
-
-Two packages:
+**Scope:** NIFTY, BANKNIFTY, SENSEX. Long premium only. Holding horizon **1–5
+trading sessions**.
 
 | Package | What it is |
 |---|---|
-| `directional_options/vol/` | The volatility substrate: Black-76 with a refusing IV solver, arbitrage-checked SVI fits, constant-maturity/constant-delta coordinates, realised vol, cones and the variance risk premium. |
-| `directional_options/index_paper/` | The paper lane: authoritative book, four journals, vol-derived sizing, honest fills, greek P&L attribution, historical replay. |
+| `directional_options/vol/` | Volatility substrate: Black-76 with a refusing IV solver, arbitrage-checked SVI fits, constant-delta coordinates, realised vol, cones, variance risk premium. |
+| `directional_options/index_paper/` | The lane: factor panel, swing horizon, geometry-ranked contract selection, authoritative book, five journals, greek attribution, replay. |
 
-Neither touches the existing `directional_options.service` / `paper.py` lane.
-They are additive; nothing imports them yet.
-
----
-
-## Why single-stock names are excluded
-
-Chain breadth in this database peaks around 6.6 quoted contracts per stock per
-day. Five SVI parameters cannot be identified from six points. The three
-indices carry 20–130 strikes per (expiry, bar) on the 30-minute grid and fit
-cleanly at 0.27–0.50 vol points of RMSE.
+Additive. Nothing imports these yet; the existing `directional_options.service`
+and `paper.py` lane are untouched.
 
 ---
 
-## What the data actually supports
+## The decision
 
-Measured, not assumed, before any of this was built:
+The lane decides from the **whole factor panel**, not one signal. That is forced
+by measurement, not preference: bucketing 1–5 day outcomes by IV level, by
+variance risk premium and by realised-vol trend puts every bucket at 17–25% with
+±5.5% standard errors. No single vol-state variable separates the days when long
+premium pays from the days it does not.
+
+Four outputs, deliberately separate:
+
+- **Direction** — which way. From direction-role factors that must both clear a
+  conviction floor and *agree* (a small net of two factors pulling apart is not
+  the same as two quietly agreeing, and a weighted mean cannot tell them apart).
+- **Size** — how much. From size-role factors: variance risk premium, futures
+  open-interest z-score, breakeven geometry, realised-vol percentile.
+- **Gates** — whether to trade at all: holdability against expiry, breakeven
+  ceiling, round-trip cost, exposure.
+- **Stand aside** — a first-class outcome, journalled with its reason.
+
+### Factors
+
+| Factor | Role | Confidence | Basis |
+|---|---|---|---|
+| `vrp_spread` | size | measured | Implied minus trailing realised. A long-premium lane pays this. |
+| `futures_oi_z` | size | measured | IC **+0.139** vs \|5d return\| (t = 1.84, date-clustered); **+0.025** vs the *signed* return (t = 0.33). It sizes; it must not point. |
+| `breakeven_ratio` | size | measured | A delta-0.40 call clears its 3-day breakeven 49.0% of the time at 25 DTE, 40.7% at 4 DTE. |
+| `rv_percentile` | size | plausible | Trailing realised vol in its own 2.7-year cone. |
+| `rv_compression` | size | speculative | Shadow — compression-precedes-expansion measured zero lift here. |
+| `futures_oi_state` | direction | speculative | Shadow — price/OI quadrant; the signed IC behind it is 0.03. |
+| `chain_oi_asymmetry` | direction | speculative | Near-money CE vs PE open-interest change. Volume is 0 on 97.5% of rows, so OI is the only positioning signal the chain carries. |
+| `trend_20d` | direction | speculative | Shadow — momentum measured anti-predictive in this stack. |
+| `reversion_10d` | direction | speculative | Shadow — the fade was the entry edge, before fill lag flipped it. |
+
+Confidence sets weight (measured 1.00, plausible 0.35, speculative 0.15).
+Unmeasured factors get **small but non-zero** weight on purpose: a lane whose
+direction factors all carry zero never trades, never produces outcomes, and can
+therefore never measure the factors that would let them be promoted. Every
+factor is written to `index_paper_factors` at every decision — acting or not —
+so `journal.factor_ic()` can grade each one later against outcomes this lane
+actually had, rather than by re-fitting on the history that suggested it.
+
+---
+
+## Two clocks
+
+Diffusion runs on **trading sessions**; decay runs on **calendar days**. Five
+sessions is five chances to be right and seven days of theta. Conflating them
+understates decay by ~40% on the one term that makes long premium hard.
+
+The first version measured the hold in wall-clock 30-minute bars, so an
+overnight gap counted as 36 bars and every position that survived a night
+tripped its max-hold next morning — 34 trades, average hold 0.262 days, 27 of
+them same-session. `horizon.py` owns the arithmetic now.
+
+## Expiry is chosen by geometry, not proximity
+
+Taking the nearest expiry systematically selects the worst contract for a
+multi-session hold. Measured on 2.7 years of clean bars, against each index's
+own breakeven at a 3-session hold:
+
+| | DTE | breakeven | vs 1σ implied | P(clears it) |
+|---|---|---|---|---|
+| BANKNIFTY | 25 | +0.18% | 0.15σ | **49.0%** |
+| SENSEX | 6 | +0.35% | 0.32σ | 42.5% |
+| NIFTY | 4 | +0.40% | 0.43σ | 40.7% |
+
+The binding constraint is that only **one expiry per index carries breadth**.
+BANKNIFTY's is the 25–29 DTE monthly (ideal); NIFTY's and SENSEX's are the 0–6
+DTE weeklies. NIFTY therefore often cannot hold three sessions at all — the
+journal records that as `no_candidate_expiries_holdable` rather than silence.
+
+---
+
+## Data reality
 
 | Capability | Verdict |
 |---|---|
-| Front-expiry smile | **Yes.** 167 good fits across the three indices. |
-| 25Δ risk reversal / butterfly | **Usually.** Available on ~75% of fitted bars; refused, not extrapolated, otherwise. |
-| Term structure | **No.** Over a full month, *never* more than one expiry per bar carries ≥12 strikes (`b2 = 0` for all three indices). Constant-maturity interpolation across expiries is not possible. |
-| IV history / IV percentile | **Not yet.** Full chain breadth only begins 2026-08-31. The substrate accumulates it going forward. |
-| Realised vol, cones, percentiles | **Yes.** 30-minute spot back to 2024-01-01, ~600 clean daily bars per index. |
-| Variance risk premium | **Yes.** Needs one implied number and a long realised series, both of which exist. |
+| Front-expiry smile | **Yes.** 167 arb-clean slices, 0.27–0.50 vol points RMSE. |
+| 25Δ risk reversal / butterfly | Usually — refused, not extrapolated, otherwise. |
+| Term structure | **No.** Never ≥2 expiries per bar with ≥12 strikes, over a full month. |
+| IV history / IV percentile | **Not yet.** Chain breadth began 2026-08-31. |
+| Realised vol, cones | **Yes.** 30-minute spot to 2024-01-01, ~600 clean daily bars. |
+| Variance risk premium | **Yes** — one implied number against a long realised series. |
+| Option order flow / tape | **No.** Volume is 0 on 97.5% of rows; no option tape anywhere. |
+| Per-index participant OI | **No.** `participant_oi` is a market-wide NSE aggregate; SENSEX absent. |
 
-Because IV history does not exist yet and realised history does, the lane's vol
-gate is the **variance risk premium**, not an IV percentile.
+Dead ends verified, not assumed: `oi_positioning` has zero index rows;
+`fo_mwpl_snapshot.utilisation_pct` is 100% NULL; `fo_security_ban` is empty;
+`directional_positioning_daily`'s OI columns track chain breadth, not
+positioning.
 
----
+## Data defects handled at the point of use
 
-## Data defects handled inside these modules
-
-Each of these silently corrupts a vol number, so each is fixed at the point of
-use rather than assumed away upstream:
-
-- **Two instrument-key conventions per index** in `underlying_spot_candles`. The
-  Fyers-keyed rows carry cross-symbol tick contamination — a 28,532 high on
-  NIFTY, a 48,243 low on BANKNIFTY, both on 14/15-Jul-2026. Folding a day
-  without picking one key first took `max(high)`/`min(low)` across both and put
-  60-day realised vol on NIFTY at 38% against a true ~11%.
-- **Post-close bars.** The `live_tick` source writes as late as 18:00 IST.
-  Filtered to the 09:15–15:30 session.
-- **Phantom highs under the canonical key too.** Caught by an excursion test
-  against the open/close body, which a total-range ceiling alone misses.
-- **Gap-spanning returns.** Dropping a contaminated day and then differencing
-  consecutive survivors turns a multi-day move into a one-day return; it
-  inflated close-to-close realised vol from 5.5% to 10.0%. Returns that span a
-  dropped session are excluded, not stretched.
-- **The last two bars of every session** carry only the 1–2 ATM-tracker strikes,
-  because the chain sweep lands 45–60 minutes behind its bar. Bar selection
-  carries a breadth floor.
-- **Duplicate option candles.** Every chain read is `DISTINCT ON` the contract key.
-- **Volume is absent.** 97.5% of index option rows carry `volume = 0` while OI is
-  populated on essentially all of them. Any gate written against volume is an
-  unpassable veto; liquidity uses OI.
+- Two instrument-key conventions per index in `underlying_spot_candles`; the
+  Fyers-keyed rows are tick-contaminated (28,532 high on NIFTY, 48,243 low on
+  BANKNIFTY) and pushed 60-day realised vol to 38% against a true ~11%.
+- `live_tick` writes bars as late as 18:00 IST, past the close.
+- Phantom highs under the canonical key too — caught by an excursion test
+  against the open/close body, which a range ceiling misses.
+- Dropping a bad session then differencing survivors turned multi-day moves into
+  one-day returns, inflating close-to-close RV from 5.5% to 10.0%.
+- The last two bars of each session carry only ATM-tracker strikes.
+- Duplicate option candles — every chain read is `DISTINCT ON` the contract key.
+- Futures OI carries 20 BANKNIFTY rows with NIFTY-level closes; rollover and
+  near-expiry rows are excluded (`dte > 3`) because the pre-expiry OI collapse
+  is mislabelled `long_unwind`.
 
 ---
 
-## Running it
+## Honesty properties
 
-```bash
-# Build and persist the vol substrate (idempotent per bar)
-python -m directional_options.vol.builder --bars 60 --lookback-days 45
-
-# One live pass of the paper lane
-python -c "import asyncio, json; from directional_options.index_paper.engine import run; print(json.dumps(asyncio.run(run()), indent=2, default=str))"
-
-# Historical replay, with the cost floor and gate tallies
-python -m directional_options.index_paper.replay --bars 60 --reset
-
-# Cost sensitivity — re-check any conclusion at 2x and 3x
-python -m directional_options.index_paper.replay --bars 60 --reset --spread-multiplier 3
-```
+- **Fills are always adverse**, and happen one bar *after* the decision. The
+  chain sweep lands 45–60 minutes behind its bar, so a decision at bar T uses
+  information a live pass at T would not have had.
+- **Slippage is counted once.** `entry_premium` is the fill price;
+  `entry_cost` is charges only. Attribution `net_pnl` now equals book
+  `realized_pnl` exactly (was mismatched on 33 of 34 trades).
+- **Realised vol is as-of the bar.** The builder previously loaded it once and
+  reused it, so every historical bar was stamped with future realised vol —
+  NIFTY read 0.05942 identically across four sessions.
+- **Risk management never pauses.** Marks, stops and expiry settlement run even
+  when the surface fails to fit; the previous version returned early on
+  `surface_unusable` (264 occurrences) before marks were taken.
+- **Refusals carry their shortfall.** "The budget does not buy one lot" names
+  the gap and the binding cap.
 
 ---
 
@@ -92,52 +145,30 @@ python -m directional_options.index_paper.replay --bars 60 --reset --spread-mult
 
 | Table | Role |
 |---|---|
-| `index_vol_surface_slices` | one fit per (bar, underlying, expiry) |
-| `index_vol_cm_points` | the fixed surface coordinates |
-| `index_vol_tenor_metrics` | skew and VRP per tenor — what the lane reads |
-| `index_vol_quarantine` | every quote the solver or fit refused, with why |
+| `index_vol_surface_slices` / `index_vol_cm_points` / `index_vol_tenor_metrics` / `index_vol_quarantine` | the vol substrate, and what it refused |
 | `index_paper_positions` | **the book.** Authoritative, current state only |
-| `index_paper_decisions` | every evaluation, including skips, with gate results |
-| `index_paper_fills` | what each entry and exit actually cost |
-| `index_paper_marks` | the mark-to-market trail |
-| `index_paper_attribution` | greek decomposition of each closed trade |
+| `index_paper_decisions` | every evaluation, incl. skips, with gate results |
+| `index_paper_factors` | every factor value at every decision, acting or not |
+| `index_paper_fills` / `index_paper_marks` / `index_paper_attribution` | costs, the mark trail, the greek decomposition |
 
-The journals are **not** the book. Nothing reads them to decide what is held,
-and the book is never rebuilt by replaying them.
+The journals are **not** the book. Nothing reads them to decide what is held.
 
----
+## Running it
 
-## The measured cost floor
-
-From a 60-bar replay driven by a deliberately uninformative baseline view
-(28-Jul to 04-Sep-2026, 35 closed trades):
-
+```bash
+python -m directional_options.vol.builder --bars 60 --lookback-days 45
+python -m directional_options.index_paper.replay --bars 60 --reset --horizon-sessions 3
+python -m directional_options.index_paper.replay --bars 60 --reset --spread-multiplier 3
 ```
-avg round-trip cost   Rs   109 / trade
-avg theta paid        Rs  -370 / trade
-avg realised P&L      Rs  -635 / trade
-```
-
-Tripling the spread assumption moves the cost to Rs 149 and the loss to
-Rs 681 — so **the conclusion is not an artifact of the spread prior.** Theta,
-not transaction cost, is what a long-premium index lane has to beat, by roughly
-3.4 to 1.
-
-Any candidate signal must clear ~Rs 480/trade of drag before it is interesting.
-
----
 
 ## Known limits
 
-- **Spread is assumed, not measured.** There is no bid/ask anywhere in
-  `option_premium_candles`. `calibrate_half_spread_ticks` is the seam where real
-  fills replace the prior.
-- **Path-wise attribution explains ~51%** of gross P&L on the replay. The mark
-  trail is only as dense as the bars the lane processes; overnight legs are
-  large and land in the residual.
-- **Only the front expiry is tradeable** until chain breadth widens to a second
-  maturity. `no_expiry_in_window` in the decision journal counts how often that
-  bites.
-- **The lane supplies no alpha.** It supplies discipline around a view: strike
-  by delta, size by vol, honest fills, attributed outcomes. `adapters.latest_view`
-  reads the existing directional lane's journal; inject any other provider.
+- **Four sessions of wide chain history.** Any P&L from a replay is a machinery
+  check, not evidence. `factor_ic()` refuses below 20 closed trades.
+- **Spread is assumed, not measured** — there is no bid/ask anywhere in
+  `option_premium_candles`. `calibrate_half_spread_ticks` is the seam.
+- **Path-wise attribution explains ~80%** of gross P&L; overnight legs are large
+  and land in the residual.
+- **The futures-OI collector is a one-off backfill**, not a daily job. The
+  factor refuses a row older than six days rather than reading stale positioning
+  as live.

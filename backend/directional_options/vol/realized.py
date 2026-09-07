@@ -515,10 +515,27 @@ def variance_risk_premium(
 
     vp.spread = float(implied_vol_value) - rv
     vp.ratio = float(implied_vol_value) / rv
+
+    # The percentile is computed at the window ACTUALLY used, not looked up in
+    # a cone that may not carry it.  A 30-day horizon converts to a 21-session
+    # window, the cone is built at (5, 10, 20, 60, 120), and the lookup
+    # therefore returned None at every tenor except the ones that floor to 5 —
+    # silently, with no warning, so the feature read as "not applicable" rather
+    # than "never implemented".
     if cone is not None:
         rung = cone.rung(window)
-        if rung is not None:
+        if rung is not None and rung.percentile_of_current is not None:
             vp.realized_percentile = rung.percentile_of_current
+    if vp.realized_percentile is None:
+        history = [value for _, value in rolling_realized_vol(bars, window, estimator)]
+        if len(history) >= 60:
+            below = sum(1 for value in history if value <= rv)
+            vp.realized_percentile = 100.0 * below / len(history)
+        else:
+            vp.reason = (
+                f"realised percentile needs 60 rolling observations at a {window}-session "
+                f"window; only {len(history)} available"
+            )
     return vp
 
 

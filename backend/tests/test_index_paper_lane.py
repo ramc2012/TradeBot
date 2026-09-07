@@ -103,9 +103,11 @@ def _sizing(**overrides):
         atm_iv=0.12,
         delta=0.40,
         vega=1_200.0,
-        theta_per_day=-12.0,
-        horizon_bars=3,
-        bar_minutes=30.0,
+        # A ~25-DTE contract: theta near 2% of premium a day. The lane's own
+        # geometry work shows this is the tenor a swing hold should be in.
+        theta_per_day=-4.0,
+        horizon_sessions=3,
+        horizon_calendar_days=5.0,   # three sessions across a weekend
     )
     kwargs.update(overrides)
     return size_position(**kwargs)
@@ -122,15 +124,15 @@ def test_risk_is_the_modelled_adverse_move_not_the_premium():
 def test_adverse_move_scales_with_vol_and_horizon():
     base, _ = adverse_premium_move(
         spot=24_000.0, atm_iv=0.12, delta=0.4, vega=1_200.0,
-        theta_per_day=-12.0, sessions=0.24,
+        theta_per_day=-12.0, sessions=1.0, calendar_days=1.0,
     )
     higher_vol, _ = adverse_premium_move(
         spot=24_000.0, atm_iv=0.24, delta=0.4, vega=1_200.0,
-        theta_per_day=-12.0, sessions=0.24,
+        theta_per_day=-12.0, sessions=1.0, calendar_days=1.0,
     )
     longer, _ = adverse_premium_move(
         spot=24_000.0, atm_iv=0.12, delta=0.4, vega=1_200.0,
-        theta_per_day=-12.0, sessions=1.0,
+        theta_per_day=-12.0, sessions=5.0, calendar_days=7.0,
     )
     assert higher_vol > base
     assert longer > base
@@ -140,10 +142,50 @@ def test_theta_is_added_not_combined_in_quadrature():
     """Theta is a certainty the position pays, not a shock."""
     total, parts = adverse_premium_move(
         spot=24_000.0, atm_iv=0.12, delta=0.4, vega=1_200.0,
-        theta_per_day=-12.0, sessions=1.0,
+        theta_per_day=-12.0, sessions=1.0, calendar_days=1.0,
     )
     assert total == pytest.approx(parts["shock"] + parts["theta_term"])
     assert parts["shock"] == pytest.approx(math.hypot(parts["delta_term"], parts["vega_term"]))
+
+
+def test_diffusion_and_decay_run_on_different_clocks():
+    """Five sessions is five sessions of movement but seven days of decay.
+
+    The first version charged theta per TRADING session, understating a
+    long weekend's decay by about 40% on the one term that makes long premium
+    structurally hard.
+    """
+    _, five_sessions = adverse_premium_move(
+        spot=24_000.0, atm_iv=0.12, delta=0.4, vega=1_200.0,
+        theta_per_day=-12.0, sessions=5.0, calendar_days=5.0,
+    )
+    _, with_weekend = adverse_premium_move(
+        spot=24_000.0, atm_iv=0.12, delta=0.4, vega=1_200.0,
+        theta_per_day=-12.0, sessions=5.0, calendar_days=7.0,
+    )
+    # Same diffusion, more decay.
+    assert with_weekend["shock"] == pytest.approx(five_sessions["shock"])
+    assert with_weekend["theta_term"] == pytest.approx(five_sessions["theta_term"] * 7 / 5)
+
+
+def test_calendar_days_default_to_the_trading_year_ratio():
+    """A caller with no calendar still gets a defensible decay estimate."""
+    decision = _sizing(horizon_calendar_days=None)
+    assert decision.components["calendar_days"] == pytest.approx(3 * 365.0 / 252.0, rel=1e-6)
+
+
+def test_a_near_expiry_contract_held_five_sessions_is_refused():
+    """Not a bug — the arithmetic of carrying heavy theta for a week.
+
+    A 200-premium option decaying at 12 a day costs 84 of premium over seven
+    calendar days before the index has moved at all. The refusal, with its
+    shortfall attached, is the correct output.
+    """
+    decision = _sizing(theta_per_day=-12.0, horizon_sessions=5, horizon_calendar_days=7.0)
+    assert not decision.approved
+    assert decision.reason_code == "below_one_lot"
+    assert decision.caps["binding"] == "risk"
+    assert decision.components["theta_term"] == pytest.approx(84.0)
 
 
 def test_empty_feasible_set_is_a_refusal_with_the_shortfall():
@@ -180,7 +222,7 @@ def test_rich_variance_premium_shrinks_size_but_never_vetoes():
 def test_sizing_refuses_degenerate_input():
     assert not size_position(
         capital=0.0, premium=200.0, lot_size=65, spot=24_000.0, atm_iv=0.12,
-        delta=0.4, vega=1_200.0, theta_per_day=-12.0, horizon_bars=3,
+        delta=0.4, vega=1_200.0, theta_per_day=-12.0, horizon_sessions=3,
     ).approved
 
 
