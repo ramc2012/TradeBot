@@ -103,7 +103,11 @@ def test_supervisor_runner_partition_by_laneset(monkeypatch):
     # 20 = 19 + preopen_spot_snapshot (pre-open spot record + activeness flag,
     # 2026-07-27). Also CORE-plane data: it takes no position and makes no
     # broker call — it reads ticks already committed to Postgres.
-    assert len(all_keys) == 20
+    # 22 = 20 + index_vol_substrate and index_swing_lane (2026-09-07). Both are
+    # STRATEGY-plane and both ship disabled; the substrate takes no position but
+    # is only read by the swing lane, so it sits on the same plane as its
+    # consumer rather than with the shared data runners.
+    assert len(all_keys) == 22
 
     monkeypatch.setattr(settings, "LANESET", "core", raising=False)
     core_keys = set(MarketHoursPaperSupervisor(enabled=False)._runners)
@@ -119,7 +123,8 @@ def test_supervisor_runner_partition_by_laneset(monkeypatch):
     monkeypatch.setattr(settings, "LANESET", "strategies", raising=False)
     strategy_keys = set(MarketHoursPaperSupervisor(enabled=False)._runners)
     assert strategy_keys == all_keys - core_keys
-    assert len(strategy_keys) == 14
+    # 14 -> 16 with index_vol_substrate and index_swing_lane, both STRATEGY-plane.
+    assert len(strategy_keys) == 16
 
 
 def test_supervisor_status_shape_and_catchup_paths(monkeypatch):

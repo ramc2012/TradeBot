@@ -594,6 +594,18 @@ class Settings(BaseSettings):
     # singleton + read-only router/WS stay importable. Flip back to True to revive.
     FRACTAL_MARKET_PROFILE_AUTO_ENABLED: bool = False
     FRACTAL_MARKET_PROFILE_AUTO_INTERVAL_SECONDS: int = 300
+    # Index directional long-options SWING lane (NIFTY/BANKNIFTY/SENSEX, 1-5
+    # trading sessions). Ships DISABLED: it has four sessions of wide chain
+    # history behind it, so turning it on buys a measurement instrument that
+    # accumulates factor journals, not a validated edge. Flip deliberately.
+    INDEX_SWING_LANE_ENABLED: bool = False
+    INDEX_SWING_LANE_INTERVAL_SECONDS: int = 900
+    # The vol substrate the lane reads. Cheap, idempotent per bar, and useful
+    # on its own (surface, skew, variance risk premium), so it can run without
+    # the lane. Also DISABLED by default until the owner opts in.
+    INDEX_VOL_SUBSTRATE_ENABLED: bool = False
+    INDEX_VOL_SUBSTRATE_INTERVAL_SECONDS: int = 900
+
     DIRECTIONAL_OPTIONS_AUTO_ENABLED: bool = True
     # FAST-lane cadence (timeframe policy 2026-07-15): the strategy's default
     # timeframe is now 3-minute bars (5m/15m stay selectable via the API), so
