@@ -985,6 +985,41 @@ class MarketHoursPaperSupervisor:
                 "results": results,
             }
 
+        async def _index_vol_substrate_runner() -> dict[str, Any]:
+            """Fit and persist the index volatility surface for the latest bars.
+
+            Read-only against the chain; writes only its own tables. Safe to run
+            beside the existing directional lane, which it does not touch.
+            """
+            from directional_options.vol.builder import run as build_vol_substrate
+
+            summary = await build_vol_substrate(bars=2)
+            return {
+                "underlyings": list((summary.get("results") or {}).keys()),
+                "bars_ok": sum(
+                    int(v.get("bars_ok") or 0) for v in (summary.get("results") or {}).values()
+                ),
+            }
+
+        async def _index_swing_lane_runner() -> dict[str, Any]:
+            """One pass of the index directional swing lane.
+
+            Marks and the exit ladder run every pass; entries are capped by the
+            engine at one decision per underlying per session.
+            """
+            from directional_options.index_paper.engine import run as run_index_lane
+
+            summary = await run_index_lane()
+            results = summary.get("results") or []
+            return {
+                "run_id": summary.get("run_id"),
+                "entries": sum(int(r.get("entries") or 0) for r in results),
+                "exits": sum(int(r.get("exits") or 0) for r in results),
+                "marks": sum(int(r.get("marks") or 0) for r in results),
+                "errors": [r["underlying"] for r in results if r.get("status") == "error"],
+                "book": summary.get("book"),
+            }
+
         async def _directional_positioning_runner() -> dict[str, Any]:
             """Refresh directional_positioning_daily for the directional universe.
 
@@ -1595,6 +1630,40 @@ class MarketHoursPaperSupervisor:
                 enabled=settings.FRACTAL_MARKET_PROFILE_AUTO_ENABLED,
                 market_hours_fn=_in_gann_market_hours,
                 next_open_fn=_next_gann_market_open,
+            ),
+            RunnerConfig(
+                key="index_vol_substrate",
+                label="Index Volatility Substrate",
+                interval_seconds=settings.INDEX_VOL_SUBSTRATE_INTERVAL_SECONDS,
+                callback=_index_vol_substrate_runner,
+                broker_profile="slow",
+                enabled=settings.INDEX_VOL_SUBSTRATE_ENABLED,
+                market_hours_fn=_in_nse_market_hours,
+                next_open_fn=_next_nse_market_open,
+                # The option-chain sweep lands 45-60 minutes behind its bar and
+                # the day's last two bars are still filling after the close, so
+                # a post-close pass is how the final bars ever get fitted.
+                post_close_catchup=True,
+                post_close_force_daily=True,
+                timeout_seconds=300.0,
+                start_offset_seconds=120.0,
+            ),
+            RunnerConfig(
+                key="index_swing_lane",
+                label="Index Directional Swing Lane (1-5 sessions)",
+                interval_seconds=settings.INDEX_SWING_LANE_INTERVAL_SECONDS,
+                callback=_index_swing_lane_runner,
+                broker_profile="slow",
+                enabled=settings.INDEX_SWING_LANE_ENABLED,
+                market_hours_fn=_in_nse_market_hours,
+                next_open_fn=_next_nse_market_open,
+                # A swing lane holding 1-5 sessions has no business deciding
+                # thirteen times a day; the engine caps itself at one entry
+                # decision per session. The cadence exists so MARKS and the exit
+                # ladder run often enough to catch a stop, not so entries do.
+                post_close_catchup=True,
+                timeout_seconds=300.0,
+                start_offset_seconds=150.0,
             ),
             RunnerConfig(
                 key="directional_options",

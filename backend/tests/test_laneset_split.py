@@ -118,7 +118,11 @@ def test_supervisor_runner_partition_by_laneset(monkeypatch):
     # capture lane, 2026-08-27). CORE-plane data: reads committed rows only.
     # 24 = 23 + candidate_training (post-close model fit + promotion gates,
     # 2026-08-27). CORE-plane data: reads the labelled set, holds no position.
-    assert len(all_keys) == 25
+    # 27 = 25 + index_vol_substrate and index_swing_lane (2026-09-07). Both are
+    # STRATEGY-plane and both ship disabled; the substrate takes no position but
+    # is only read by the swing lane, so it sits on the same plane as its
+    # consumer rather than with the shared data runners.
+    assert len(all_keys) == 27
 
     monkeypatch.setattr(settings, "LANESET", "core", raising=False)
     core_keys = set(MarketHoursPaperSupervisor(enabled=False)._runners)
@@ -139,7 +143,8 @@ def test_supervisor_runner_partition_by_laneset(monkeypatch):
     monkeypatch.setattr(settings, "LANESET", "strategies", raising=False)
     strategy_keys = set(MarketHoursPaperSupervisor(enabled=False)._runners)
     assert strategy_keys == all_keys - core_keys
-    assert len(strategy_keys) == 14
+    # 14 -> 16 with index_vol_substrate and index_swing_lane, both STRATEGY-plane.
+    assert len(strategy_keys) == 16
 
 
 def test_supervisor_status_shape_and_catchup_paths(monkeypatch):

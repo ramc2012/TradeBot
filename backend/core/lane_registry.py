@@ -369,6 +369,46 @@ def get_registry() -> tuple[LaneSpec, ...]:
             notes="Parked out of production 2026-07-07 (owner call); flag default False.",
         ),
         LaneSpec(
+            key="index_vol_substrate",
+            label="Index Volatility Substrate",
+            kind="scheduler-runner",
+            execution_mode="none",
+            status_source="supervisor",
+            cadence_seconds=float(settings.INDEX_VOL_SUBSTRATE_INTERVAL_SECONDS),
+            broker_profile="slow",
+            exchange_session=f"{nse} + guaranteed post-close pass",
+            enabled_flag_name="INDEX_VOL_SUBSTRATE_ENABLED",
+            runner_keys=("index_vol_substrate",),
+            status_endpoint="/api/system/automation-status",
+            notes=(
+                "SVI surface, constant-delta coordinates and variance risk premium for "
+                "NIFTY/BANKNIFTY/SENSEX. Writes only its own index_vol_* tables. Default OFF."
+            ),
+        ),
+        LaneSpec(
+            key="index_swing_lane",
+            # No audit_lane_key: audits.lanes.REGISTRY has no auditor for this
+            # lane yet, and a key that resolves to nothing reads as "audited"
+            # while auditing nothing.
+            label="Index Directional Swing Lane (1-5 sessions)",
+            kind="scheduler-runner",
+            execution_mode="paper",
+            status_source="supervisor",
+            cadence_seconds=float(settings.INDEX_SWING_LANE_INTERVAL_SECONDS),
+            broker_profile="slow",
+            exchange_session=nse,
+            enabled_flag_name="INDEX_SWING_LANE_ENABLED",
+            runner_keys=("index_swing_lane",),
+            paper_book_source="index_paper_positions",
+            status_endpoint="/api/system/automation-status",
+            notes=(
+                "Long premium only, NIFTY/BANKNIFTY/SENSEX, 1-5 trading sessions. "
+                "Multi-factor: direction, size and gates come from separate factor "
+                "families. Four sessions of wide chain history — a measurement "
+                "instrument, not a validated edge. Default OFF."
+            ),
+        ),
+        LaneSpec(
             key="directional_options",
             audit_lane_key="directional_options",
             label="Directional Options Paper Cycle",
@@ -728,7 +768,10 @@ def supervisor_runner_keys() -> set[str]:
 # resolver for the capture lane. Default OFF, no broker call, no position.
 # 2026-08-27: 36 -> 37 with candidate_training, the post-close model fit +
 # promotion-gate pass. Default OFF, no broker call, no position.
-EXPECTED_LANE_TOTAL = 38
+# 2026-09-07: 38 -> 40 with index_vol_substrate and index_swing_lane, the
+# index volatility surface and the 1-5 session long-premium paper lane
+# (NIFTY/BANKNIFTY/SENSEX). Both STRATEGY-plane, both default OFF.
+EXPECTED_LANE_TOTAL = 40
 
 
 def registry_counts() -> dict[str, int]:

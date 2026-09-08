@@ -132,6 +132,8 @@ STRATEGY_SUBSYSTEMS = frozenset(
         "runner:institutional_convergence_commodity",
         "runner:fractal_market_profile",
         "runner:directional_options",
+        "runner:index_vol_substrate",
+        "runner:index_swing_lane",
         "runner:directional_positioning",
         "runner:commodity_mp_history",
         "runner:macd_refined",
