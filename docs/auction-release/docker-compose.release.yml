@@ -3,6 +3,10 @@ services:
   backend:
     environment:
       LANESET: core
+      # Registry/status visibility for the API. The runners themselves are
+      # STRATEGY-plane, so nothing executes on this container.
+      INDEX_VOL_SUBSTRATE_ENABLED: 'true'
+      INDEX_SWING_LANE_ENABLED: 'true' 
       BROKER_REST_BUDGET_FRACTION: '0.7'
       PAPER_TRADING_ONLY: 'true'
       MARKET_INTELLIGENCE_STRATEGY_LOCAL_ONLY: 'true'
@@ -18,6 +22,10 @@ services:
   backend-strategies:
     environment:
       LANESET: strategies
+      # Index directional swing lane (NIFTY/BANKNIFTY/SENSEX, 1-5 sessions,
+      # long premium, paper). Enabled 2026-09-08 pre-open.
+      INDEX_VOL_SUBSTRATE_ENABLED: 'true'
+      INDEX_SWING_LANE_ENABLED: 'true' 
       PAPER_TRADING_ONLY: 'true'
       MARKET_INTELLIGENCE_STRATEGY_LOCAL_ONLY: 'true'
       SHARED_MP_REDIS_URL: redis://redis:6379/0

@@ -14,6 +14,7 @@ from datetime import date, datetime, timedelta, timezone
 
 import pytest
 
+from directional_options.index_paper import factors
 from directional_options.index_paper.factors import (
     CONFIDENCE_WEIGHT,
     Factor,
@@ -236,3 +237,78 @@ def test_panel_serialises_every_factor_including_the_silent_ones():
     assert set(payload["factors"]) == {"acting", "silent"}
     assert payload["n_unavailable"] == 1
     assert payload["n_acting"] == 1
+
+
+# ── squash scales: keep readings off the asymptote ───────────────────────────
+#
+# Measured 80th percentiles of |raw| over the full clean history available to
+# each factor (2026-09-08). A scale is correct when a p80 reading lands near
+# |score| 0.60 — high enough to matter, far enough from 1.0 to still have a
+# gradient. A factor pinned at +/-1 on most days is a constant vote, not a
+# signal, and contributes nothing to a weighted composite but its sign.
+MEASURED_P80 = {
+    "vrp_spread": (0.0674, factors.SCALE_VRP_SPREAD),
+    "trend_20d": (0.0455, factors.SCALE_TREND_20D),
+    "reversion_10d": (2.5750, factors.SCALE_REVERSION_10D),
+    "rv_compression": (0.2692, factors.SCALE_RV_COMPRESSION),
+    "futures_oi_z": (1.3935, factors.SCALE_FUTURES_OI_Z),
+    "chain_oi_asymmetry": (0.5131, factors.SCALE_CHAIN_OI_ASYMMETRY),
+}
+
+
+@pytest.mark.parametrize("name", sorted(MEASURED_P80))
+def test_a_typical_reading_lands_off_the_asymptote(name):
+    p80, scale = MEASURED_P80[name]
+    score = abs(factors.squash(p80, scale))
+    assert 0.45 < score < 0.75, (
+        f"{name}: a p80 reading squashes to {score:.3f}. Below ~0.45 the factor "
+        f"is muted; above ~0.75 it is saturating and loses its gradient. "
+        f"vrp_spread once sat at 0.02 against a p80 of 0.067 and produced "
+        f"|score| > 0.90 on 97.9% of readings — a constant vote."
+    )
+
+
+def test_no_scale_saturates_a_p95_reading():
+    """Even a 95th-percentile reading must keep some headroom."""
+    for name, (p80, scale) in MEASURED_P80.items():
+        # p95 runs roughly 1.5x p80 across these factors.
+        assert abs(factors.squash(p80 * 1.5, scale)) < 0.95, name
+
+
+# ── the structural saturation, locked out ───────────────────────────────────
+
+
+def test_net_normalisation_pins_to_one_on_opposite_signs():
+    """Why the legacy asymmetry was replaced, stated as an executable fact."""
+    # Calls unwound, puts built — opposite signs, modest flows.
+    gross, legacy = factors.oi_asymmetry(ce_up=10, ce_dn=110, pe_up=120, pe_dn=20)
+    assert legacy == pytest.approx(1.0), "legacy pins to +1 whenever the sides differ in sign"
+    assert abs(gross) < 0.9, "gross normalisation retains magnitude information"
+
+
+def test_gross_normalisation_still_ranks_conviction():
+    """A decisive session must outrank a marginal one — the legacy form cannot.
+
+    Both cases below have OPPOSITE-sign net changes, which is the condition that
+    pins the legacy ratio to exactly +1. One is a rounding error on heavy
+    two-way activity; the other is a wholesale rotation out of calls into puts.
+    They are not the same session, and only the gross form can say so.
+    """
+    marginal_gross, marginal_legacy = factors.oi_asymmetry(
+        ce_up=100, ce_dn=105, pe_up=105, pe_dn=100)   # nets -5 / +5 on 410 gross
+    decisive_gross, decisive_legacy = factors.oi_asymmetry(
+        ce_up=5, ce_dn=195, pe_up=190, pe_dn=10)      # nets -190 / +180 on 400 gross
+
+    assert marginal_legacy == pytest.approx(1.0)
+    assert decisive_legacy == pytest.approx(1.0)
+    assert abs(marginal_gross) < 0.05
+    assert abs(decisive_gross) > 0.90
+    assert abs(decisive_gross) > abs(marginal_gross) * 10
+
+
+def test_gross_asymmetry_is_bounded_and_signed():
+    puts_built, _ = factors.oi_asymmetry(ce_up=0, ce_dn=0, pe_up=100, pe_dn=0)
+    calls_built, _ = factors.oi_asymmetry(ce_up=100, ce_dn=0, pe_up=0, pe_dn=0)
+    assert 0 < puts_built <= 1.0
+    assert -1.0 <= calls_built < 0
+    assert factors.oi_asymmetry(0, 0, 0, 0) == (None, None)

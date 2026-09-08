@@ -114,6 +114,63 @@ def unavailable(name: str, family: str, role: Role, why: str, confidence: Confid
     )
 
 
+# Squash scales, MEASURED rather than assumed.
+#
+# Each scale is set so the 80th percentile of |raw| maps to |score| ~ 0.60
+# (tanh(0.7) = 0.60), which keeps the bulk of readings on the informative part
+# of the curve instead of pinned against its asymptote. A factor that returns
+# +/-1 on most days is not a signal, it is a constant vote, and it contributes
+# nothing to a weighted composite except its own sign.
+#
+# Measured 2026-09-08 over the full clean history available to each factor
+# (~1,725 index-sessions for the spot-derived ones, 1,140 for futures OI, 146
+# for the variance risk premium, 36 for the chain). Saturation before/after:
+#
+#   vrp_spread      0.020 -> 0.0963   |score|>0.90 on 97.9% of readings -> ~20%
+#   trend_20d       0.030 -> 0.0650   21.0% -> ~20%
+#   reversion_10d   2.000 -> 3.6800   14.1% -> ~20%
+#   rv_compression  0.250 -> 0.3850    9.8% -> ~20%
+#   futures_oi_z    1.500 -> 1.9900    7.8% -> ~20%
+#
+# Verified after the change: 0.0% / 2.5% / 1.7% / 2.3% / 3.3% respectively.
+# chain_oi_asymmetry was a separate, STRUCTURAL saturation -- see its factor.
+#
+# vrp_spread was by far the worst: its median reading was already twice its
+# scale, so it acted as a constant -1 on size regardless of how rich premium
+# actually was. Re-derive with scripts measuring |raw| p80 whenever the vol
+# regime shifts materially.
+SCALE_VRP_SPREAD = 0.0963
+SCALE_TREND_20D = 0.0650
+SCALE_REVERSION_10D = 3.6800
+SCALE_RV_COMPRESSION = 0.3850
+SCALE_FUTURES_OI_Z = 1.9900
+SCALE_BREAKEVEN_RATIO = 0.2500        # 0.15 (25 DTE) to 0.43 (4 DTE) is the live span
+# PROVISIONAL: only 36 observations exist (12 sessions x 3 indices, and the
+# three are ~90% correlated, so the effective sample is nearer 12). Re-derive
+# once the chain history is months rather than weeks deep.
+SCALE_CHAIN_OI_ASYMMETRY = 0.7330
+
+
+def oi_asymmetry(ce_up: float, ce_dn: float, pe_up: float, pe_dn: float) -> tuple[float | None, float | None]:
+    """(gross-normalised, legacy net-normalised) put-vs-call OI-change asymmetry.
+
+    Returns both so the difference stays visible and testable. The legacy form
+    divides by |ce_net| + |pe_net|, which equals the numerator exactly whenever
+    the two sides move in opposite directions — so it pins to +/-1 on a
+    condition that says nothing about magnitude. The gross form divides by
+    total activity, which is strictly larger and degenerates only when one side
+    sees no activity at all.
+    """
+    ce_net, pe_net = ce_up - ce_dn, pe_up - pe_dn
+    numerator = pe_net - ce_net
+    gross = ce_up + ce_dn + pe_up + pe_dn
+    net = abs(ce_net) + abs(pe_net)
+    return (
+        (numerator / gross) if gross > 0 else None,
+        (numerator / net) if net > 0 else None,
+    )
+
+
 def squash(value: float, scale: float) -> float:
     """Map an unbounded quantity into [-1, 1].
 
@@ -272,7 +329,20 @@ async def load_chain_oi_change(
             pe_up += max(delta, 0); pe_dn += max(-delta, 0)
 
     ce_net, pe_net = ce_up - ce_dn, pe_up - pe_dn
-    total = abs(ce_net) + abs(pe_net)
+
+    # Normalised by GROSS open-interest activity, not by |ce_net| + |pe_net|.
+    # The latter is what the first version used and it saturates structurally:
+    # whenever the two sides move in OPPOSITE directions the numerator equals
+    # the denominator exactly, so the ratio pins to +/-1 regardless of how
+    # large or small the flows were. Measured over the available chain history,
+    # its raw 95th percentile was exactly 1.0000 -- a fifth of readings sat on
+    # the boundary carrying no magnitude information at all, and on 2026-09-07
+    # all three indices reported -0.98 to -1.00 simultaneously.
+    #
+    # Gross activity is a strictly larger denominator that only degenerates
+    # when one side sees no activity whatsoever.
+    gross = ce_up + ce_dn + pe_up + pe_dn
+    asym, legacy = oi_asymmetry(ce_up, ce_dn, pe_up, pe_dn)
     return {
         "day": today,
         "prev_day": prev,
@@ -280,7 +350,9 @@ async def load_chain_oi_change(
         "n_common_contracts": len(common),
         "ce_net_oi_change": ce_net,
         "pe_net_oi_change": pe_net,
-        "asymmetry": ((pe_net - ce_net) / total) if total > 0 else None,
+        "gross_oi_change": gross,
+        "asymmetry": asym,
+        "net_asymmetry_legacy": legacy,
         "spot": spot,
     }
 
@@ -301,7 +373,7 @@ def factor_vrp(ctx: FactorContext) -> Factor:
     return Factor(
         name="vrp_spread", family="vol", role="size", value=float(spread),
         confidence="measured", sign=-1,
-        score=squash(float(spread), 0.02),
+        score=squash(float(spread), SCALE_VRP_SPREAD),
         detail=f"implied is {float(spread) * 100:+.2f} vol points against trailing realised",
         weight=CONFIDENCE_WEIGHT["measured"],
     )
@@ -341,7 +413,7 @@ def factor_rv_compression(ctx: FactorContext) -> Factor:
     ratio = rv5 / rv20
     return Factor(
         name="rv_compression", family="vol", role="size", value=ratio,
-        confidence="speculative", sign=-1, score=squash(ratio - 1.0, 0.25),
+        confidence="speculative", sign=-1, score=squash(ratio - 1.0, SCALE_RV_COMPRESSION),
         detail=f"5d/20d realised vol = {ratio:.2f} (compression-precedes-expansion is falsified here; shadow only)",
         weight=CONFIDENCE_WEIGHT["speculative"],
     )
@@ -373,7 +445,7 @@ def factor_futures_oi_z(ctx: FactorContext) -> Factor:
         )
     return Factor(
         name="futures_oi_z", family="positioning", role="size", value=float(oi["oi_z"]),
-        confidence="measured", sign=1, score=squash(float(oi["oi_z"]), 1.5),
+        confidence="measured", sign=1, score=squash(float(oi["oi_z"]), SCALE_FUTURES_OI_Z),
         detail=f"front-contract OI z={float(oi['oi_z']):+.2f} ({age}d old), dte={oi.get('dte')}",
         weight=CONFIDENCE_WEIGHT["measured"],
     )
@@ -431,10 +503,13 @@ def factor_chain_oi_asymmetry(ctx: FactorContext) -> Factor:
     asym = float(data["asymmetry"])
     return Factor(
         name="chain_oi_asymmetry", family="structure", role="direction", value=asym,
-        confidence="speculative", sign=1, score=max(min(asym, 1.0), -1.0),
+        # squash, not a hard clip. A clip on an already-bounded ratio cannot
+        # distinguish a decisive reading from a marginal one once either
+        # reaches the edge.
+        confidence="speculative", sign=1, score=squash(asym, SCALE_CHAIN_OI_ASYMMETRY),
         detail=(
             f"near-money OI change: CE {data['ce_net_oi_change']:+,} vs PE {data['pe_net_oi_change']:+,} "
-            f"over {data['n_common_contracts']} common contracts"
+            f"on {data['gross_oi_change']:,} gross, over {data['n_common_contracts']} common contracts"
         ),
         weight=CONFIDENCE_WEIGHT["speculative"],
     )
@@ -469,7 +544,7 @@ def factor_trend(ctx: FactorContext, window: int = 20) -> Factor:
     ret = math.log(window_bars[-1].close / window_bars[0].close)
     return Factor(
         name="trend_20d", family="trend", role="direction", value=ret,
-        confidence="speculative", sign=1, score=squash(ret, 0.03),
+        confidence="speculative", sign=1, score=squash(ret, SCALE_TREND_20D),
         detail=(
             f"{window}-session return {ret * 100:+.2f}% over {gaps} dropped session(s) "
             "(shadow: momentum measured anti-predictive here)"
@@ -497,7 +572,7 @@ def factor_reversion(ctx: FactorContext, window: int = 10) -> Factor:
     stretch = (bars[-1].close - ma) / (ma * daily_sigma)
     return Factor(
         name="reversion_10d", family="trend", role="direction", value=stretch,
-        confidence="speculative", sign=-1, score=squash(stretch, 2.0),
+        confidence="speculative", sign=-1, score=squash(stretch, SCALE_REVERSION_10D),
         detail=f"{stretch:+.2f} daily sigma from the {window}-session mean (shadow)",
         weight=CONFIDENCE_WEIGHT["speculative"],
     )
@@ -515,7 +590,7 @@ def factor_geometry(ctx: FactorContext) -> Factor:
         return unavailable("breakeven_ratio", "structure", "size", "no tradeable contract geometry", "measured")
     return Factor(
         name="breakeven_ratio", family="structure", role="size", value=ratio,
-        confidence="measured", sign=-1, score=squash(ratio - 0.35, 0.25),
+        confidence="measured", sign=-1, score=squash(ratio - 0.35, SCALE_BREAKEVEN_RATIO),
         detail=f"needs {ratio:.2f} of a 1-sigma move to break even (0.15 at 25 DTE, 0.43 at 4 DTE)",
         weight=CONFIDENCE_WEIGHT["measured"],
     )
