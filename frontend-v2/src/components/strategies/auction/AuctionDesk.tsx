@@ -46,6 +46,7 @@ import { UniversePicker } from "./UniversePicker";
 import { useAuctionUniverse } from "@/hooks/useAuctionUniverse";
 import { AgentDecisions } from "./AgentDecisions";
 import { GatesPanel } from "./GatesPanel";
+import { ExitIntegrity } from "./ExitIntegrity";
 import { RagMemory } from "./RagMemory";
 import { MotionTab } from "./motion/MotionTab";
 import type { ExecutionStep, NtmVolx, Regime, Risk, Snapshot } from "./types";
@@ -55,6 +56,7 @@ const TABS = [
   { key: "auction", label: "Auction", icon: MapIcon },
   { key: "motion", label: "In Motion", icon: Waves },
   { key: "gates", label: "Gates", icon: ListChecks },
+  { key: "exit-integrity", label: "Exit integrity", icon: ShieldAlert },
   { key: "memory", label: "Memory", icon: Brain },
   { key: "signal-quality", label: "Signal quality", icon: Activity },
   { key: "live-stream", label: "Live stream", icon: Radio },
@@ -214,6 +216,7 @@ export default function AuctionDesk() {
 
 
       {activeTab === "gates" ? <GatesPanel symbol={symbol} snapshot={snap} /> : null}
+      {activeTab === "exit-integrity" ? <ExitIntegrity /> : null}
 
       {activeTab === "performance" ? (
         <div className="space-y-4">

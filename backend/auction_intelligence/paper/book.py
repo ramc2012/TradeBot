@@ -10,6 +10,8 @@ from typing import Any, Optional
 from uuid import uuid4
 from zoneinfo import ZoneInfo
 
+from loguru import logger
+
 from core.config import settings
 from core.paper_trade_recorder import paper_trade_recorder
 from auction_intelligence.paper.journal import resolve_journal_root
@@ -763,17 +765,96 @@ class PaperPositionBook:
         latest_value = latest_premium if premium_based else latest_spot
         if latest_value is None:
             return None
+        def target_pays() -> bool:
+            """A `target_hit` must actually be a gain in the money that is booked.
+
+            The exit ladder tests a SPOT level, but P&L is realised in PREMIUM,
+            and the two can disagree completely: measured on the live book, the
+            median `target_hit` fired on a spot move of +0.01% and NINE of
+            twenty-eight target hits LOST money — one exited a 78.15 premium at
+            75.35 and called it a target. A spot level brushed by noise while
+            theta ate the premium is not a target being reached.
+
+            So a target still has to clear the spot level, and additionally the
+            premium must be above entry by enough to cover the round trip.
+            Otherwise the position is left to the other rungs, which will name
+            the outcome honestly.
+            """
+            if entry_premium is None or entry_premium <= 0 or latest_premium is None:
+                return True  # cannot verify; do not block the ladder
+            costs_bps = float(self.costs.get("slippage_bps", 1)) * 2.0
+            floor = entry_premium * (1.0 + costs_bps / 10000.0)
+            return latest_premium >= floor
+
         if action == "LONG":
             if stop is not None and latest_value <= stop:
                 return "stop_loss"
             if target is not None and latest_value >= target:
-                return "target_hit"
+                return "target_hit" if target_pays() else None
         elif action == "SHORT":
             if stop is not None and latest_value >= stop:
                 return "stop_loss"
             if target is not None and latest_value <= target:
-                return "target_hit"
+                return "target_hit" if target_pays() else None
         return None
+
+    @staticmethod
+    def validate_risk_levels(
+        *,
+        action: str,
+        reference: float,
+        stop: Optional[float],
+        target: Optional[float],
+    ) -> tuple[Optional[float], Optional[float], list[str]]:
+        """Drop any stop/target that sits on the WRONG SIDE of the entry reference.
+
+        A stop above entry on a LONG (or below entry on a SHORT) is not a stop —
+        it is already breached the moment the position opens, so the exit ladder
+        fires on the first eligible check and books the result as a `stop_loss`
+        whatever the money did. The live book proves it: four positions carried
+        such a stop, three exited inside an hour, and two of those "stop losses"
+        were PROFITS of Rs 2,29,110 and Rs 40,352. A stop that pays is not a
+        stop, and it hides a malformed upstream decision behind a plausible
+        exit reason.
+
+        This is the same failure family that, in the convergence lane, was
+        masked by taking abs(entry - stop) and sized a single trade to 2308x
+        capital. It is measured NOT to be a sizing bug here — quantity is a lot
+        multiple and does not scale with stop distance — but the wrong-side
+        stop itself is identical and had never been guarded in this sleeve.
+
+        Dropping the level is deliberately preferred to refusing the position:
+        the premium hard stop still bounds the loss, so the trade keeps its
+        protection, while an invalid level can no longer fire a false exit. The
+        issues list is returned so the malformed decision stays visible instead
+        of being silently repaired.
+        """
+        issues: list[str] = []
+        act = str(action or "").upper()
+        if reference is None or reference <= 0 or act not in ("LONG", "SHORT"):
+            return stop, target, issues
+
+        def wrong_side(level: Optional[float], kind: str) -> bool:
+            if level is None or level <= 0:
+                return False
+            if kind == "stop":
+                return level >= reference if act == "LONG" else level <= reference
+            return level <= reference if act == "LONG" else level >= reference
+
+        clean_stop, clean_target = stop, target
+        if wrong_side(stop, "stop"):
+            issues.append(
+                f"stop {stop:g} is on the wrong side of entry {reference:g} for a {act} "
+                "— it would fire at entry; dropped, the premium hard stop still applies"
+            )
+            clean_stop = None
+        if wrong_side(target, "target"):
+            issues.append(
+                f"target {target:g} is on the wrong side of entry {reference:g} for a {act} "
+                "— it is already satisfied; dropped"
+            )
+            clean_target = None
+        return clean_stop, clean_target, issues
 
     @staticmethod
     def _risk_levels_are_premium_based(
@@ -845,6 +926,21 @@ class PaperPositionBook:
         position["gross_pnl"] = round((exit_premium - entry_premium) * quantity, 2)
         position["fees"] = 2 * float(costs.get("fees_per_order", 0))
         position["realized_pnl"] = round(position["gross_pnl"] - position["fees"], 2)
+
+        # What the exit INTENDED versus what it got. The premium hard stop is
+        # configured at a 25% drawdown but realises at a median of -63% on the
+        # live book, because the mark cadence is far slower than a short-dated
+        # option moves: by the time a pass observes the -25% condition the
+        # premium has already fallen much further. The stop is not wrong, it is
+        # unenforceable at this observation frequency, and that distinction is
+        # invisible unless the gap is recorded.
+        if entry_premium and entry_premium > 0:
+            realised_drawdown = (exit_premium - entry_premium) / entry_premium
+            position["exit_premium_change_pct"] = round(realised_drawdown * 100.0, 2)
+            if reason == "hard_stop":
+                intended = -float(self.limits.get("hard_stop_premium_fraction", 0.25) or 0.0)
+                position["stop_intended_pct"] = round(intended * 100.0, 2)
+                position["stop_slippage_pct"] = round((realised_drawdown - intended) * 100.0, 2)
         try:
             await paper_trade_recorder.record_event(
                 strategy="auction_intelligence",
@@ -937,6 +1033,27 @@ class PaperPositionBook:
         raw_quantity = int(getattr(execution, "quantity", None) or decision.quantity or 0)
         lot_size = getattr(execution, "lot_size", None)
         quantity = self._clamp_quantity_to_symbol_cap(raw_quantity, entry_premium, lot_size)
+
+        # The decision's stop/target are SPOT levels unless they are small
+        # enough to be premiums; validate against whichever reference they are
+        # expressed in, so a wrong-side level can never fire at entry.
+        probe = {"entry_premium": entry_premium, "entry_spot_price": spot_price}
+        premium_based = self._risk_levels_are_premium_based(
+            probe, stop=_as_float(decision.stop_price), target=_as_float(decision.target_price)
+        )
+        reference = entry_premium if premium_based else (spot_price or 0.0)
+        clean_stop, clean_target, level_issues = self.validate_risk_levels(
+            action=str(decision.action),
+            reference=float(reference or 0.0),
+            stop=_as_float(decision.stop_price),
+            target=_as_float(decision.target_price),
+        )
+        if level_issues:
+            logger.warning(
+                "[auction paper] %s %s: %s",
+                underlying, decision.action, "; ".join(level_issues),
+            )
+
         record = PaperPositionRecord(
             position_id=uuid4().hex,
             status="open",
@@ -968,11 +1085,15 @@ class PaperPositionBook:
             expiry_kind=getattr(execution, "expiry_kind", None),
             days_to_expiry=getattr(execution, "days_to_expiry", None),
             selection_reason=getattr(execution, "selection_reason", None),
-            stop_price=decision.stop_price,
-            target_price=decision.target_price,
-            notes=[*decision.rationale[:3], *list(getattr(execution, "rationale", [])[:2])],
+            stop_price=clean_stop,
+            target_price=clean_target,
+            notes=[*decision.rationale[:3], *list(getattr(execution, "rationale", [])[:2]), *level_issues],
         )
         payload = asdict(record)
+        # Malformed risk levels stay on the record rather than being silently
+        # repaired — the decision that produced them is an upstream bug, and a
+        # quiet fix here would hide it.
+        payload["risk_level_issues"] = level_issues
         # Only positions opened after both the current-session guard and the
         # exact-contract valuation guard belong to the prospective clean
         # performance sample. Existing ledger rows deliberately remain

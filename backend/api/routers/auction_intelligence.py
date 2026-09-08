@@ -564,6 +564,116 @@ async def paper_positions(
     )
 
 
+@router.get("/exit-integrity")
+async def exit_integrity() -> dict:
+    """Does each exit reason agree with the money it booked?
+
+    A desk that shows only P&L cannot tell a working stop from a broken one. On
+    this book the disagreements were substantial and none of them were visible:
+    nine of twenty-eight `target_hit` exits LOST money, three stop exits MADE
+    money (one paid Rs 2,29,110), and the premium hard stop configured at -25%
+    realised at a median of -63%. Each is a different failure and each needs a
+    different fix, so the desk states them separately rather than rolling them
+    into a win rate.
+
+    `breakeven_win_rate` is the number that matters most: with an average win of
+    X and an average loss of Y, a strategy needs Y/(X+Y) of its trades to win
+    merely to break even. Comparing it to the actual win rate says whether the
+    payoff geometry is survivable at all, independent of signal quality.
+    """
+    state = await _paper_book.list_positions(status="closed", limit=500)
+    closed = state.get("closed_positions", []) or []
+
+    def f(value):
+        try:
+            return float(value)
+        except (TypeError, ValueError):
+            return None
+
+    reasons: dict[str, dict] = {}
+    contradictions = {"target_that_lost": [], "stop_that_paid": []}
+    wrong_side, stop_slippage = [], []
+    wins, losses = [], []
+
+    for p_ in closed:
+        reason = str(p_.get("close_reason") or "unknown")
+        pnl = f(p_.get("realized_pnl"))
+        if pnl is None:
+            continue
+        bucket = reasons.setdefault(
+            reason, {"reason": reason, "n": 0, "total_pnl": 0.0, "wins": 0, "premium_change_pct": []}
+        )
+        bucket["n"] += 1
+        bucket["total_pnl"] += pnl
+        bucket["wins"] += int(pnl > 0)
+        entry, exit_ = f(p_.get("entry_premium")), f(p_.get("exit_premium"))
+        if entry and entry > 0 and exit_ is not None:
+            bucket["premium_change_pct"].append((exit_ - entry) / entry * 100.0)
+
+        label = f"{p_.get('symbol')} · {p_.get('close_reason')}"
+        if reason == "target_hit" and pnl < 0:
+            contradictions["target_that_lost"].append({"label": label, "pnl": pnl})
+        if reason in ("stop_loss", "hard_stop") and pnl > 0:
+            contradictions["stop_that_paid"].append({"label": label, "pnl": pnl})
+
+        # A stop that sits on the wrong side of entry fires the moment the
+        # position opens; it is a malformed decision, not a risk control.
+        stop, ref, action = f(p_.get("stop_price")), f(p_.get("entry_spot_price")), str(p_.get("signal_action") or "").upper()
+        if stop and ref and action in ("LONG", "SHORT"):
+            if (stop >= ref) if action == "LONG" else (stop <= ref):
+                wrong_side.append({"label": label, "entry": ref, "stop": stop, "pnl": pnl})
+
+        slip = f(p_.get("stop_slippage_pct"))
+        if slip is not None:
+            stop_slippage.append(slip)
+        (wins if pnl > 0 else losses).append(pnl)
+
+    def median(xs):
+        xs = sorted(x for x in xs if x is not None)
+        return None if not xs else (xs[len(xs) // 2] if len(xs) % 2 else (xs[len(xs)//2 - 1] + xs[len(xs)//2]) / 2)
+
+    for b in reasons.values():
+        b["avg_pnl"] = b["total_pnl"] / b["n"] if b["n"] else None
+        b["median_premium_change_pct"] = median(b.pop("premium_change_pct"))
+
+    avg_win = (sum(wins) / len(wins)) if wins else None
+    avg_loss = (abs(sum(losses)) / len(losses)) if losses else None
+    breakeven = (avg_loss / (avg_win + avg_loss)) if (avg_win and avg_loss) else None
+    n = len(wins) + len(losses)
+
+    return {
+        "closed_trades": n,
+        "by_reason": sorted(reasons.values(), key=lambda b: -b["n"]),
+        "contradictions": {
+            "target_that_lost": sorted(contradictions["target_that_lost"], key=lambda x: x["pnl"])[:10],
+            "target_that_lost_count": len(contradictions["target_that_lost"]),
+            "stop_that_paid": sorted(contradictions["stop_that_paid"], key=lambda x: -x["pnl"])[:10],
+            "stop_that_paid_count": len(contradictions["stop_that_paid"]),
+        },
+        "wrong_side_stops": {"count": len(wrong_side), "positions": wrong_side[:10]},
+        "hard_stop": {
+            "configured_fraction_pct": -100.0 * float(
+                _paper_book.limits.get("hard_stop_premium_fraction", 0.25) or 0.0
+            ),
+            "median_realised_pct": median(
+                [b["median_premium_change_pct"] for b in reasons.values() if b["reason"] == "hard_stop"]
+            ),
+            "median_slippage_pct": median(stop_slippage),
+            "slippage_samples": len(stop_slippage),
+        },
+        "payoff": {
+            "avg_win": avg_win,
+            "avg_loss": avg_loss,
+            "reward_to_risk": (avg_win / avg_loss) if (avg_win and avg_loss) else None,
+            "actual_win_rate": (len(wins) / n) if n else None,
+            "breakeven_win_rate": breakeven,
+            # Positive => the geometry is survivable at the observed hit rate.
+            "edge_vs_breakeven": ((len(wins) / n) - breakeven) if (n and breakeven is not None) else None,
+        },
+        "total_realized_pnl": sum(wins) + sum(losses),
+    }
+
+
 # ── NSE index auction book surfaces (orders / trades / positions) ────────────
 #  These are the NSE sleeve's books. The MCX sibling keeps its own pair under
 #  /commodity/paper and /commodity/paper-trades — do not conflate them.

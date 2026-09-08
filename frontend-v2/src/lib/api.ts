@@ -797,6 +797,9 @@ export const uploadBacktestCsv = (formData: FormData) =>
 // "run a cycle" action to call from a browser — `make daily-cycle` on the
 // research host is the only thing that advances it.
 // ── Index directional swing lane (NIFTY/BANKNIFTY/SENSEX, 1-5 sessions) ──────
+export const getAuctionExitIntegrity = () =>
+  api.get("/api/auction-intelligence/exit-integrity");
+
 export const getIndexSwingSummary = () => api.get("/api/index-swing/summary");
 export const getIndexSwingFunnel = (params?: { session_date?: string; days?: number; run_id?: string }) =>
   api.get("/api/index-swing/funnel", { params });
