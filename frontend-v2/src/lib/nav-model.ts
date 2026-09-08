@@ -304,6 +304,25 @@ const INTRADAY_DESKS: NavDesk[] = [
 
 const SWING_DESKS: NavDesk[] = [
   {
+    href: "/strategies/index-swing",
+    label: "Index Swing · long premium",
+    policy: null,
+    laneKeys: ["index_swing_lane", "index_vol_substrate"],
+    status: "active",
+    note:
+      "NIFTY/BANKNIFTY/SENSEX only, long premium, 1–5 trading sessions. Decides from a nine-factor panel " +
+      "(direction, size and gates kept separate) on top of an arbitrage-checked SVI surface. Declines on most " +
+      "sessions by design — four sessions of wide chain history and no direction factor with measured skill — so " +
+      "the desk leads with the refusal funnel, not the book.",
+    book: {
+      endpoint: "/api/index-swing/summary",
+      path: ["book"],
+      // Every open position is re-marked each pass, off the chain or off the
+      // fitted surface when the contract has not printed. Unrealized P&L is
+      // genuinely measured here, so nothing is declared absent.
+    },
+  },
+  {
     href: "/strategies/macd-refined",
     label: "MACD Refined",
     policy: null,
@@ -523,6 +542,11 @@ export const SIDEBAR_GROUPS: SidebarGroup[] = [
       // default and an honest home: Vanguard is a systematic multi-factor
       // signal lane, alongside MACD Refined / Directional / CBE.
       { kind: "desk", href: "/strategies/vanguard" },
+      // Same reasoning as Vanguard above, and the same trap: this desk is a
+      // registered lane in SWING_DESKS, but SIDEBAR_GROUPS is a separate
+      // curated list — being in the lane taxonomy does NOT put a desk in the
+      // sidebar. It shipped invisible exactly once for that reason.
+      { kind: "desk", href: "/strategies/index-swing" },
     ],
   },
   {

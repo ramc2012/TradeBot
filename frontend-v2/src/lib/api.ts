@@ -796,6 +796,19 @@ export const uploadBacktestCsv = (formData: FormData) =>
 // doctrine forbids an execution layer, so there is deliberately no
 // "run a cycle" action to call from a browser — `make daily-cycle` on the
 // research host is the only thing that advances it.
+// ── Index directional swing lane (NIFTY/BANKNIFTY/SENSEX, 1-5 sessions) ──────
+export const getIndexSwingSummary = () => api.get("/api/index-swing/summary");
+export const getIndexSwingFunnel = (params?: { session_date?: string; days?: number; run_id?: string }) =>
+  api.get("/api/index-swing/funnel", { params });
+export const getIndexSwingFactors = (params?: { session_date?: string; underlying?: string }) =>
+  api.get("/api/index-swing/factors", { params });
+export const getIndexSwingSurface = (days = 10) =>
+  api.get("/api/index-swing/surface", { params: { days } });
+export const getIndexSwingPositions = (status = "all", limit = 50) =>
+  api.get("/api/index-swing/positions", { params: { status, limit } });
+export const getIndexSwingAttribution = (limit = 50) =>
+  api.get("/api/index-swing/attribution", { params: { limit } });
+
 export const getVanguardSummary = () => api.get("/api/vanguard/summary");
 export const getVanguardModel = () => api.get("/api/vanguard/model");
 export const getVanguardWatchlist = (sessions = 20, source_session?: string) =>
