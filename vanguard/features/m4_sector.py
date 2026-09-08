@@ -44,7 +44,7 @@ from scipy.cluster.hierarchy import fcluster, linkage
 from scipy.spatial.distance import squareform
 
 DEFAULT_DSN = "postgresql://nomadcurie:nomadcurie@localhost:5433/nomadcurie"
-PROXY_CSV = Path(__file__).parents[1] / "config" / "sector_proxy_daily_closes.csv"
+PROXY_CSV = Path(os.environ.get("VANGUARD_RUNTIME_DIR", "/tmp/vanguard")) / "sector_proxy_daily_closes.csv"
 LEAD_LAG_RANGE = range(-2, 3)   # bars, per the spec's -2..+2
 RS_HORIZONS = (5, 20, 60)
 
@@ -168,7 +168,13 @@ def main() -> int:
         print(f"  no bars found for {len(missing)}: {missing[:10]}"
               f"{' ...' if len(missing) > 10 else ''}")
 
-    closes.to_csv(PROXY_CSV)
+    PROXY_CSV.parent.mkdir(parents=True, exist_ok=True)
+    temporary = PROXY_CSV.with_name(f".{PROXY_CSV.name}.{os.getpid()}.tmp")
+    try:
+        closes.to_csv(temporary)
+        os.replace(temporary, PROXY_CSV)
+    finally:
+        temporary.unlink(missing_ok=True)
     print(f"wrote {PROXY_CSV}")
 
     groups = sorted(taxonomy["sector_group"].unique())

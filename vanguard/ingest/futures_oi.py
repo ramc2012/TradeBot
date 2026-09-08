@@ -32,6 +32,12 @@ Expiry on the master is epoch millis.
 """
 from __future__ import annotations
 
+# Filename entry points must resolve sibling packages just like imported modules.
+import sys
+from pathlib import Path
+if __package__ in (None, ""):
+    sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+
 import argparse
 import gzip
 import json

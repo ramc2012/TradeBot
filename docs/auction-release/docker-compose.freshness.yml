@@ -1,0 +1,12 @@
+# Layer after docker-compose.release.yml; generated data has a writable home.
+services:
+  backend:
+    environment:
+      STOCK_SPOT_INTRADAY_INTERVALS: '3minute'
+      STOCK_SPOT_INTRADAY_SECONDS: '180'
+  vanguard-cycle:
+    environment:
+      VANGUARD_RUNTIME_DIR: /runtime/vanguard
+      VANGUARD_CACHE_DIR: /runtime/vanguard
+    volumes:
+      - /Users/ramachandran/CLAUDE PROJECTS/Nomad Curie/TradeBot/backend/runtime/vanguard:/runtime/vanguard

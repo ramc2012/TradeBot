@@ -642,9 +642,10 @@ class MarketHoursPaperSupervisor:
                     part.strip()
                     for part in str(settings.STOCK_SPOT_INTRADAY_INTERVALS).split(",")
                     if part.strip()
-                ] or ["30minute"],
+                ] or ["3minute"],
                 days=1,
-                deadline_seconds=600.0,
+                derive_30minute=True,
+                deadline_seconds=170.0,
             )
 
         async def _auction_runner() -> dict[str, Any]:

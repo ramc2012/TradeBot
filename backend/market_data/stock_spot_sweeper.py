@@ -73,7 +73,8 @@ from __future__ import annotations
 
 import asyncio
 import urllib.parse
-from datetime import date, datetime, timedelta
+from datetime import date, datetime, timedelta, timezone
+from zoneinfo import ZoneInfo
 from time import monotonic
 from typing import Any, Optional
 
@@ -86,6 +87,7 @@ from core.config import settings
 from db.database import AsyncSessionLocal
 
 SOURCE = "upstox_sweep"
+_INTRADAY_CURSOR = 0
 
 # app interval -> Upstox v2 interval / v3 (unit, interval) pair. v3 is used for
 # the intraday endpoint because v2's intraday path only accepts 1minute and
@@ -291,12 +293,53 @@ async def _coverage(interval: str, frm: date, to: date) -> int:
     return int(row.names or 0)
 
 
+def completed_rows(rows: list[dict], interval: str, now: datetime) -> list[dict]:
+    minutes = int(interval.removesuffix("minute"))
+    def close_time(row):
+        stamp = row["time"]
+        if stamp.tzinfo is None:
+            return None
+        local = stamp.astimezone(ZoneInfo("Asia/Kolkata"))
+        end = stamp + timedelta(minutes=minutes)
+        if local.hour == 15 and local.minute >= 15 and local.minute < 30:
+            end = min(end, local.replace(hour=15, minute=30, second=0, microsecond=0))
+        return end
+    return [r for r in rows if (end := close_time(r)) is not None and end <= now]
+
+
+def aggregate_stock_30minute(rows: list[dict], now: datetime) -> list[dict]:
+    """Only contiguous completed NSE 3m bars form a 30m bar (15m at close)."""
+    groups = {}
+    for row in completed_rows(rows, "3minute", now):
+        stamp = row["time"].astimezone(ZoneInfo("Asia/Kolkata"))
+        anchor = stamp.replace(hour=9, minute=15, second=0, microsecond=0)
+        offset = (stamp - anchor).total_seconds() / 60
+        if offset < 0 or offset >= 375 or offset % 3:
+            continue
+        start = anchor + timedelta(minutes=30 * int(offset // 30))
+        groups.setdefault(start, {})[stamp] = row
+    result = []
+    for start, group in sorted(groups.items()):
+        count = 5 if start.hour == 15 and start.minute == 15 else 10
+        expected = [start + timedelta(minutes=3*i) for i in range(count)]
+        if start + timedelta(minutes=3*count) > now or set(group) != set(expected):
+            continue
+        ordered = [group[t] for t in expected]
+        result.append({"time": start, "open": ordered[0]["open"],
+                       "high": max(r["high"] for r in ordered),
+                       "low": min(r["low"] for r in ordered),
+                       "close": ordered[-1]["close"],
+                       "volume": sum(r["volume"] for r in ordered)})
+    return result
+
+
 async def sweep_stock_spot(
     *,
     intervals: Optional[list[str]] = None,
     days: Optional[int] = None,
     max_symbols: Optional[int] = None,
     deadline_seconds: float = 900.0,
+    derive_30minute: bool = False,
 ) -> dict[str, Any]:
     """Sweep the F&O stock universe for intraday spot. Bounded, idempotent.
 
@@ -304,10 +347,13 @@ async def sweep_stock_spot(
     broker/DB failure degrades to a reported error, because a data-maintenance
     job must not be able to take the supervisor down.
     """
+    global _INTRADAY_CURSOR
     if not bool(getattr(settings, "STOCK_SPOT_SWEEP_ENABLED", True)):
         return {"status": "disabled"}
 
     intervals = intervals or _parse_intervals(getattr(settings, "STOCK_SPOT_SWEEP_INTERVALS", "30minute"))
+    if derive_30minute and "3minute" in intervals:
+        intervals = [i for i in intervals if i != "30minute"]
     days = int(days if days is not None else getattr(settings, "STOCK_SPOT_SWEEP_DAYS", 3))
     max_symbols = int(
         max_symbols if max_symbols is not None
@@ -324,6 +370,8 @@ async def sweep_stock_spot(
         if not universe:
             return {"status": "skipped_empty_universe"}
 
+        offset = _INTRADAY_CURSOR % len(universe) if derive_30minute else 0
+        universe = universe[offset:] + universe[:offset]
         to_date = date.today()
         from_date = to_date - timedelta(days=max(days, 1) - 1)
         started = monotonic()
@@ -340,10 +388,10 @@ async def sweep_stock_spot(
         async with httpx.AsyncClient(timeout=_HTTP_TIMEOUT) as client:
           for interval in intervals:
             before = await _coverage(interval, from_date, to_date)
-            ok = failed = stored = 0
+            ok = failed = stored = derived = 0
             budget_hit = False
 
-            for symbol, key in universe:
+            for ordinal, (symbol, key) in enumerate(universe):
                 if monotonic() - started >= deadline_seconds:
                     budget_hit = True
                     logger.warning(
@@ -359,18 +407,27 @@ async def sweep_stock_spot(
                     with broker_class(CLASS_BULK):
                         raw = await _fetch_window(
                             client, key, interval, from_date, to_date, today)
-                    stored += await _upsert(symbol, key, interval, _normalize(raw))
+                    now = datetime.now(timezone.utc)
+                    rows = completed_rows(_normalize(raw), interval, now)
+                    stored += await _upsert(symbol, key, interval, rows)
+                    if derive_30minute and interval == "3minute":
+                        derived += await _upsert(symbol, key, "30minute", aggregate_stock_30minute(rows, now))
                     ok += 1
                 except Exception as exc:  # noqa: BLE001 — one bad symbol never aborts
                     failed += 1
                     logger.debug(f"[stock-spot-sweep] {symbol} ({key}) failed: {exc}")
+                if derive_30minute:
+                    _INTRADAY_CURSOR = (offset + ordinal + 1) % len(universe)
                 await asyncio.sleep(pace)
 
+            if failed or budget_hit:
+                summary["status"] = "partial"
             after = await _coverage(interval, from_date, to_date)
             summary["intervals"][interval] = {
                 "names_before": before, "names_after": after,
                 "symbols_ok": ok, "symbols_failed": failed,
                 "rows_fetched": stored, "budget_hit": budget_hit,
+                "derived_30minute_rows": derived,
             }
             logger.info(
                 f"[stock-spot-sweep] {interval} {from_date}..{to_date}: "

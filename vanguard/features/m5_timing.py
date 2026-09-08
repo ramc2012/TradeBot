@@ -126,6 +126,12 @@ timing_score in [0, 100] -- three additive, independently capped components
 """
 from __future__ import annotations
 
+# Filename entry points must resolve sibling packages just like imported modules.
+import sys
+from pathlib import Path
+if __package__ in (None, ""):
+    sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+
 import argparse
 import os
 import sys

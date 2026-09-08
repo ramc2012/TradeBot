@@ -39,6 +39,12 @@ for next-session context, where they are legitimately known in advance.
 """
 from __future__ import annotations
 
+# Filename entry points must resolve sibling packages just like imported modules.
+import sys
+from pathlib import Path
+if __package__ in (None, ""):
+    sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+
 import os
 
 import numpy as np

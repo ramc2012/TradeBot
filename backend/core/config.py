@@ -512,10 +512,10 @@ class Settings(BaseSettings):
     # 211 symbols at ~0.35s pacing is a ~110s pass, comfortably inside a
     # 30-minute cadence.
     STOCK_SPOT_INTRADAY_ENABLED: bool = True
-    # Only the decision grid in-session. 3minute would be 10x the calls for a
-    # grid no lane reads intraday.
-    STOCK_SPOT_INTRADAY_INTERVALS: str = "30minute"
-    STOCK_SPOT_INTRADAY_SECONDS: int = 1800
+    # Auction consumes 3m bars. Derive completed 30m bars from the same response
+    # for VANGUARD; one fetch per symbol, one core owner, no overlapping runs.
+    STOCK_SPOT_INTRADAY_INTERVALS: str = "3minute"
+    STOCK_SPOT_INTRADAY_SECONDS: int = 180
     # Pre-open broker token readiness sweep (07:00-09:20 IST, NSE session days):
     # validates Fyers (auto-refresh via saved refresh token + PIN when the daily
     # access token is dead) + checks Upstox expiry, and logs/alerts BEFORE open
