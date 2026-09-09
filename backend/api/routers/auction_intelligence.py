@@ -670,6 +670,34 @@ async def exit_integrity() -> dict:
             # Positive => the geometry is survivable at the observed hit rate.
             "edge_vs_breakeven": ((len(wins) / n) - breakeven) if (n and breakeven is not None) else None,
         },
+        # What the lane is CONFIGURED to do now, beside what it has DONE. The
+        # book is historical; the bracket below is what new positions get, and
+        # the two must be readable side by side or a shipped fix looks like it
+        # never happened.
+        "configured_geometry": {
+            "hard_stop_fraction_pct": 100.0 * float(
+                _paper_book.limits.get("hard_stop_premium_fraction", 0.0) or 0.0
+            ),
+            "target_min_reward_multiple": float(
+                _paper_book.limits.get("target_min_reward_multiple", 0.0) or 0.0
+            ),
+            "target_floor_pct": 100.0 * float(
+                _paper_book.limits.get("target_min_reward_multiple", 0.0) or 0.0
+            ) * float(_paper_book.limits.get("hard_stop_premium_fraction", 0.0) or 0.0),
+            "implied_breakeven_win_rate": (
+                1.0 / (1.0 + float(_paper_book.limits.get("target_min_reward_multiple", 0.0) or 0.0))
+                if float(_paper_book.limits.get("target_min_reward_multiple", 0.0) or 0.0) > 0
+                else None
+            ),
+            "evidence": (
+                "Chosen by replaying the reconstructed premium path of 29 closed positions "
+                "(first touch, filled at the observed bar). 25% stop + tight target lost "
+                "Rs 1,69,715 on that sample; 15% stop + wide target made Rs 49,616. Direction "
+                "is robust across every stop width tested; magnitude is NOT — leave-one-out "
+                "flips the total negative in 2 of 29 cases. A better-shaped prior, not a "
+                "validated edge."
+            ),
+        },
         "total_realized_pnl": sum(wins) + sum(losses),
     }
 

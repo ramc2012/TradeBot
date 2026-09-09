@@ -782,8 +782,38 @@ class PaperPositionBook:
             """
             if entry_premium is None or entry_premium <= 0 or latest_premium is None:
                 return True  # cannot verify; do not block the ladder
+
+            # A target must earn a real MULTIPLE of the risk being run, not just
+            # clear its costs. Measured by replaying the actual premium path of
+            # 29 closed positions (reconstructed from option_premium_candles,
+            # first-touch, filled at the observed bar rather than at the trigger
+            # level), a tight target is the single most destructive setting in
+            # this lane:
+            #
+            #   25% stop + tight target   -Rs 1,69,715
+            #   25% stop + wide target    +Rs   29,684
+            #   15% stop + wide target    +Rs   49,616
+            #
+            # and every 5%-target row in the sweep lost money at every stop
+            # width. The mechanism matches what the live book already showed:
+            # the median `target_hit` fired at +2.6% premium against a median
+            # maximum favourable excursion of only +3.1%, so the lane was
+            # cutting winners essentially at their high while losers ran to
+            # -63%. Long premium is a convex position; capping the convexity
+            # and keeping the decay is the wrong half of the trade.
+            #
+            # HONESTY ABOUT THE EVIDENCE: 29 of 57 positions had chain coverage,
+            # which biases toward liquid near-ATM strikes, and leave-one-out
+            # flips the total negative in 2 of 29 cases (one +Rs 2,57,182 trade
+            # carries much of it). The DIRECTION is robust across every stop
+            # width tested and is independently supported by the MFE/MAE shape;
+            # the magnitude is not. Treat this as a better-shaped prior, not a
+            # validated edge, and re-measure once more paths exist.
             costs_bps = float(self.costs.get("slippage_bps", 1)) * 2.0
-            floor = entry_premium * (1.0 + costs_bps / 10000.0)
+            reward_multiple = float(self.limits.get("target_min_reward_multiple", 0.0) or 0.0)
+            stop_fraction = float(self.limits.get("hard_stop_premium_fraction", 0.0) or 0.0)
+            floor_fraction = max(costs_bps / 10000.0, reward_multiple * stop_fraction)
+            floor = entry_premium * (1.0 + floor_fraction)
             return latest_premium >= floor
 
         if action == "LONG":

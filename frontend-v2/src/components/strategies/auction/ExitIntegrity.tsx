@@ -94,6 +94,47 @@ export function ExitIntegrity() {
         ) : null}
       </Section>
 
+      {d.configured_geometry ? (
+        <Section
+          title="Shipped geometry"
+          description="What new positions get, beside what the book above already did — otherwise a shipped fix looks like it never happened."
+        >
+          <div className="grid grid-cols-2 gap-3 md:grid-cols-4">
+            <MetricTile
+              label="Hard stop"
+              value={pct1(-d.configured_geometry.hard_stop_fraction_pct)}
+              size="sm"
+            />
+            <MetricTile
+              label="Target floor"
+              value={pct1(d.configured_geometry.target_floor_pct)}
+              size="sm"
+              detail={`${d.configured_geometry.target_min_reward_multiple}x the risk`}
+            />
+            <MetricTile
+              label="Implied breakeven"
+              value={formatPct(d.configured_geometry.implied_breakeven_win_rate)}
+              size="sm"
+            />
+            <MetricTile
+              label="vs actual win rate"
+              value={formatPct(p.actual_win_rate)}
+              size="sm"
+              color={
+                d.configured_geometry.implied_breakeven_win_rate != null &&
+                p.actual_win_rate != null &&
+                p.actual_win_rate > d.configured_geometry.implied_breakeven_win_rate
+                  ? "text-emerald-400"
+                  : "text-rose-400"
+              }
+            />
+          </div>
+          <div className="mt-3 text-[11.5px] leading-relaxed text-text-muted">
+            {d.configured_geometry.evidence}
+          </div>
+        </Section>
+      ) : null}
+
       <Section
         title="Does the exit reason agree with the money?"
         icon={<AlertTriangle size={15} />}

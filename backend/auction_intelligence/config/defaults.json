@@ -160,9 +160,10 @@
   "position_limits": {
     "one_position_per_symbol": true,
     "max_symbol_capital_fraction": 0.1,
-    "hard_stop_premium_fraction": 0.25,
+    "hard_stop_premium_fraction": 0.15,
     "min_hold_seconds": 900,
-    "exit_confirmation_cycles": 2
+    "exit_confirmation_cycles": 2,
+    "target_min_reward_multiple": 2.5
   },
   "paper_trading": {
     "journal_root": "runtime/auction_intelligence",
