@@ -81,6 +81,7 @@ type ModuleSummary = {
   label?: string;
   description?: string;
   underlyings?: string[];
+  stock_universe?: { enabled?: boolean; symbols?: string[] };
   timeframes?: string[];
   automation?: { loop_active?: boolean };
 };
@@ -106,6 +107,8 @@ export default function DirectionalDesk() {
   const [activeTab, setActiveTab] = useUrlTab("paper");
   const [isPending, startTransition] = useTransition();
   const [underlying, setUnderlying] = useState(DEFAULT_UNDERLYING);
+  const [bookAll, setBookAll] = useState(true);
+  const bookSymbol = activeTab === "paper" && !bookAll ? underlying : undefined;
   const timeframe = DEFAULT_TIMEFRAME;
   const lookback = DEFAULT_LOOKBACK;
 
@@ -140,14 +143,17 @@ export default function DirectionalDesk() {
   const snapshot = liveQuery.data?.snapshot;
   const summary = summaryQuery.data;
   const universe = useMemo(
-    () => summary?.underlyings || ["NIFTY", "BANKNIFTY", "SENSEX"],
-    [summary?.underlyings],
+    () => Array.from(new Set([
+      ...(summary?.underlyings || ["NIFTY", "BANKNIFTY", "SENSEX"]),
+      ...(summary?.stock_universe?.enabled ? summary.stock_universe.symbols || [] : []),
+    ])),
+    [summary?.underlyings, summary?.stock_universe],
   );
 
   // Paper queries shared with the Paper tab via the canonical hook.
   const paper = usePaperDeskQueries({
     deskKey: "directional",
-    symbol: underlying,
+    symbol: bookSymbol,
     endpoints: {
       summary: "/api/directional-options/paper-summary",
       positions: "/api/directional-options/paper-positions",
@@ -300,7 +306,11 @@ export default function DirectionalDesk() {
           <p className="mt-1">New trades use the shared spread/impact estimate and dated fees; older trades retain their original model. Entries obey cash and loss limits. Unpriced exits stay pending. Queue and partial-fill simulation are unavailable.</p>
           {Number(paperSum.pending_exits || 0) > 0 ? <p className="mt-2 text-amber-300">{paperSum.pending_exits} protective exits awaiting an observed contract mark.</p> : null}
         </div>
-        <PaperTradingTab symbol={underlying} paper={livePaper} />
+        <button type="button" onClick={() => setBookAll(!bookAll)} aria-pressed={bookAll}
+          className="mb-3 rounded-lg border border-bg-border px-3 py-2 text-xs text-text-secondary">
+          Book: {bookAll ? "All symbols" : underlying} · {bookAll ? `Show ${underlying} only` : "Show all symbols"}
+        </button>
+        <PaperTradingTab symbol={bookSymbol} paper={livePaper} />
       </> : null}
 
       {activeTab === "policy" ? <PolicyLearningTab /> : null}

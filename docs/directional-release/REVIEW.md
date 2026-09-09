@@ -29,6 +29,7 @@ The weekly-expiry claim needs exchange qualification: NSE retains NIFTY weeklies
 ## Execution defects corrected
 
 - Carried premiums and untimestamped cache values could create protective/expiry fills. Quote observation time is now checked, including a final book-level check. Unpriced exits remain visibly pending and retain their holdings; zero-value observed exits are preserved.
+- Read-time chain overlays were stamping premiums with the request time and could disagree with the capital summary. Book reads now preserve authoritative stored marks and perform no chain tracking or fetch. The UI defaults to all holdings and applies the same symbol filter to streaming and HTTP rows.
 - Held stocks could stop receiving marks when omitted from the rotating signal scan. A bounded whole-book pass now marks and manages protective exits independently of signal selection.
 - Per-instance locks did not protect a shared database book. All normal book mutations now hold a cross-process lock on the shared durable volume. Final funding and loss-window checks run within that lock. New entries reserve whole-lot premium, entry charges and a conservative charge buffer; they cannot spend unrealised gains.
 - Paper-specific daily/weekly loss limits apply even when the app's signal-validation flag is uncapped. These are funding controls, not confidence/regime signal filters. No premium-per-trade percentage cap was introduced.

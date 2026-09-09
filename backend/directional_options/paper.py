@@ -473,46 +473,10 @@ class DirectionalOptionsPaperStore:
         elif status == "closed":
             open_positions = []
 
-        # Live-mark overlay (Bug B, 2026-06-04): a held option's specific
-        # contract often isn't on the WS premium feed, so its stored
-        # latest_premium freezes at entry (a SENSEX CE sat at its 1423.4 entry
-        # with uPnL=0 indefinitely). The chain poll keeps EVERY strike's LTP
-        # fresh (~30s) — overlay it here so the served P/L streams. Directional
-        # is long-premium, so uPnL = (mark − entry) × units. Best-effort; also
-        # ensures the position's expiry chain is tracked so the cache has data.
-        if open_positions:
-            try:
-                from directional_options.chain_analytics import (
-                    chain_strike_mark,
-                    ensure_chain_tracked,
-                )
-                for row in open_positions:
-                    try:
-                        und = str(row.get("underlying") or "")
-                        exp = str(row.get("expiry") or "")
-                        strike = float(row.get("strike") or 0.0)
-                        otype = str(row.get("option_type") or "")
-                        if not (und and exp and strike and otype):
-                            continue
-                        await ensure_chain_tracked(und, exp)
-                        mark = await chain_strike_mark(und, exp, strike, otype)
-                        if mark is not None and mark > 0:
-                            qty = float(row.get("quantity_units") or 0)
-                            entry = float(row.get("entry_premium") or 0.0)
-                            row["latest_premium"] = round(mark, 2)
-                            row["unrealized_pnl"] = round((mark - entry) * qty, 2)
-                            row["mark_time"] = _utc_now()
-                            row["price_source"] = "chain_cache_live"
-                    except Exception:  # noqa: BLE001
-                        continue
-            except Exception:  # noqa: BLE001
-                pass
-
-        # Summary is computed on the SAME lists as before this change (whole
-        # filtered book, post status-gate, post live-mark overlay) so every
-        # statistic it carries — realized, unrealized, max_drawdown, sharpe,
-        # win_rate — is bit-identical to what it always reported. Pagination
-        # below only chooses which ROWS travel over the wire.
+        # Serve the authoritative book marks. The whole-book execution pass
+        # refreshes held contracts independently of signal scans. A read must
+        # not fetch chains, overwrite observation times, or revalue only the
+        # positions response while the capital summary retains stored marks.
         summary = await self._summary(open_positions, closed_positions)
 
         # Open rows are loaded IN FULL (no LIMIT on the open query), so slicing

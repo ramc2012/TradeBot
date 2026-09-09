@@ -4,6 +4,7 @@ from __future__ import annotations
 import asyncio
 from datetime import date, datetime, timedelta, timezone
 from copy import deepcopy
+from decimal import Decimal
 
 import numpy as np
 import pandas as pd
@@ -204,9 +205,9 @@ def test_surface_fit_shared_across_consumers_without_mutation_leak(monkeypatch):
         calls.append(rows)
         return surface.SurfaceSlice(symbol, stamp, exp, .05, 25000, 25000, 25000, reason="original")
     monkeypatch.setattr(surface, "_build_slice_from_rows_uncached", compute)
-    a = surface.build_slice_from_rows("NIFTY", ts, expiry, [{"close": 100}])
+    a = surface.build_slice_from_rows("NIFTY", ts, expiry, [{"close": Decimal("100.00")}])
     a.reason = "consumer quarantine"
-    b = surface.build_slice_from_rows("NIFTY", ts, expiry, [{"close": 100}])
+    b = surface.build_slice_from_rows("NIFTY", ts, expiry, [{"close": 100.0}])
     assert len(calls) == 1 and b.reason == "original"
     surface.build_slice_from_rows("NIFTY", ts, expiry, [{"close": 101}])
     assert len(calls) == 2
@@ -222,3 +223,22 @@ def test_paper_store_refuses_stale_untimed_or_future_exit(tmp_path, age):
     with pytest.raises(ValueError):
         DirectionalOptionsPaperStore(tmp_path)._close_position(row, mark=mark, close_time=now.isoformat(), close_reason="test")
     assert row["status"] == "open"
+
+
+@pytest.mark.asyncio
+async def test_book_read_preserves_authoritative_observation_time(tmp_path, monkeypatch):
+    store = DirectionalOptionsPaperStore(tmp_path)
+    row = {"position_id": "held", "underlying": "NIFTY", "expiry": "2049-01-28",
+           "strike": 25000, "option_type": "CE", "entry_premium": 100,
+           "latest_premium": 110, "quantity_units": 75,
+           "mark_time": "2026-09-08T09:15:00+00:00", "unrealized_pnl": 750}
+    _memory_book([store], monkeypatch, positions=[row])
+    requested = []
+    async def forbidden(*args, **kwargs):
+        requested.append(args)
+        raise AssertionError("Book reads must not request chains")
+    monkeypatch.setattr("directional_options.chain_analytics.ensure_chain_tracked", forbidden)
+    result = await store.list_positions(status="open")
+    assert result["open_positions"][0]["mark_time"] == row["mark_time"]
+    assert result["open_positions"][0]["latest_premium"] == 110
+    assert requested == []

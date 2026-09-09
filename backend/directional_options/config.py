@@ -56,9 +56,9 @@ DIRECTIONAL_STOCK_UNIVERSE: tuple[str, ...] = (
 DEFAULT_CONFIG: dict[str, Any] = {
     "label": "Directional Long Options",
     "description": (
-        "Long-premium research and execution sandbox for NSE index options "
-        "(NIFTY / BANKNIFTY / SENSEX). Trade/skip, strike choice, and sizing "
-        "are learned online by a contextual bandit instead of hand-tuned hurdles."
+        "Long-premium paper trading for NIFTY, BANKNIFTY, SENSEX and configured "
+        "F&O stocks. Research signals and sizing are evaluated with funding "
+        "and data checks."
     ),
     "data_root": DATA_ROOT,
     "runtime_root": RUNTIME_ROOT,

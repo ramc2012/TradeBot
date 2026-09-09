@@ -260,6 +260,7 @@ class DirectionalOptionsService:
             "stock_universe": {
                 "enabled": bool(settings.DIRECTIONAL_INCLUDE_STOCK_UNIVERSE),
                 "static_size": len(self.config.get("stock_universe") or []),
+                "symbols": list(self.config.get("stock_universe") or []) if settings.DIRECTIONAL_INCLUDE_STOCK_UNIVERSE else [],
             },
         }
         self._summary_cache = {
@@ -474,7 +475,7 @@ class DirectionalOptionsService:
         )
         if (
             premium is None
-            or premium <= 0
+            or premium < 0
             or not _fresh_quote_time(mark_time, max_age_seconds=min(max_mark_age, 120.0))
         ):
             from directional_options.chain_analytics import chain_strike_quote
@@ -577,7 +578,7 @@ class DirectionalOptionsService:
             )
             if (
                 premium is None
-                or premium <= 0
+                or premium < 0
                 or not _fresh_quote_time(mark_time, max_age_seconds=min(max_mark_age, 120.0))
             ):
                 # The held contract often isn't on the fresh WS watchlist feed

@@ -73,8 +73,8 @@ export default function PaperTradingTab({ symbol, paper }: { symbol?: string; pa
 
   const cap = (paper.summary.data as Record<string, number> | undefined) || {};
   const pos = paper.positions.data as { open_positions?: OpenPos[]; closed_positions?: ClosedPos[] } | undefined;
-  const opens = pos?.open_positions ?? [];
-  const closes = pos?.closed_positions ?? [];
+  const opens = (pos?.open_positions ?? []).filter((row) => !symbol || row.underlying === symbol);
+  const closes = (pos?.closed_positions ?? []).filter((row) => !symbol || row.underlying === symbol);
   const records = (paper.journal.data as { records?: JournalEntry[] } | undefined)?.records ?? [];
 
   const onReset = async () => {
@@ -101,6 +101,7 @@ export default function PaperTradingTab({ symbol, paper }: { symbol?: string; pa
           ) : null
         }
       >
+        <p className="mb-3 text-xs text-text-muted">Capital and performance totals cover the whole book; position and journal rows follow the selected scope.</p>
         <div className="grid grid-cols-2 gap-3 md:grid-cols-4 xl:grid-cols-6">
           <MetricTile label="Equity" value={`₹${(cap.total_equity ?? 0).toLocaleString("en-IN")}`} detail={`Init ₹${(cap.initial_capital ?? 0).toLocaleString("en-IN")}`} />
           <MetricTile label="Available" value={`₹${(cap.available_capital ?? 0).toLocaleString("en-IN")}`} detail={`Reserved ₹${(cap.reserved_margin ?? 0).toLocaleString("en-IN")}`} />

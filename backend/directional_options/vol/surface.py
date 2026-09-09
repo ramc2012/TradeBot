@@ -421,7 +421,12 @@ def build_slice_from_rows(underlying: str, ts: datetime, expiry: date,
     Rehydrate an independent dataclass so quarantine decisions cannot mutate
     another lane's view. Redis stores JSON, never executable pickles.
     """
+    from decimal import Decimal
     from mp_core.cache import cached_json
+    # SQL NUMERIC values arrive as Decimal; fitting already uses binary floats.
+    # Canonicalise before hashing so database and in-memory consumers share keys.
+    rows = [{key: float(value) if isinstance(value, Decimal) else value
+             for key, value in row.items()} for row in rows]
     inputs = {"underlying": underlying, "ts": ts, "expiry": expiry, "rows": list(rows),
               "r": r, "tick_size": tick_size, "min_vega_ticks": min_vega_ticks, "max_abs_k": max_abs_k}
     raw = cached_json("index-vol-slice-v2", inputs, lambda: asdict(_build_slice_from_rows_uncached(
