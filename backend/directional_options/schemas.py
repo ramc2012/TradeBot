@@ -180,6 +180,8 @@ class RiskDecision:
     # consumers when the cap IS set.
     premium_cap: Optional[float]
     reasons: list[str] = field(default_factory=list)
+    # A stop is not a guaranteed fill; full premium can be lost, plus charges.
+    planned_stop_loss: float = 0.0
 
 
 @dataclass

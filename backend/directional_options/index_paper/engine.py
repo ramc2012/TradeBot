@@ -61,7 +61,7 @@ from directional_options.index_paper.sizing import size_position, vrp_risk_multi
 from directional_options.index_paper.store import ensure_tables
 from directional_options.vol.blackscholes import black76_greeks, black76_price
 from directional_options.vol.realized import DailySeries, load_daily_series
-from directional_options.vol.series import front_coordinates, minimum_variance_delta
+from directional_options.vol.series import front_coordinates, sticky_moneyness_delta
 from directional_options.vol.surface import (
     DEFAULT_RISK_FREE,
     INDEX_UNIVERSE,
@@ -416,6 +416,7 @@ def _greeks_for(sl: SurfaceSlice, strike: float, option_type: str, iv: float, r:
 
 
 def _mv_delta(sl: SurfaceSlice, strike: float, greeks) -> float | None:
+    """Legacy storage field: sticky-moneyness skew proxy, not an MV estimate."""
     if not sl.ok or not sl.forward or not sl.spot:
         return None
     k = math.log(strike / sl.forward)
@@ -424,7 +425,7 @@ def _mv_delta(sl: SurfaceSlice, strike: float, greeks) -> float | None:
     if w <= 0 or sl.tenor_years <= 0:
         return None
     dsigma_dk = dw / (2.0 * math.sqrt(w * sl.tenor_years))
-    return minimum_variance_delta(greeks.delta, greeks.vega, dsigma_dk, sl.spot)
+    return sticky_moneyness_delta(greeks.delta, greeks.vega, dsigma_dk, sl.spot)
 
 
 async def _vol_context(snapshot: SurfaceSnapshot) -> dict[str, Any]:
@@ -1229,7 +1230,7 @@ async def run_underlying(
     result = PassResult(symbol, ts, "ok")
 
     rows = await load_chain_bar(symbol, ts)
-    snapshot = build_snapshot_from_rows(
+    snapshot = await asyncio.to_thread(build_snapshot_from_rows,
         symbol, ts, rows, r=cfg.risk_free, max_age_minutes=cfg.max_bar_age_minutes
     )
     vol_ctx = await _vol_context(snapshot) if snapshot.ok else {"bar_ts": ts.isoformat()}

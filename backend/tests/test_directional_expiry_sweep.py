@@ -118,6 +118,10 @@ def policy_flags_on(monkeypatch):
     monkeypatch.setattr(settings, "EXPIRY_POLICY_FORCED_CLOSE_ENABLED", True, raising=False)
 
 
+async def _fresh_mark(_row):
+    return {"premium": 36.0, "mark_time": datetime.now(timezone.utc).isoformat(), "price_source": "test_observed"}
+
+
 # ── 1. the shared 2TD gate is now consulted at all ───────────────────────────
 
 
@@ -216,7 +220,7 @@ async def test_sweep_closes_a_position_whose_underlying_was_never_cycled(
         ],
     )
 
-    report = await store.sweep_expiry_closures(today=date(2026, 7, 27))
+    report = await store.sweep_expiry_closures(today=date(2026, 7, 27), mark_resolver=_fresh_mark)
 
     assert report["closed"] == 1
     assert report["open_evaluated"] == 2
@@ -230,13 +234,12 @@ async def test_sweep_closes_a_position_whose_underlying_was_never_cycled(
 
 
 @pytest.mark.asyncio
-async def test_sweep_labels_a_stale_mark_exit_and_prices_it_at_the_last_observation(
+async def test_sweep_leaves_stale_mark_exit_pending(
     tmp_path: Path, monkeypatch, policy_flags_on
 ) -> None:
     """CIPLA 1440 PE's last premium bar is 2026-07-21 — the strike fell off the
-    ATM collection set as spot drifted. With no live quote the exit is booked
-    at the LAST OBSERVED premium and labelled, never silently passed off as a
-    current fill."""
+    ATM collection set as spot drifted. With no live quote the exit remains pending. The last observed premium
+    may value inventory, but cannot realise P&L."""
     store = DirectionalOptionsPaperStore(tmp_path / "paper")
     observed_at = "2026-07-21T05:51:00+00:00"
     state, _ = _isolate(
@@ -263,14 +266,10 @@ async def test_sweep_labels_a_stale_mark_exit_and_prices_it_at_the_last_observat
         now="2026-07-27T04:00:00+00:00",
     )
 
-    closed = state["closed_positions"][0]
-    assert closed["exit_premium"] == 36.0          # the last OBSERVED premium
-    assert closed["exit_price_quality"] == "stale_mark"
-    assert closed["stale_mark_exit"] is True
-    assert closed["exit_mark_observed_at"] == observed_at
-    assert closed["exit_mark_age_seconds"] > 5 * 24 * 3600 * 0.9
-    assert closed["exit_price_source"].startswith("carried:")
-    assert report["closures"][0]["exit_price_quality"] == "stale_mark"
+    assert state["closed_positions"] == []
+    assert state["open_positions"][0]["latest_premium"] == 36.0
+    assert state["open_positions"][0]["pending_exit_reason"] == "forced_expiry_roll_2td"
+    assert report["skipped"][0]["skipped"] == "awaiting_executable_mark"
 
 
 @pytest.mark.asyncio
@@ -294,7 +293,7 @@ async def test_sweep_prefers_a_real_refetched_quote_over_the_carried_mark(
             "price_source": "chain_cache_live",
         }
 
-    await store.sweep_expiry_closures(today=date(2026, 7, 27), mark_resolver=_live_quote)
+    await store.sweep_expiry_closures(today=date(2026, 7, 27), mark_resolver=_live_quote, now="2026-07-27T04:00:00+00:00")
 
     assert seen == ["cipla"]
     closed = state["closed_positions"][0]
@@ -306,27 +305,10 @@ async def test_sweep_prefers_a_real_refetched_quote_over_the_carried_mark(
 
 
 @pytest.mark.asyncio
-async def test_a_live_chain_quote_with_no_timestamp_is_not_aged_off_the_carried_mark(
+async def test_a_chain_quote_without_observation_time_cannot_close(
     tmp_path: Path, monkeypatch, policy_flags_on
 ) -> None:
-    """The REAL live-quote branch returns ``mark_time=None``.
-
-    ``service.resolve_position_mark`` falls back to
-    ``chain_analytics.chain_strike_mark``, which reads ``oc:<sym>:<expiry>``
-    from Redis — written with ``OC_TTL = 60`` seconds, so a HIT is at most a
-    minute old, but the payload carries no per-strike observation time. The
-    resolver therefore returns a genuine current premium with
-    ``mark_time=None``, and this is the branch these five positions are most
-    likely to take (their strikes long ago fell off the ATM watchlist).
-
-    The first cut fell back to the ROW's carried ``mark_time`` in that case,
-    which on the live book produced a single closure asserting BOTH
-    ``exit_price_quality="live_quote" / stale_mark_exit=False`` AND
-    ``exit_mark_age_seconds=597491`` (6.9 days) — self-contradictory
-    attribution on the one lane the fix exists to make attributable, and the
-    closed row kept advertising the abandoned 2026-07-21 ``mark_time``
-    alongside a freshly fetched ``exit_premium``.
-    """
+    """Cache insertion age alone cannot identify an executable quote."""
     store = DirectionalOptionsPaperStore(tmp_path / "paper")
     state, _ = _isolate(
         store,
@@ -357,18 +339,8 @@ async def test_a_live_chain_quote_with_no_timestamp_is_not_aged_off_the_carried_
         now="2026-07-28T04:00:00+00:00",
     )
 
-    closed = state["closed_positions"][0]
-    assert closed["exit_price_quality"] == "live_quote"
-    assert closed["stale_mark_exit"] is False
-    assert closed["exit_premium"] == 12.34
-    # the observation is the FETCH, bounded by the 60s cache TTL — NOT the
-    # abandoned carried mark.
-    assert closed["exit_mark_observed_at"] == "2026-07-28T04:00:00+00:00"
-    assert closed["exit_mark_age_seconds"] == 0.0
-    # and it is flagged as bounded rather than exactly timestamped
-    assert closed["exit_mark_time_exact"] is False
-    # the row's own mark_time must not stay at the abandoned observation
-    assert closed["mark_time"] == "2026-07-28T04:00:00+00:00"
+    assert state["closed_positions"] == []
+    assert state["open_positions"][0]["pending_exit_reason"] == "forced_expiry_roll_2td"
 
 
 @pytest.mark.asyncio
@@ -429,7 +401,7 @@ async def test_sweep_refuses_to_invent_a_price_and_leaves_the_row_open(
     report = await store.sweep_expiry_closures(today=date(2026, 7, 27))
 
     assert report["closed"] == 0
-    assert report["skipped"][0]["skipped"] == "unpriceable"
+    assert report["skipped"][0]["skipped"] == "awaiting_executable_mark"
     assert [r["position_id"] for r in state["open_positions"]] == ["ghost"]
 
 
@@ -443,7 +415,7 @@ async def test_sweep_is_idempotent_and_a_no_op_on_a_clean_book(
         monkeypatch,
         [_row(position_id="cipla", underlying="CIPLA", expiry="2026-07-28")],
     )
-    first = await store.sweep_expiry_closures(today=date(2026, 7, 27))
+    first = await store.sweep_expiry_closures(today=date(2026, 7, 27), mark_resolver=_fresh_mark)
     second = await store.sweep_expiry_closures(today=date(2026, 7, 27))
     assert first["closed"] == 1
     assert second["closed"] == 0
@@ -480,7 +452,7 @@ async def test_sync_snapshot_expiry_pass_now_honours_the_2td_gate(
                 "spot_price": 1490.0,
                 "data_status": {"execution_ready": False},
             },
-        }
+        }, position_marks={"cipla": {"premium": 36.0, "mark_time": "2026-07-24T05:00:00+00:00"}}
     )
 
     assert state["open_positions"] == []

@@ -164,7 +164,7 @@ async def build_bar(
     max_age_minutes: float | None = 240.0,
 ) -> BuildResult:
     rows = await load_chain_bar(underlying, bar_ts)
-    snapshot = build_snapshot_from_rows(
+    snapshot = await asyncio.to_thread(build_snapshot_from_rows,
         underlying, bar_ts, rows, max_age_minutes=max_age_minutes
     )
 

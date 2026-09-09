@@ -79,6 +79,7 @@ def _isolate_paper_store(store, monkeypatch: pytest.MonkeyPatch) -> dict[str, li
 
     async def _summary(open_positions: list[dict], closed_positions: list[dict]) -> dict:
         return {
+            "available_capital": 3_000_000,
             "open_positions": len(open_positions),
             "closed_positions": len(closed_positions),
         }
@@ -90,6 +91,9 @@ def _isolate_paper_store(store, monkeypatch: pytest.MonkeyPatch) -> dict[str, li
     monkeypatch.setattr(store, "_save_positions", _save_positions)
     monkeypatch.setattr(store, "_load_journal", _load_journal)
     monkeypatch.setattr(store, "_append_journal", _append_journal)
+    async def _windows():
+        return 0.0, 0.0
+    monkeypatch.setattr(store, "realized_pnl_windows", _windows)
     monkeypatch.setattr(store, "_summary", _summary)
     monkeypatch.setattr("directional_options.paper.paper_trade_recorder.record_event", _noop)
     monkeypatch.setattr("directional_options.chain_analytics.ensure_chain_tracked", _noop)
@@ -306,7 +310,7 @@ async def test_filter_ready_fails_closed_on_readiness_db_error(monkeypatch: pyte
 
 def _stock_live_fixture(service: DirectionalOptionsService, monkeypatch: pytest.MonkeyPatch, *, quote_age_seconds: float):
     as_of = pd.Timestamp.now(tz="UTC").floor("3min")
-    quote_time = as_of - pd.Timedelta(seconds=quote_age_seconds)
+    quote_time = pd.Timestamp.now(tz="UTC") - pd.Timedelta(seconds=quote_age_seconds)
     live_spot = pd.DataFrame(
         {
             "time": pd.to_datetime([as_of - pd.Timedelta(minutes=6), as_of - pd.Timedelta(minutes=3), as_of], utc=True),

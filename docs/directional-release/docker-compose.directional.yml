@@ -1,0 +1,15 @@
+# Layer after the pinned Auction release and freshness override. Durable mounts
+# and the VANGUARD daemon stay at their existing locations.
+services:
+  backend:
+    build:
+      context: /Users/ramachandran/CLAUDE PROJECTS/Nomad Curie/TradeBot/.claude/worktrees/directional-paper/backend
+    volumes:
+      - /Users/ramachandran/CLAUDE PROJECTS/Nomad Curie/TradeBot/.claude/worktrees/directional-paper/backend:/app
+  backend-strategies:
+    volumes:
+      - /Users/ramachandran/CLAUDE PROJECTS/Nomad Curie/TradeBot/.claude/worktrees/directional-paper/backend:/app
+  frontend-v2:
+    image: tradebot-frontend-v2:directional-paper
+    build:
+      context: /Users/ramachandran/CLAUDE PROJECTS/Nomad Curie/TradeBot/.claude/worktrees/directional-paper/frontend-v2

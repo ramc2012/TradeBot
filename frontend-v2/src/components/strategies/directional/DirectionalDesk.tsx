@@ -56,6 +56,7 @@ import PolicyDecisionPanel, { type PolicyBlock } from "./PolicyDecisionPanel";
 import PaperTradingTab from "./PaperTradingTab";
 import PolicyLearningTab from "./PolicyLearningTab";
 import OptionAnalyticsPanel from "./OptionAnalyticsPanel";
+import DistributionDesk from "./DistributionDesk";
 
 const DEFAULT_UNDERLYING = "NIFTY";
 // FAST-lane timeframe policy (2026-07-15): the desk mirrors the lane's
@@ -66,6 +67,7 @@ const DEFAULT_LOOKBACK = 16;
 const TABS = [
   { key: "paper",     label: "Paper trading",      icon: Banknote },
   { key: "live",      label: "Live overview",      icon: Gauge },
+  { key: "distribution", label: "Distribution desk", icon: Layers3 },
   { key: "analytics", label: "Option analytics",   icon: Layers3 },
   { key: "gamma",     label: "Gamma / GEX",         icon: Layers3 },
   { key: "policy",    label: "Policy & learning",  icon: Brain },
@@ -180,7 +182,7 @@ export default function DirectionalDesk() {
       description={summary?.description}
       asOf={snapshot?.as_of}
       isFetching={liveQuery.isFetching || isPending}
-      isLive={!!summary?.automation?.loop_active}
+      isLive={!!summary?.automation?.loop_active && snapshot?.data_status?.execution_ready === true}
       paperMode
       tabs={TABS}
       activeTab={activeTab}
@@ -280,6 +282,8 @@ export default function DirectionalDesk() {
         </div>
       ) : null}
 
+      {activeTab === "distribution" ? <DistributionDesk underlying={underlying} /> : null}
+
       {activeTab === "analytics" ? (
         <OptionAnalyticsPanel
           underlying={underlying}
@@ -290,7 +294,14 @@ export default function DirectionalDesk() {
       {activeTab === "gamma" ? <GammaDensity symbol={underlying} /> : null}
 
 
-      {activeTab === "paper" ? <PaperTradingTab symbol={underlying} paper={livePaper} /> : null}
+      {activeTab === "paper" ? <>
+        <div className="mb-4 rounded-xl border border-bg-border bg-bg-secondary/50 p-4 text-xs text-text-secondary">
+          <div className="font-medium text-text-primary">Funded paper book · adverse fills and dated charges</div>
+          <p className="mt-1">New trades use the shared spread/impact estimate and dated fees; older trades retain their original model. Entries obey cash and loss limits. Unpriced exits stay pending. Queue and partial-fill simulation are unavailable.</p>
+          {Number(paperSum.pending_exits || 0) > 0 ? <p className="mt-2 text-amber-300">{paperSum.pending_exits} protective exits awaiting an observed contract mark.</p> : null}
+        </div>
+        <PaperTradingTab symbol={underlying} paper={livePaper} />
+      </> : null}
 
       {activeTab === "policy" ? <PolicyLearningTab /> : null}
 

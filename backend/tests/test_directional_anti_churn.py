@@ -132,6 +132,9 @@ def _isolate_store(
     def _no_db():
         raise RuntimeError("DB disabled in test")
 
+    async def _loss_windows():
+        return (0.0, 0.0)
+    monkeypatch.setattr(store, "realized_pnl_windows", _loss_windows)
     monkeypatch.setattr(store, "_load_positions", _load_positions)
     monkeypatch.setattr(store, "_save_positions", _save_positions)
     monkeypatch.setattr(store, "_load_journal", _load_journal)
@@ -468,12 +471,10 @@ async def test_stop_loss_ignores_min_hold(
 
 
 @pytest.mark.asyncio
-async def test_expiry_exit_fires_even_without_a_fresh_mark(
+async def test_expiry_exit_stays_pending_without_a_fresh_mark(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """DTE guard must close the book even on a cycle with no mark for the held
-    leg — a fresh-mark precondition on protective exits made near-expiry
-    positions immortal whenever their contract fell off the feed."""
+    """Expiry triggers survive feed loss without inventing an executable fill."""
     store = DirectionalOptionsPaperStore(tmp_path / "paper", policy=_RecordingPolicy())
     expiry = (datetime.now(timezone.utc) + timedelta(days=0)).date().isoformat()
     held = _open_row(direction="CE", opened_seconds_ago=30.0, expiry=expiry)
@@ -482,9 +483,9 @@ async def test_expiry_exit_fires_even_without_a_fresh_mark(
     # No position_marks at all — and the cycle isn't even execution_ready.
     await store.sync_snapshot(_flat_payload(execution_ready=False))
 
-    assert state["open_positions"] == []
-    assert len(state["closed_positions"]) == 1
-    assert state["closed_positions"][0]["close_reason"] == "expiry_roll"
+    assert len(state["open_positions"]) == 1
+    assert state["closed_positions"] == []
+    assert state["open_positions"][0]["pending_exit_reason"] == "expiry_roll"
 
 
 @pytest.mark.asyncio

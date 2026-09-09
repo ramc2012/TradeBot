@@ -218,3 +218,10 @@ async def policy_state() -> dict[str, object]:
     }
     snap["enabled"] = True
     return snap
+
+
+@router.get("/distribution")
+async def distribution(underlying: str = Query("NIFTY", min_length=1, max_length=40),
+                       days: int = Query(30, ge=1, le=90)) -> dict[str, object]:
+    from directional_options.distribution import distribution_desk
+    return await distribution_desk(underlying, days)

@@ -122,8 +122,8 @@ def gatheral_g(params: SVIParams, k: np.ndarray) -> np.ndarray:
 
 
 def _wing_bound(T: float) -> float:
-    """Roger Lee wing bound: b (1 + |rho|) <= 4 / T is necessary for no arb."""
-    return 4.0 / max(T, 1e-6)
+    """Total-variance wing slopes b(1±rho) cannot exceed 2 (no T factor)."""
+    return 2.0
 
 
 def fit_svi_slice(
@@ -219,10 +219,13 @@ def fit_svi_slice(
     grid = np.linspace(fit.k_min, fit.k_max, _ARB_GRID)
     g = gatheral_g(fit.params, grid)
     fit.min_g = float(np.min(g))
-    fit.butterfly_ok = bool(fit.min_g >= -1e-8)
+    p = fit.params
+    wing_ok = p.b * (1.0 + abs(p.rho)) < 2.0
+    minimum_variance = p.a + p.b * p.s * math.sqrt(1.0 - p.rho*p.rho)
+    fit.butterfly_ok = bool(fit.min_g >= -1e-8 and wing_ok and minimum_variance > 0)
     if not fit.butterfly_ok:
         fit.status = "butterfly_arb"
-        fit.reason = f"min g(k) = {fit.min_g:.6f} < 0 — fitted slice implies negative density"
+        fit.reason = f"Static arbitrage check failed: min g={fit.min_g:.6f}, wing_ok={wing_ok}, min variance={minimum_variance:.8f}"
 
     return fit
 

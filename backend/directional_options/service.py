@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import asyncio
 from dataclasses import asdict
+from datetime import datetime, timezone
 from functools import lru_cache, partial
 from pathlib import Path
 from time import monotonic
@@ -60,7 +61,7 @@ def _fresh_quote_time(value: object, *, max_age_seconds: float) -> bool:
     try:
         quote_time = pd.Timestamp(value)
         if quote_time.tzinfo is None:
-            quote_time = quote_time.tz_localize("UTC")
+            return False
         age = (pd.Timestamp.now(tz="UTC") - quote_time.tz_convert("UTC")).total_seconds()
         return 0.0 <= age <= max_age_seconds
     except Exception:
@@ -474,21 +475,21 @@ class DirectionalOptionsService:
         if (
             premium is None
             or premium <= 0
-            or not _fresh_quote_time(mark_time, max_age_seconds=max_mark_age)
+            or not _fresh_quote_time(mark_time, max_age_seconds=min(max_mark_age, 120.0))
         ):
-            from directional_options.chain_analytics import chain_strike_mark
+            from directional_options.chain_analytics import chain_strike_quote
 
             try:
-                chain_mark = await chain_strike_mark(
+                chain_mark = await chain_strike_quote(
                     row_underlying, row_expiry, row_strike, row_otype
                 )
             except Exception:  # noqa: BLE001
                 chain_mark = None
-            if chain_mark is None or chain_mark <= 0:
+            if chain_mark is None:
                 return None
-            premium = float(chain_mark)
-            mark_time = None
-            price_source = "chain_cache_live"
+            premium = float(chain_mark["premium"])
+            mark_time = chain_mark["mark_time"]
+            price_source = chain_mark["price_source"]
         return {
             "premium": float(premium),
             "spot": float(row.get("latest_spot") or 0.0),
@@ -504,9 +505,12 @@ class DirectionalOptionsService:
         one symbol being synced, and the runner covers 40-53 of ~217 names a
         session, so held names can (and did) go unexamined for days.
         """
-        return await self.paper.sweep_expiry_closures(
+        held_marks = await self.paper.refresh_held_marks(self.resolve_position_mark)
+        result = await self.paper.sweep_expiry_closures(
             today=today, mark_resolver=self.resolve_position_mark
         )
+        result["held_marks"] = held_marks
+        return result
 
     async def record_paper_snapshot(
         self,
@@ -515,6 +519,7 @@ class DirectionalOptionsService:
         lookback_sessions: int,
     ) -> dict[str, object]:
         payload = await self.live_snapshot(underlying, timeframe, lookback_sessions)
+        payload["snapshot"]["decision_at"] = datetime.now(timezone.utc).isoformat()
         selected = dict(payload.get("snapshot", {}).get("selected_contract") or {})
         if selected:
             entry_premium, entry_mark_time, entry_source = await self.store.latest_local_option_mark(
@@ -533,7 +538,7 @@ class DirectionalOptionsService:
             if (
                 entry_premium is None
                 or entry_premium <= 0
-                or not _fresh_quote_time(entry_mark_time, max_age_seconds=max_entry_age)
+                or not _fresh_quote_time(entry_mark_time, max_age_seconds=min(max_entry_age, 120.0))
             ):
                 snapshot = payload["snapshot"]
                 snapshot["data_status"]["execution_ready"] = False
@@ -573,7 +578,7 @@ class DirectionalOptionsService:
             if (
                 premium is None
                 or premium <= 0
-                or not _fresh_quote_time(mark_time, max_age_seconds=max_mark_age)
+                or not _fresh_quote_time(mark_time, max_age_seconds=min(max_mark_age, 120.0))
             ):
                 # The held contract often isn't on the fresh WS watchlist feed
                 # (e.g. a monthly strike rotated out), so the local mark is
@@ -583,16 +588,16 @@ class DirectionalOptionsService:
                 # position's mark FREEZES at entry — every trade then closes
                 # at exit==entry == ₹0 realized P&L (27 such ₹0 trades on
                 # 2026-06-04) and the protective stop/target can never fire.
-                from directional_options.chain_analytics import chain_strike_mark
+                from directional_options.chain_analytics import chain_strike_quote
                 try:
-                    chain_mark = await chain_strike_mark(row_underlying, row_expiry, row_strike, row_otype)
+                    chain_mark = await chain_strike_quote(row_underlying, row_expiry, row_strike, row_otype)
                 except Exception:  # noqa: BLE001
                     chain_mark = None
-                if chain_mark is None or chain_mark <= 0:
+                if chain_mark is None:
                     continue
-                premium = float(chain_mark)
-                mark_time = None
-                price_source = "chain_cache_live"
+                premium = float(chain_mark["premium"])
+                mark_time = chain_mark["mark_time"]
+                price_source = chain_mark["price_source"]
             position_marks[str(row.get("position_id") or "")] = {
                 "premium": premium,
                 "spot": float(payload["snapshot"].get("spot_price") or row.get("latest_spot") or 0.0),
@@ -1046,12 +1051,8 @@ class DirectionalOptionsService:
                         weekly_realized=loss_windows[1] if loss_windows else 0.0,
                     )
                 )
-                # OWNER DIRECTIVE 2026-07-17 (signal validation, paper-only):
-                # with the loss caps themselves skipped in risk.approve(),
-                # failing CLOSED on a loss-cap DB fetch error is pointless —
-                # don't decline. Set SIGNAL_VALIDATION_UNCAPPED=False to
-                # restore the fail-safe decline together with the caps.
-                if loss_windows is None and not settings.SIGNAL_VALIDATION_UNCAPPED:
+                # No ledger means no reliable loss budget for a funded paper entry.
+                if loss_windows is None and (self.config["risk"].get("enforce_paper_loss_limits") or not settings.SIGNAL_VALIDATION_UNCAPPED):
                     risk_payload["approved"] = False
                     reasons = list(risk_payload.get("reasons") or [])
                     reasons.append("Loss-cap state unavailable (DB error); declining new entries this cycle.")

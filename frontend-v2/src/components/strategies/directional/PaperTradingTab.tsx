@@ -43,6 +43,10 @@ type OpenPos = {
   unrealized_pnl?: number;
   opened_at?: string;
   updated_at?: string;
+  mark_time?: string;
+  pending_exit_reason?: string;
+  fill_model_version?: string;
+  entry_fill?: { spread_vol_points?: number; total_cost?: number };
   policy_size_multiplier?: number;
 };
 
@@ -153,8 +157,10 @@ export default function PaperTradingTab({ symbol, paper }: { symbol?: string; pa
               { th: "Contract", render: (p: OpenPos) => `${p.option_type ?? ""} ${p.strike ?? ""} · ${p.expiry ?? ""}` },
               { th: "Regime", render: (p: OpenPos) => p.regime ?? "—" },
               { th: "Lots", render: (p: OpenPos) => p.quantity_lots ?? 0, align: "right" },
-              { th: "Entry → Mark", render: (p: OpenPos) => (<span className="font-mono">{formatNumber(p.entry_premium, 2)} → <LiveMarkCell symbol={legTapeSymbol(p)} fallback={p.latest_premium} fallbackAt={p.updated_at ?? p.opened_at} decimals={2} /></span>), align: "right" },
+              { th: "Entry → Mark", render: (p: OpenPos) => (<span className="font-mono">{formatNumber(p.entry_premium, 2)} → <LiveMarkCell symbol={legTapeSymbol(p)} fallback={p.latest_premium} fallbackAt={p.mark_time ?? p.opened_at} decimals={2} /></span>), align: "right" },
               { th: "Unrealized", render: (p: OpenPos) => formatSignedMoney(p.unrealized_pnl), align: "right", tone: (p: OpenPos) => tone(p.unrealized_pnl) },
+              { th: "Execution", render: (p: OpenPos) => <span title={p.entry_fill?.spread_vol_points != null ? `Estimated half-spread: ${p.entry_fill.spread_vol_points.toFixed(3)} vol points` : "No measured bid/ask spread"} className={p.pending_exit_reason ? "text-amber-300" : "text-text-muted"}>{p.pending_exit_reason ? `Pending ${p.pending_exit_reason}` : p.fill_model_version ? "Adverse estimate" : "Legacy LTP"}</span> },
+              { th: "Mark observed", render: (p: OpenPos) => formatIST(p.mark_time), align: "right" },
               { th: "Size mult", render: (p: OpenPos) => p.policy_size_multiplier != null ? `${p.policy_size_multiplier.toFixed(2)}×` : "—", align: "right" },
               { th: "Opened", render: (p: OpenPos) => formatIST(p.opened_at), align: "right" },
             ]}
@@ -169,6 +175,7 @@ export default function PaperTradingTab({ symbol, paper }: { symbol?: string; pa
               { th: "Symbol", render: (p: ClosedPos) => p.underlying },
               { th: "Contract", render: (p: ClosedPos) => `${p.option_type ?? ""} ${p.strike ?? ""}` },
               { th: "Entry → Exit", render: (p: ClosedPos) => `${formatNumber(p.entry_premium, 2)} → ${formatNumber(p.exit_premium, 2)}`, align: "right" },
+              { th: "Fill model", render: (p: ClosedPos) => p.fill_model_version ? "Adverse estimate v2" : "Legacy LTP" },
               { th: "Realized", render: (p: ClosedPos) => formatSignedMoney(p.realized_pnl), align: "right", tone: (p: ClosedPos) => tone(p.realized_pnl) },
               { th: "R-multiple", render: (p: ClosedPos) => p.policy_r_multiple != null ? `${p.policy_r_multiple >= 0 ? "+" : ""}${p.policy_r_multiple.toFixed(2)}R` : "—", align: "right", tone: (p: ClosedPos) => tone(p.policy_r_multiple) },
               { th: "Reason", render: (p: ClosedPos) => p.close_reason ?? "—" },

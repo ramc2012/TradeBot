@@ -269,7 +269,7 @@ def _directional_signal():
     )
 
 
-def test_directional_loss_caps_bypassed_when_flag_true(monkeypatch) -> None:
+def test_directional_paper_loss_caps_enforced_despite_global_flag(monkeypatch) -> None:
     engine, risk_cfg = _directional_engine()
     equity = 1_000_000.0
     daily_breach = -(equity * float(risk_cfg["risk_pct"]) * float(risk_cfg["daily_loss_cap_r"])) - 1.0
@@ -284,9 +284,9 @@ def test_directional_loss_caps_bypassed_when_flag_true(monkeypatch) -> None:
         daily_realized=daily_breach,
         weekly_realized=weekly_breach,
     )
-    assert decision.approved is True
+    assert decision.approved is False
     assert decision.quantity_lots >= 1
-    assert decision.reasons == []
+    assert any("Daily loss cap" in reason for reason in decision.reasons)
 
     monkeypatch.setattr(settings, "SIGNAL_VALIDATION_UNCAPPED", False)
     blocked = engine.approve(

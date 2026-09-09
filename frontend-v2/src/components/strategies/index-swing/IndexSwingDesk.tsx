@@ -499,7 +499,7 @@ export default function IndexSwingDesk() {
                     <th className="py-1.5 text-right font-medium">Mark</th>
                     <th className="py-1.5 text-right font-medium">Stop</th>
                     <th className="py-1.5 text-right font-medium">Target</th>
-                    <th className="py-1.5 text-right font-medium">Δ / MVΔ</th>
+                    <th className="py-1.5 text-right font-medium">Δ / skew proxy</th>
                     <th className="py-1.5 text-right font-medium">P&amp;L</th>
                     <th className="py-1.5 text-left font-medium">Exit</th>
                   </tr>

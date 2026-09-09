@@ -49,6 +49,13 @@ class DirectionalOptionsRiskEngine:
         daily_realized: float = 0.0,
         weekly_realized: float = 0.0,
     ) -> RiskDecision:
+        inputs = (equity, size_multiplier, candidate.option_price, candidate.lot_size,
+                  daily_realized, weekly_realized, self.config["risk_pct"], self.config["planned_stop_pct"])
+        if (not all(math.isfinite(float(v)) for v in inputs)
+                or min(equity, size_multiplier, candidate.option_price, candidate.lot_size) <= 0
+                or int(candidate.lot_size) != candidate.lot_size):
+            return RiskDecision(False, 0, 0, 0.0, 0.0, 0.0, None,
+                                ["Invalid funding, premium, multiplier or lot size."])
         risk_pct = float(self.config["risk_pct"])
         # Unconditioned per-trade risk unit — the loss caps below stay
         # denominated in THIS so "R-multiples of typical trade risk" doesn't
@@ -120,11 +127,9 @@ class DirectionalOptionsRiskEngine:
         # multiplier or the day's IV state.
         daily_cap_R = float(self.config.get("daily_loss_cap_r", 4.0))
         weekly_cap_R = float(self.config.get("weekly_loss_cap_r", 10.0))
-        # OWNER DIRECTIVE 2026-07-17 (signal validation, paper-only): skip
-        # the daily/weekly loss-cap entry blocks while validating signals.
-        # Sizing math, policy act/skip and the RAG gate are untouched; set
-        # SIGNAL_VALIDATION_UNCAPPED=False to restore the caps.
-        if not settings.SIGNAL_VALIDATION_UNCAPPED:
+        # Funded paper limits override the global research-validation flag.
+        # Confidence and regime remain features rather than admission gates.
+        if self.config.get("enforce_paper_loss_limits", False) or not settings.SIGNAL_VALIDATION_UNCAPPED:
             if daily_realized <= -(unit_risk_budget * daily_cap_R):
                 reasons.append(
                     f"Daily loss cap breached (realized {daily_realized:.0f} ≤ "
@@ -146,7 +151,8 @@ class DirectionalOptionsRiskEngine:
             quantity_lots=max(qty_lots, 0),
             quantity_units=max(qty_lots, 0) * candidate.lot_size,
             premium_at_risk=round(max(qty_lots, 0) * lot_premium, 2),
-            max_loss=round(max(qty_lots, 0) * lot_risk, 2),
+            max_loss=round(max(qty_lots, 0) * lot_premium, 2),
+            planned_stop_loss=round(max(qty_lots, 0) * lot_risk, 2),
             risk_budget=round(risk_budget, 2),
             premium_cap=round(premium_cap, 2) if premium_cap is not None else None,
             reasons=reasons,

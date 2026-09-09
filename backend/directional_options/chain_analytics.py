@@ -27,6 +27,8 @@ filling with a sentinel value and letting the model learn the
 from __future__ import annotations
 
 import asyncio
+import math
+from datetime import datetime, timezone
 from dataclasses import dataclass
 from typing import Any, Optional
 
@@ -390,15 +392,15 @@ def _as_dict(payload: ChainAnalyticsPayload) -> dict[str, Any]:
     }
 
 
-async def chain_strike_mark(
+async def chain_strike_quote(
     underlying: str,
     expiry: str,
     strike: float,
     option_type: str,
     *,
     timeout: float = 1.0,
-) -> Optional[float]:
-    """Latest LTP for a single (strike, option_type) from the cached chain.
+) -> Optional[dict[str, Any]]:
+    """Timestamped observed LTP for a single (strike, option_type) from the cached chain.
 
     Used to live-mark held option positions whose specific contract isn't on
     the WS premium feed (so their stored mark freezes at entry). The chain
@@ -424,6 +426,15 @@ async def chain_strike_mark(
         or (cached.get("data_quality") or {}).get("execution_ready") is False
     ):
         return None
+    # A fresh Redis write is not evidence of a fresh exchange observation.
+    quality = cached.get("data_quality") or {}
+    observed = quality.get("observed_at") or (cached.get("provenance") or {}).get("observed_at")
+    try:
+        stamp = datetime.fromisoformat(str(observed).replace("Z", "+00:00"))
+        if stamp.tzinfo is None or not 0 <= (datetime.now(timezone.utc) - stamp).total_seconds() <= 60:
+            return None
+    except (TypeError, ValueError):
+        return None
     want = str(option_type or "").upper()
     for entry in cached.get("entries") or []:
         try:
@@ -432,10 +443,19 @@ async def chain_strike_mark(
                 and abs(float(entry.get("strike") or 0.0) - float(strike)) < 0.01
             ):
                 ltp = entry.get("ltp")
-                return float(ltp) if ltp is not None else None
+                if ltp is None or not math.isfinite(float(ltp)) or float(ltp) < 0:
+                    return None
+                return {"premium": float(ltp), "mark_time": stamp.isoformat(),
+                        "price_source": "chain_cache_observed", "bid": entry.get("bid"), "ask": entry.get("ask")}
         except (TypeError, ValueError):
             continue
     return None
+
+
+async def chain_strike_mark(underlying: str, expiry: str, strike: float, option_type: str,
+                            *, timeout: float = 1.0) -> Optional[float]:
+    quote = await chain_strike_quote(underlying, expiry, strike, option_type, timeout=timeout)
+    return quote["premium"] if quote else None
 
 
 async def fetch_chain_analytics(

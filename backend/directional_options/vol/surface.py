@@ -22,7 +22,8 @@ both of them poison a fit silently:
 from __future__ import annotations
 
 import math
-from dataclasses import dataclass, field
+import asyncio
+from dataclasses import asdict, dataclass, field
 from datetime import date, datetime, time, timedelta, timezone
 from typing import Any, Iterable, Sequence
 
@@ -38,7 +39,7 @@ from directional_options.vol.blackscholes import (
     forward_from_parity,
     implied_vol,
 )
-from directional_options.vol.svi import SVIFit, calendar_arbitrage, fit_svi_slice
+from directional_options.vol.svi import SVIParams, SVIFit, calendar_arbitrage, fit_svi_slice
 
 # The three index underlyings this substrate is scoped to.  SENSEX rows are
 # stored with market='NSE' in this database despite being a BSE product; the
@@ -290,7 +291,7 @@ def _atm_pair_forward(
     return None, None, "parity produced a non-positive forward"
 
 
-def build_slice_from_rows(
+def _build_slice_from_rows_uncached(
     underlying: str,
     ts: datetime,
     expiry: date,
@@ -410,6 +411,31 @@ def build_slice_from_rows(
     return sl
 
 
+def build_slice_from_rows(underlying: str, ts: datetime, expiry: date,
+                          rows: Sequence[dict[str, Any]], *, r: float = DEFAULT_RISK_FREE,
+                          tick_size: float = DEFAULT_TICK_SIZE, min_vega_ticks: float = 1.0,
+                          max_abs_k: float = MAX_ABS_LOG_MONEYNESS) -> SurfaceSlice:
+    """One inversion/fit per input across builder and paper engine processes.
+
+    Cache the raw slice before consumer-specific age/calendar admission.
+    Rehydrate an independent dataclass so quarantine decisions cannot mutate
+    another lane's view. Redis stores JSON, never executable pickles.
+    """
+    from mp_core.cache import cached_json
+    inputs = {"underlying": underlying, "ts": ts, "expiry": expiry, "rows": list(rows),
+              "r": r, "tick_size": tick_size, "min_vega_ticks": min_vega_ticks, "max_abs_k": max_abs_k}
+    raw = cached_json("index-vol-slice-v2", inputs, lambda: asdict(_build_slice_from_rows_uncached(
+        underlying, ts, expiry, rows, r=r, tick_size=tick_size, min_vega_ticks=min_vega_ticks, max_abs_k=max_abs_k)))
+    raw["ts"] = datetime.fromisoformat(raw["ts"])
+    raw["expiry"] = date.fromisoformat(raw["expiry"])
+    raw["quotes"] = [SliceQuote(**q) for q in raw["quotes"]]
+    if raw["fit"]:
+        fit = raw["fit"]
+        fit["params"] = SVIParams(**fit["params"]) if fit["params"] else None
+        raw["fit"] = SVIFit(**fit)
+    return SurfaceSlice(**raw)
+
+
 def build_snapshot_from_rows(
     underlying: str,
     ts: datetime,
@@ -495,7 +521,7 @@ async def build_surface_snapshot(
         )
 
     rows = await load_chain_bar(symbol, ts, interval=interval)
-    return build_snapshot_from_rows(symbol, ts, rows, r=r, max_age_minutes=max_age_minutes)
+    return await asyncio.to_thread(build_snapshot_from_rows, symbol, ts, rows, r=r, max_age_minutes=max_age_minutes)
 
 
 def _as_int(value: Any) -> int | None:

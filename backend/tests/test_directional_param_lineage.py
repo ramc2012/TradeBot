@@ -267,7 +267,7 @@ class TestPolicyRewardDenominator:
             return None
 
         async def _summary(open_positions, closed_positions):
-            return {"open_positions": len(open_positions), "closed_positions": len(closed_positions)}
+            return {"open_positions": len(open_positions), "closed_positions": len(closed_positions), "available_capital": 3_000_000}
 
         async def _noop(*_args, **_kwargs):
             return None
@@ -275,6 +275,9 @@ class TestPolicyRewardDenominator:
         monkeypatch.setattr(store, "_load_positions", _load_positions)
         monkeypatch.setattr(store, "_save_positions", _save_positions)
         monkeypatch.setattr(store, "_append_journal", _append_journal)
+        async def _windows():
+            return 0.0, 0.0
+        monkeypatch.setattr(store, "realized_pnl_windows", _windows)
         monkeypatch.setattr(store, "_summary", _summary)
         monkeypatch.setattr("directional_options.paper.paper_trade_recorder.record_event", _noop)
 

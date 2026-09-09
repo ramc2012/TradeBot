@@ -29,6 +29,7 @@ from __future__ import annotations
 
 import math
 from dataclasses import dataclass, field
+from datetime import date, datetime
 from typing import Any, Literal, Sequence
 
 Intent = Literal["entry", "exit"]
@@ -73,6 +74,20 @@ class FeeSchedule:
             "gst": gst,
             "total": total,
         }
+
+
+def option_fee_schedule(as_of: date | datetime, underlying: str) -> FeeSchedule:
+    """Date/exchange-aware schedule for new paper fills (not legacy rewrites).
+
+    NSE FATAX73524: option-sale STT 0.15% from 2026-04-01, 0.10%
+    from 2024-10-01. Earlier history is outside this schedule's coverage.
+    BSE notice 20240927: SENSEX/Bankex transaction charge 3250/crore.
+    """
+    day = as_of.date() if isinstance(as_of, datetime) else as_of
+    if day < date(2024, 10, 1):
+        raise ValueError("Option fee schedule unavailable before October 2024")
+    return FeeSchedule(stt_sell_rate=0.0015 if day >= date(2026, 4, 1) else 0.001,
+                       exchange_txn_rate=0.000325 if underlying.upper() in {"SENSEX", "BANKEX"} else 0.0003503)
 
 
 @dataclass(frozen=True)
@@ -270,7 +285,14 @@ def estimate_fill(
     impact = cost_model.impact(qty, adv, ref, sigma)
 
     adverse = half_spread + lag + impact
-    fill = ref + adverse if side == "buy" else max(ref - adverse, cost_model.tick_size)
+    # A worthless sell cannot manufacture a tick of proceeds. Round adverse
+    # fills to the exchange tick, preserving zero and never improving the price.
+    tick = cost_model.tick_size
+    if not math.isfinite(tick) or tick <= 0:
+        raise ValueError("Positive tick size required")
+    fill = (math.ceil((ref+adverse)/tick-1e-10)*tick if side == "buy"
+            else max(0.0, math.floor((ref-adverse)/tick+1e-10)*tick))
+    fill = round(fill, 8)
 
     charges = cost_model.fees.charges(fill, qty, side)
     # Half-spread expressed in VOL POINTS: one vol point is a 0.01 change in

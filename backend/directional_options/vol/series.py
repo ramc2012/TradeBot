@@ -375,23 +375,27 @@ def term_slope(tenors: Sequence[CMTenor], near_days: int = 7, far_days: int = 30
     return b - a
 
 
-def minimum_variance_delta(
+def sticky_moneyness_delta(
     bs_delta: float,
     vega: float,
     dsigma_dk: float,
     spot: float,
 ) -> float | None:
-    """MV delta = BS delta + vega * d(sigma)/dS.
+    """Skew-adjusted delta under a sticky log-moneyness smile assumption.
 
-    Because the smile has slope, vol moves when spot moves, so the Black-Scholes
-    delta is systematically wrong as a hedge ratio and as an exit trigger.  With
-    k = ln(K/F) and F proportional to S, d(sigma)/dS = -(d(sigma)/dk) / S.
-
-    `vega` must be per 1.00 of sigma, matching `OptionGreeks.vega`.
+    This is a scenario derivative, NOT an empirically minimum-variance hedge.
+    The latter requires the conditional dynamics of IV given spot moves;
+    the cross-sectional smile slope alone does not identify those dynamics.
+    Vega is per 1.00 sigma; d(sigma)/dS = -dsigma_dk / spot.
     """
     if spot is None or spot <= 0 or vega is None or dsigma_dk is None:
         return None
     return float(bs_delta + vega * (-dsigma_dk / spot))
+
+
+# Compatibility for historical research imports. New callers and displays
+# must use the explicit scenario label; legacy DB columns keep their names.
+minimum_variance_delta = sticky_moneyness_delta
 
 
 def front_coordinates(

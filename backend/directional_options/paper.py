@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import math
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Awaitable, Callable
@@ -11,6 +12,7 @@ from uuid import uuid4
 from loguru import logger
 from sqlalchemy import text
 
+from auction_intelligence.paper.locking import book_lock
 from analysis.instruments import normalize_index_contract_expiry
 from core.config import settings
 from core.paper_trade_recorder import paper_trade_recorder
@@ -51,6 +53,27 @@ def _parse_iso(value: Any) -> datetime | None:
         return ts
     except Exception:
         return None
+
+
+def _valid_premium(value: Any) -> bool:
+    try:
+        return value is not None and math.isfinite(float(value)) and float(value) >= 0
+    except (TypeError, ValueError):
+        return False
+
+
+def _current_mark(mark: dict[str, Any], as_of: str) -> bool:
+    if not _valid_premium(mark.get("premium")) or not mark.get("mark_time"):
+        return False
+    try:
+        stamp = datetime.fromisoformat(str(mark["mark_time"]).replace("Z", "+00:00"))
+        now = datetime.fromisoformat(as_of.replace("Z", "+00:00"))
+        if stamp.tzinfo is None or now.tzinfo is None:
+            return False
+        # Tiny scheduling/clock skew is tolerated; a future session never is.
+        return -5 <= (now-stamp).total_seconds() <= 120
+    except (ValueError, TypeError):
+        return False
 
 
 def _safe_float_or_none(value: Any) -> float | None:
@@ -792,7 +815,7 @@ class DirectionalOptionsPaperStore:
         risk = dict(snapshot.get("risk") or {})
         data_status = dict(snapshot.get("data_status") or {})
         rag_context = dict(snapshot.get("rag_context") or {})
-        recorded_at = str(snapshot.get("as_of") or _utc_now())
+        recorded_at = str(snapshot.get("decision_at") or snapshot.get("as_of") or _utc_now())
         execution_ready = bool(data_status.get("execution_ready"))
         actionable = bool(signal and contract and risk.get("approved") and execution_ready)
         latest_spot = float(snapshot.get("spot_price") or 0.0)
@@ -826,17 +849,17 @@ class DirectionalOptionsPaperStore:
         }
         await self._append_journal(journal_entry)
 
-        async with self._lock:
+        async with self._lock, book_lock(self.root / "paper_book.lock"):
             state = await self._load_positions()
             open_positions = list(state.get("open_positions", []))
             closed_positions = list(state.get("closed_positions", []))
             matching = [row for row in open_positions if _normalize_symbol(row.get("underlying")) == underlying]
-            marks = position_marks or {}
+            marks = {key: mark for key, mark in (position_marks or {}).items() if _current_mark(mark, recorded_at)}
 
             for row in matching:
                 mark = marks.get(str(row.get("position_id") or "")) or {}
-                if mark:
-                    latest_value = float(mark.get("premium") or row.get("latest_premium") or row.get("entry_premium") or 0.0)
+                if mark and _valid_premium(mark.get("premium")):
+                    latest_value = float(mark["premium"])
                     latest_spot_value = float(mark.get("spot") or row.get("latest_spot") or row.get("entry_spot") or 0.0)
                     row["updated_at"] = recorded_at
                     row["latest_premium"] = latest_value
@@ -854,19 +877,15 @@ class DirectionalOptionsPaperStore:
             # had no bounded exit. Runs before the actionable branches so a stop
             # still fires on a flat / no-signal / data-gap cycle (with no fresh
             # mark, latest≈entry → ret≈0 → no false trigger).
-            # PROTECTIVE EXITS ARE NEVER BLOCKED (2026-07-17): no fresh-mark
-            # precondition here. Without a fresh mark latest≈entry → ret≈0, so
-            # a stop/target cannot FALSE-fire off a carried premium — but the
-            # DTE/expiry pass below must still close the book even on a cycle
-            # with no mark (a fresh-mark guard here made near-expiry positions
-            # immortal whenever their contract fell off the feed).
+            # Trigger detection and fill eligibility are separate. A stale mark
+            # can leave an exit pending, but cannot create realized P&L.
             for row in list(matching):
                 entry_premium = float(row.get("entry_premium") or 0.0)
                 if entry_premium <= 0:
                     continue
-                latest_value = float(row.get("latest_premium") or entry_premium)
+                latest_value = float(row["latest_premium"]) if _valid_premium(row.get("latest_premium")) else entry_premium
                 ret = (latest_value - entry_premium) / entry_premium
-                reason = None
+                reason = row.get("pending_exit_reason")
                 if ret <= -float(self.planned_stop_pct):
                     reason = "stop_loss"
                 elif ret >= float(self.profit_target_pct):
@@ -887,6 +906,13 @@ class DirectionalOptionsPaperStore:
                     if expiry_reason:
                         reason = expiry_reason
                 if reason:
+                    exit_mark = marks.get(str(row.get("position_id") or "")) or {}
+                    if not _valid_premium(exit_mark.get("premium")):
+                        row["pending_exit_reason"] = reason
+                        row["pending_exit_since"] = row.get("pending_exit_since") or recorded_at
+                        continue
+                    row.pop("pending_exit_reason", None)
+                    row.pop("pending_exit_since", None)
                     self._close_position(
                         row,
                         mark=marks.get(str(row.get("position_id") or "")) or {},
@@ -929,7 +955,7 @@ class DirectionalOptionsPaperStore:
                         # waits for the next marked cycle instead of fabricating
                         # a fill from a carried-forward premium.
                         continue
-                    if row.get("positional"):
+                    if row.get("pending_exit_reason") or row.get("positional"):
                         # Positional book is HELD through flat signals — it exits
                         # only on the protective stop / target / DTE pass above,
                         # not on momentum going flat.
@@ -987,6 +1013,8 @@ class DirectionalOptionsPaperStore:
                     # fresh actionable=True for the same contract.
                     row["last_actionable_at"] = recorded_at
                     row["latest_premium"] = latest_mark
+                    row["mark_time"] = contract.get("quote_time") or row.get("mark_time")
+                    row["price_source"] = contract.get("price_source") or row.get("price_source")
                     row["latest_spot"] = latest_spot
                     row["confidence"] = float(signal.get("confidence") or row.get("confidence") or 0.0)
                     row["expected_move"] = float(signal.get("expected_move") or row.get("expected_move") or 0.0)
@@ -1110,6 +1138,53 @@ class DirectionalOptionsPaperStore:
                             }
                         )
                         return await self._summary(open_positions, closed_positions)
+                # Funding is checked against the durable whole book under the
+                # cross-process lock, after any exits in this decision commit.
+                # Never size from a stale UI proposal or spend unrealized gains.
+                await self._save_positions({"open_positions": open_positions, "closed_positions": closed_positions})
+                capital = await self._summary(open_positions, closed_positions)
+                units = int(risk.get("quantity_units") or 0)
+                lots = int(risk.get("quantity_lots") or 0)
+                cash = float(capital["available_capital"])
+                from directional_options.config import clone_default_config
+                limits = clone_default_config()["risk"]
+                try:
+                    daily, weekly = await self.realized_pnl_windows()
+                    unit = DIRECTIONAL_INITIAL_CAPITAL * float(limits["risk_pct"])
+                    loss_blocked = daily <= -unit*float(limits["daily_loss_cap_r"]) or weekly <= -unit*float(limits["weekly_loss_cap_r"])
+                except Exception:
+                    loss_blocked = True
+                if loss_blocked:
+                    await self._append_journal({**journal_entry, "approved": False,
+                        "status": "loss_limit_skip", "selection_reason": "Paper loss limit reached or ledger unavailable"})
+                    return capital
+                from paper_engine.costs import round_trip_charges
+                reserve = round_trip_charges(
+                    symbol=str(contract.get("trading_symbol") or underlying),
+                    instrument_type=str(contract.get("option_type") or "CE"),
+                    entry_price=latest_mark, exit_price=latest_mark,
+                    qty=max(units, 0), entry_action="BUY",
+                ) if _valid_premium(latest_mark) and latest_mark > 0 and units > 0 else 0.0
+                if (not math.isfinite(latest_mark) or latest_mark <= 0 or units <= 0
+                        or lots <= 0 or units % lots != 0
+                        or (contract.get("lot_size") and units != lots * int(contract["lot_size"]))
+                        or not math.isfinite(cash) or latest_mark * units + reserve > cash):
+                    await self._append_journal({**journal_entry, "approved": False,
+                        "status": "funding_skip", "selection_reason": "Paper cash or whole-lot quantity unavailable",
+                        "available_capital": cash, "required_cash": latest_mark * units + reserve})
+                    return capital
+                from directional_options.index_paper.costs import CostModel, estimate_fill, option_fee_schedule
+                cost_inputs = {"volume": contract.get("volume"), "oi": contract.get("oi"),
+                               "sigma": contract.get("implied_vol"),
+                               "log_moneyness": math.log(float(contract["strike"])/latest_spot) if latest_spot > 0 and float(contract.get("strike") or 0) > 0 else None,
+                               "vega_per_vol_point": float(contract.get("vega") or 0)*0.01}
+                tick = float(contract.get("tick_size") or 0.05)
+                model = CostModel(tick_size=tick, fees=option_fee_schedule(_parse_iso(recorded_at) or datetime.now(timezone.utc), underlying))
+                fill = estimate_fill(latest_mark, units, "buy", "entry", model=model, **cost_inputs)
+                if fill.fill_price * units + fill.charges["total"] + reserve > cash:
+                    await self._append_journal({**journal_entry, "approved": False, "status": "funding_skip",
+                        "selection_reason": "Estimated adverse fill and charges exceed paper cash"})
+                    return capital
                 new_position_id = uuid4().hex
                 try:
                     await paper_trade_recorder.record_event(
@@ -1121,7 +1196,7 @@ class DirectionalOptionsPaperStore:
                         strike=float(contract.get("strike") or 0.0),
                         expiry=str(contract.get("expiry") or ""),
                         quantity=int(risk.get("quantity_units") or 0),
-                        entry_premium=latest_mark,
+                        entry_premium=fill.fill_price,
                         latest_premium=latest_mark,
                         position_id=new_position_id,
                         reason=str(snapshot.get("selection_reason") or ""),
@@ -1189,13 +1264,18 @@ class DirectionalOptionsPaperStore:
                         "strike": float(contract.get("strike") or 0.0),
                         "quantity_lots": int(risk.get("quantity_lots") or 0),
                         "quantity_units": int(risk.get("quantity_units") or 0),
-                        "entry_premium": latest_mark,
+                        "entry_premium": fill.fill_price,
+                        "entry_fill": fill.as_dict(),
+                        "fill_model_version": "shared_cost_prior_v2",
+                        "cost_inputs": cost_inputs,
+                        "tick_size": tick,
+                        "signal_as_of": snapshot.get("as_of"),
                         "latest_premium": latest_mark,
                         "exit_premium": None,
                         "entry_spot": latest_spot,
                         "latest_spot": latest_spot,
                         "exit_spot": None,
-                        "unrealized_pnl": 0.0,
+                        "unrealized_pnl": round((latest_mark-fill.fill_price)*units, 2),
                         "realized_pnl": 0.0,
                         "expected_pnl": float(contract.get("expected_pnl") or 0.0),
                         "selection_reason": snapshot.get("selection_reason"),
@@ -1219,6 +1299,55 @@ class DirectionalOptionsPaperStore:
                 }
             )
             return await self._summary(open_positions, closed_positions)
+
+    async def refresh_held_marks(self, mark_resolver: Callable) -> dict[str, Any]:
+        """Manage the entire held book independently of scan selection/readiness."""
+        initial = await self._load_positions()
+        semaphore = asyncio.Semaphore(4)
+        async def resolve(row):
+            async with semaphore:
+                try:
+                    return str(row["position_id"]), await asyncio.wait_for(mark_resolver(dict(row)), 8)
+                except Exception:
+                    return str(row["position_id"]), None
+        quotes = dict(await asyncio.gather(*(resolve(r) for r in initial.get("open_positions", []))))
+        now = _utc_now()
+        marked = 0
+        closed = 0
+        async with self._lock, book_lock(self.root / "paper_book.lock"):
+            state = await self._load_positions()
+            opens = list(state.get("open_positions", []))
+            closes = list(state.get("closed_positions", []))
+            for row in list(opens):
+                quote = quotes.get(str(row["position_id"]))
+                if not quote or not _current_mark(quote, now):
+                    continue
+                # A delayed resolver must not overwrite a newer cycle's mark.
+                previous = _parse_iso(row.get("mark_time"))
+                observed = _parse_iso(quote.get("mark_time"))
+                if previous and observed and observed < previous:
+                    continue
+                premium = float(quote["premium"])
+                entry = float(row.get("entry_premium") or 0)
+                row.update(latest_premium=premium, updated_at=now,
+                           mark_time=quote.get("mark_time"), price_source=quote.get("price_source"),
+                           unrealized_pnl=round((premium-entry)*int(row.get("quantity_units") or 0), 2))
+                marked += 1
+                ret = (premium-entry)/entry if entry > 0 else 0
+                reason = row.get("pending_exit_reason")
+                if not reason and ret <= -self.planned_stop_pct:
+                    reason = "stop_loss"
+                elif not reason and ret >= self.profit_target_pct:
+                    reason = "profit_target"
+                if reason:
+                    self._close_position(row, mark=quote, close_time=now, close_reason=reason)
+                    opens.remove(row)
+                    closes.append(row)
+                    closed += 1
+            if marked:
+                await self._save_positions({"open_positions": opens, "closed_positions": closes})
+        return {"evaluated": len(quotes), "marked": marked, "closed": closed,
+                "unpriced": len(quotes)-marked, "as_of": now}
 
     # ── global expiry sweep ────────────────────────────────────────────────
     async def sweep_expiry_closures(
@@ -1290,14 +1419,14 @@ class DirectionalOptionsPaperStore:
                     sym=row.get("underlying"), pid=position_id, err=str(exc)[:160],
                 )
                 mark = None
-            if mark and _safe_float_or_none(mark.get("premium")):
+            if mark and _valid_premium(mark.get("premium")):
                 resolved[position_id] = dict(mark)
 
         # Pass 2 (locked): re-read the book and close, so a concurrent
         # sync_snapshot that already closed a row always wins.
         closures: list[dict[str, Any]] = []
         skipped: list[dict[str, Any]] = []
-        async with self._lock:
+        async with self._lock, book_lock(self.root / "paper_book.lock"):
             state = await self._load_positions()
             open_positions = list(state.get("open_positions") or [])
             closed_positions = list(state.get("closed_positions") or [])
@@ -1312,61 +1441,20 @@ class DirectionalOptionsPaperStore:
                 premium = _safe_float_or_none(mark.get("premium"))
                 observed_at = row.get("mark_time") or row.get("updated_at")
                 mark_time_exact = True
-                if premium is not None and premium > 0:
+                if premium is not None and _current_mark(mark, close_time):
                     quality = "live_quote"
                     exit_mark = dict(mark)
                     exit_source = str(mark.get("price_source") or "live_quote")
-                    # A resolver can return a real, current premium with NO
-                    # timestamp: that is exactly what the live option-chain
-                    # branch does (``chain_strike_mark`` reads a Redis entry
-                    # written with a 60s TTL, so a HIT is <=60s old by
-                    # construction, but the entry carries no per-strike
-                    # observation time). Falling back to the ROW's carried
-                    # ``mark_time`` there stamped a fresh <=60s fill with the
-                    # age of the abandoned mark — on the live book that was
-                    # ``quality=live_quote, stale_mark_exit=False,
-                    # exit_mark_age_seconds=597491`` (6.9 days) on the SAME
-                    # closure, i.e. the attribution fields contradicting each
-                    # other on the one lane this fix exists to make
-                    # attributable. The observation is the FETCH, so use the
-                    # close time and flag that it is bounded, not exact.
-                    resolved_at = mark.get("mark_time")
-                    observed_at = resolved_at or close_time
-                    mark_time_exact = resolved_at is not None
-                    # ...and the same for the row's OWN ``mark_time``, which
-                    # ``_close_position`` otherwise leaves at the abandoned
-                    # value (``mark.get("mark_time") or position.get(...)``),
-                    # so the closed row would advertise a week-old mark
-                    # alongside a freshly-fetched exit_premium.
+                    observed_at = mark["mark_time"]
+                    mark_time_exact = True
                     exit_mark["mark_time"] = observed_at
                 else:
-                    exit_mark = {}
-                    carried = _safe_float_or_none(row.get("latest_premium"))
-                    entry = _safe_float_or_none(row.get("entry_premium"))
-                    if carried is not None and carried > 0:
-                        quality = "stale_mark"
-                    elif entry is not None and entry > 0:
-                        quality = "entry_carry"
-                    else:
-                        # Nothing was EVER observed for this leg. Refuse to
-                        # fabricate a fill; leave it open and shout.
-                        logger.error(
-                            "[DirPaper] expiry sweep CANNOT price {sym} {ts} (pid={pid}) — "
-                            "no live quote and no observed premium; left OPEN.",
-                            sym=row.get("underlying"),
-                            ts=row.get("trading_symbol"),
-                            pid=position_id,
-                        )
-                        skipped.append({
-                            "position_id": position_id,
-                            "underlying": row.get("underlying"),
-                            "trading_symbol": row.get("trading_symbol"),
-                            "expiry": row.get("expiry"),
-                            "reason": reason,
-                            "skipped": "unpriceable",
-                        })
-                        continue
-                    exit_source = f"carried:{row.get('price_source') or 'unknown'}"
+                    row["pending_exit_reason"] = reason
+                    row["pending_exit_since"] = row.get("pending_exit_since") or close_time
+                    row["expiry_policy_detail"] = detail
+                    skipped.append({"position_id": position_id, "underlying": row.get("underlying"),
+                                    "reason": reason, "skipped": "awaiting_executable_mark"})
+                    continue
 
                 age_seconds = None
                 observed_dt = _parse_iso(observed_at)
@@ -1418,7 +1506,7 @@ class DirectionalOptionsPaperStore:
                     quality=quality, age=age_seconds,
                 )
 
-            if closures:
+            if closures or skipped:
                 await self._save_positions(
                     {
                         "last_synced_at": close_time,
@@ -1458,12 +1546,20 @@ class DirectionalOptionsPaperStore:
         close_time: str,
         close_reason: str,
     ) -> None:
-        latest_premium = float(
-            mark.get("premium")
-            or position.get("latest_premium")
-            or position.get("entry_premium")
-            or 0.0
-        )
+        if not _current_mark(mark, close_time):
+            raise ValueError("A paper exit requires a current timestamped nonnegative premium")
+        latest_premium = float(mark["premium"])
+        exit_fill = None
+        if position.get("fill_model_version") == "shared_cost_prior_v2":
+            from directional_options.index_paper.costs import CostModel, estimate_fill, option_fee_schedule
+            model = CostModel(tick_size=float(position.get("tick_size") or 0.05),
+                fees=option_fee_schedule(_parse_iso(close_time) or datetime.now(timezone.utc), str(position.get("underlying") or "")))
+            exit_fill = estimate_fill(latest_premium, int(position.get("quantity_units") or 0), "sell", "exit",
+                                     model=model, **dict(position.get("cost_inputs") or {}))
+            latest_premium = exit_fill.fill_price
+            position["exit_fill"] = exit_fill.as_dict()
+        position.pop("pending_exit_reason", None)
+        position.pop("pending_exit_since", None)
         latest_spot = float(
             mark.get("spot")
             or position.get("latest_spot")
@@ -1491,23 +1587,31 @@ class DirectionalOptionsPaperStore:
         # uses its own paper store (NOT PaperPortfolio), so the shared
         # portfolio.py cost wiring doesn't reach it — apply the same shared
         # paper_engine.costs model here. Directional is long-premium (BUY entry).
-        try:
-            from paper_engine.costs import round_trip_charges
-            txn_cost = round_trip_charges(
-                symbol=str(
-                    position.get("trading_symbol")
-                    or position.get("instrument_key")
-                    or position.get("underlying")
-                    or ""
-                ),
-                instrument_type=str(position.get("option_type") or "CE"),
-                entry_price=entry_premium,
-                exit_price=latest_premium,
-                qty=quantity,
-                entry_action="BUY",
-            )
-        except Exception:  # noqa: BLE001
-            txn_cost = 0.0
+        from paper_engine.costs import round_trip_charges
+        txn_cost = round_trip_charges(
+            symbol=str(
+                position.get("trading_symbol")
+                or position.get("instrument_key")
+                or position.get("underlying")
+                or ""
+            ),
+            instrument_type=str(position.get("option_type") or "CE"),
+            entry_price=entry_premium,
+            exit_price=latest_premium,
+            qty=quantity,
+            entry_action="BUY",
+        )
+        if exit_fill is None:
+            from directional_options.index_paper.costs import option_fee_schedule
+            close_dt = _parse_iso(close_time) or datetime.now(timezone.utc)
+            entry_dt = _parse_iso(position.get("opened_at")) or close_dt
+            if entry_dt.date() >= date(2024, 10, 1):
+                underlying = str(position.get("underlying") or "")
+                txn_cost = (option_fee_schedule(entry_dt, underlying).charges(entry_premium, quantity, "buy")["total"]
+                            + option_fee_schedule(close_dt, underlying).charges(latest_premium, quantity, "sell")["total"])
+        if exit_fill is not None:
+            # Gross already contains adverse fill prices: deduct charges once.
+            txn_cost = float((position.get("entry_fill") or {}).get("charges", {}).get("total", 0)) + exit_fill.charges["total"]
         realized = round(realized_gross - txn_cost, 2)
         position["realized_pnl"] = realized
         position["realized_pnl_gross"] = realized_gross
@@ -1601,11 +1705,13 @@ class DirectionalOptionsPaperStore:
         reserved_margin = round(
             sum(
                 float(p.get("entry_premium") or 0.0) * float(p.get("quantity_units") or 0)
+                + float((p.get("entry_fill") or {}).get("charges", {}).get("total", 0))
                 for p in open_positions
             ),
             2,
         )
-        total_equity = round(initial_capital + realized + unrealized, 2)
+        entry_costs = sum(float((p.get("entry_fill") or {}).get("charges", {}).get("total", 0)) for p in open_positions)
+        total_equity = round(initial_capital + realized + unrealized - entry_costs, 2)
         available_capital = round(initial_capital + realized - reserved_margin, 2)
         total_return_pct = round(
             ((total_equity - initial_capital) / initial_capital) * 100.0, 4
@@ -1673,6 +1779,12 @@ class DirectionalOptionsPaperStore:
             "realized_pnl": realized,
             "unrealized_pnl": unrealized,
             "total_pnl": round(realized + unrealized, 2),
+            "execution_mode": "paper",
+            "allow_live_orders": False,
+            "fill_model": "observed_ltp_with_shared_spread_impact_prior_and_dated_charges",
+            "liquidity_model": "no_queue_or_partial_fill_simulation",
+            "open_entry_charges": round(entry_costs, 2),
+            "pending_exits": sum(bool(p.get("pending_exit_reason")) for p in open_positions),
             "initial_capital": initial_capital,
             "available_capital": available_capital,
             "reserved_margin": reserved_margin,
@@ -1688,7 +1800,7 @@ class DirectionalOptionsPaperStore:
         """Archive current state and wipe positions+journal back to the
         funded baseline. Mirrors `archive_and_reset_paper_account` on S1/S2.
         Idempotent — a second call on an already-empty book is a no-op."""
-        async with self._lock:
+        async with self._lock, book_lock(self.root / "paper_book.lock"):
             stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
             archive_dir = self.root / "archive" / stamp
             archive_dir.mkdir(parents=True, exist_ok=True)

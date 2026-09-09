@@ -3,6 +3,8 @@ from __future__ import annotations
 import asyncio
 import json
 import math
+import os
+from uuid import uuid4
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
@@ -109,6 +111,32 @@ class OptionChainService:
             await asyncio.sleep(POLL_INTERVAL)
 
     async def _refresh(self, symbol: str, expiry: str):
+        """Coalesce core/worker/UI cold requests before broker I/O and analytics.
+
+        The shared-cache deployment fails closed if its lease store is down.
+        Offline test/research installs without shared Redis keep the local path.
+        """
+        if not os.environ.get("SHARED_MP_REDIS_URL"):
+            return await self._refresh_once(symbol, expiry)
+        redis = await get_redis()
+        key = f"oc:refresh:{symbol}:{expiry}"
+        token = uuid4().hex
+        if not await redis.set(key, token, nx=True, ex=45):
+            return
+        try:
+            cached = await self.get_cached(symbol, expiry)
+            if cached and cached.get("timestamp"):
+                stamp = datetime.fromisoformat(cached["timestamp"].replace("Z", "+00:00"))
+                if stamp.tzinfo and 0 <= (datetime.now(timezone.utc) - stamp).total_seconds() < 25:
+                    return
+            await asyncio.wait_for(self._refresh_once(symbol, expiry), timeout=30)
+        finally:
+            await redis.eval(
+                "if redis.call('get',KEYS[1]) == ARGV[1] then return redis.call('del',KEYS[1]) else return 0 end",
+                1, key, token,
+            )
+
+    async def _refresh_once(self, symbol: str, expiry: str):
         if not self._broker:
             return
         try:

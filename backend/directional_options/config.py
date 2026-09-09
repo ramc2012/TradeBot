@@ -173,6 +173,7 @@ DEFAULT_CONFIG: dict[str, Any] = {
         # Base sizing — the RL policy multiplies these by a learned size
         # multiplier in {0.5×, 1.0×, 1.5×, 2.0×} per trade.
         "risk_pct": 0.005,
+        "enforce_paper_loss_limits": True,
         # NO premium cap — user directive: "without any limit on size".
         # The risk_pct × size_multiplier path is the only sizing gate.
         # Capital safety still comes from one-position-per-symbol and the

@@ -14,6 +14,17 @@ from directional_options.features import timeframe_minutes
 from directional_options.schemas import ContractCandidate, ContractMeta, DirectionalSignal, RegimeSnapshot
 
 
+def calendar_days_to_expiry(expiry: date, timestamp: pd.Timestamp) -> float:
+    """Exchange-close decay clock; never give an expired option positive time.
+
+    Historical naive bars in this store are IST. Live timestamps are aware.
+    """
+    stamp = pd.Timestamp(timestamp)
+    stamp = stamp.tz_localize("Asia/Kolkata") if stamp.tzinfo is None else stamp.tz_convert("Asia/Kolkata")
+    close = pd.Timestamp(f"{expiry.isoformat()} 15:30", tz="Asia/Kolkata")
+    return (close-stamp).total_seconds()/86400.0
+
+
 def _norm_cdf(value: float) -> float:
     return 0.5 * (1.0 + math.erf(value / math.sqrt(2.0)))
 
@@ -466,8 +477,10 @@ class OptionSelectionEngine:
 
         expiry_date = self._contract_expiry_date(meta)
         expiry_kind = self._contract_expiry_kind(meta)
-        days_to_expiry = max((expiry_date - timestamp.date()).days + (1.0 - float(timestamp.hour / 24.0)), 0.25)
-        time_to_expiry_years = max(days_to_expiry / 365.0, 1.0 / 3650.0)
+        days_to_expiry = calendar_days_to_expiry(expiry_date, timestamp)
+        if days_to_expiry <= 0:
+            return None
+        time_to_expiry_years = days_to_expiry / 365.0
         delta, gamma, theta, vega = _black_scholes_greeks(
             spot=spot_price,
             strike=meta.strike,
@@ -650,8 +663,10 @@ class OptionSelectionEngine:
 
         expiry_date = self._snapshot_expiry_date(snapshot)
         expiry_kind = self._snapshot_expiry_kind(snapshot)
-        days_to_expiry = max((expiry_date - timestamp.date()).days + (1.0 - float(timestamp.hour / 24.0)), 0.25)
-        time_to_expiry_years = max(days_to_expiry / 365.0, 1.0 / 3650.0)
+        days_to_expiry = calendar_days_to_expiry(expiry_date, timestamp)
+        if days_to_expiry <= 0:
+            return None
+        time_to_expiry_years = days_to_expiry / 365.0
         sigma = min(
             max(
                 _iv_as_fraction(float(snapshot.get("iv") or default_sigma or 0.0)),

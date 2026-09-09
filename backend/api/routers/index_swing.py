@@ -344,7 +344,8 @@ async def positions(
            LIMIT :limit""",
         {"status": status, "limit": limit},
     )
-    return {"status": status, "count": len(rows), "positions": rows}
+    return {"status": status, "count": len(rows), "positions": rows,
+            "entry_mv_delta_model": "sticky_log_moneyness_proxy_not_minimum_variance"}
 
 
 @router.get("/attribution")

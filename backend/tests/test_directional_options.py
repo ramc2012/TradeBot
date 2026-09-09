@@ -57,6 +57,7 @@ def _isolate_directional_paper_store(
         return {
             "open_positions": len(open_positions),
             "closed_positions": len(closed_positions),
+            "available_capital": 3_000_000 + realized - sum(p["entry_premium"]*p["quantity_units"] for p in open_positions),
             "realized_pnl": round(realized, 2),
             "unrealized_pnl": round(unrealized, 2),
         }
@@ -68,6 +69,9 @@ def _isolate_directional_paper_store(
     monkeypatch.setattr(store, "_save_positions", _save_positions)
     monkeypatch.setattr(store, "_load_journal", _load_journal)
     monkeypatch.setattr(store, "_append_journal", _append_journal)
+    async def _loss_windows():
+        return (0.0, 0.0)
+    monkeypatch.setattr(store, "realized_pnl_windows", _loss_windows)
     monkeypatch.setattr(store, "_summary", _summary)
     monkeypatch.setattr("directional_options.paper.paper_trade_recorder.record_event", _noop)
     monkeypatch.setattr("directional_options.chain_analytics.ensure_chain_tracked", _noop)
@@ -885,7 +889,7 @@ async def test_directional_options_paper_store_tracks_open_and_closed_positions(
 
     assert closed_summary["open_positions"] == 0
     assert closed_summary["closed_positions"] == 1
-    assert closed_positions["closed_positions"][0]["realized_pnl_gross"] == pytest.approx((146.0 - 132.0) * 75)
+    assert closed_positions["closed_positions"][0]["realized_pnl_gross"] == pytest.approx(810.0)  # two adverse 1.60-per-unit fills
     assert closed_positions["closed_positions"][0]["realized_pnl"] < closed_positions["closed_positions"][0]["realized_pnl_gross"]
 
 
@@ -996,7 +1000,7 @@ async def test_directional_options_live_snapshot_uses_local_market_intelligence(
             {
                 "time": t2.isoformat(),
                 "underlying": "NIFTY",
-                "expiry": "2026-04-30",
+                "expiry": (t2 + pd.Timedelta(days=15)).date().isoformat(),
                 "expiry_kind": "weekly",
                 "strike": 22500.0,
                 "option_type": "CE",
