@@ -180,6 +180,7 @@ LIVE_STEPS: list[tuple[str, list[str]]] = [
     # Independent, durable views for all three named strategies. Swing marks
     # use exact contracts; the UI overlays the 150 ms quote bus between bars.
     ("strategy journals", ["journal/strategy_lanes.py", "--sync", "--track-swing"]),
+    ("observation followup", ["journal/longitudinal.py", "--write"]),
 ]
 # EOD is now reserved for its actual definition: an input the EXCHANGE
 # publishes once a day, or a rollup that by construction needs the finished
@@ -222,6 +223,7 @@ EOD_STEPS: list[tuple[str, list[str]]] = [
     # positions the next morning's first live pass will settle.
     ("MP edges paper", ["paper/mp_edges.py", "--run"]),
     ("strategy journals", ["journal/strategy_lanes.py", "--sync", "--track-swing"]),
+    ("observation followup", ["journal/longitudinal.py", "--write"]),
 ]
 
 # Exact-contract watchlist marks are inexpensive and need not wait for the

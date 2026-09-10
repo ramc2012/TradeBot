@@ -102,6 +102,7 @@ import {
 } from "@/lib/api";
 import { useQuote, useQuotesConnection } from "@/hooks/useQuoteStore";
 
+import ObservationFollowup from "./ObservationFollowup";
 import { DecisionFlowTab } from "./DecisionFlow";
 import { MarketTab } from "./MarketTab";
 import { ResearchTab } from "./ResearchTab";
@@ -261,6 +262,7 @@ export default function VanguardDesk() {
         { key: "decision", label: "Decision flow", icon: Filter },
         { key: "model", label: "Model", icon: BrainCircuit },
         { key: "watchlist", label: "Watchlist", icon: Activity },
+        { key: "followup", label: "Follow-through", icon: Activity },
         { key: "sentiment", label: "Sentiment", icon: Gauge },
         { key: "oiFutures", label: "Futures OI", icon: Layers },
         { key: "mp", label: "MP structure", icon: Layers },
@@ -297,6 +299,7 @@ export default function VanguardDesk() {
         />
       )}
       {activeTab === "model" && <ModelTab data={model.data} />}
+      {activeTab === "followup" && <ObservationFollowup />}
       {activeTab === "watchlist" && <WatchlistTab data={watchlist.data} strategies={strategyJournals.data}
         selectedSession={watchlistSession} onSession={setWatchlistSession}
         onBtst={() => setActiveTab("mp")} />}

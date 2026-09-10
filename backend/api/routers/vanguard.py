@@ -1752,3 +1752,35 @@ async def oi_futures_symbol(
         {"symbol": symbol.upper(), "lim": sessions})
     rows.reverse()
     return {"symbol": symbol.upper(), "rows": rows, "sessions": len(rows)}
+
+
+@router.get('/observation-followup')
+async def observation_followup(lane: str = Query('swing', pattern='^(swing|next_session)$')) -> dict[str, Any]:
+    """Persisted multi-session evidence. Never advances the writer from a UI read."""
+    exists = await _fetch_all("SELECT to_regclass('public.vanguard_observation_followup') AS name")
+    if not exists or not exists[0]['name']:
+        return {'items': [], 'quality': [], 'status': 'not_initialized', 'paper_only': True}
+    rows = await _fetch_all('''SELECT payload,updated_at FROM vanguard_observation_followup
+                              WHERE lane=:lane ORDER BY source_session DESC,rank''', {'lane': lane})
+    items = [r['payload'] for r in rows]
+    from statistics import mean, median
+    quality = []
+    for model in sorted({r['model_version'] for r in items}):
+        group = [r for r in items if r['model_version']==model]
+        for h in (1,2,3,5,10):
+            pairs = [(r, (r.get('horizons') or {}).get(str(h))) for r in group if r.get('entry_on_time') is not False]
+            valid = [(r,p) for r,p in pairs if p is not None and p.get('return') is not None]
+            vals = [p['return'] for _,p in valid]
+            directions = [p['direction_return'] for _,p in valid if p.get('direction_return') is not None]
+            days = len({r['source_session'] for r,_ in valid})
+            quality.append({'model_version': model, 'horizon': h, 'n':len(valid), 'sessions':days,
+                            'mean_return':mean(vals) if vals else None, 'median_return':median(vals) if vals else None,
+                            'positive_fraction':mean(v>0 for v in vals) if vals else None,
+                            'direction_n':len(directions),
+                            'direction_hit_rate':mean(v>0 for v in directions) if directions else None,
+                            'qualified_n':sum(bool(r.get('qualified')) for r,_ in valid),
+                            'assessment':'descriptive_only_requires_frozen_chronological_holdout'})
+    return {'items':items,'quality':quality,'updated_at':max((r['updated_at'] for r in rows),default=None),
+            'status':'ok','paper_only':True,'units':'fraction',
+            'horizon_basis':'Trading sessions after the entry session; session 0 is entry day. At least the 15:15 IST observation required.',
+            'validation':'No retraining or promotion. Models remain separate; repeated symbols are correlated. Horizon selection requires a frozen, untouched chronological holdout.'}

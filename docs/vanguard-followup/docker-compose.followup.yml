@@ -1,0 +1,7 @@
+# Layer after docs/directional-release/docker-compose.directional.yml.
+# Canonical credentials and runtime mounts are inherited unchanged.
+services:
+  vanguard-cycle:
+    volumes:
+      - /Users/ramachandran/CLAUDE PROJECTS/Nomad Curie/TradeBot/.claude/worktrees/directional-paper/vanguard:/vanguard
+      - /Users/ramachandran/CLAUDE PROJECTS/Nomad Curie/TradeBot/.claude/worktrees/directional-paper/backend:/app
