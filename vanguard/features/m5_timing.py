@@ -499,11 +499,20 @@ def compute_timing(connection, symbols: list[str], start: date, end: date,
 
     symbol_to_sector20, sector_rs = load_sector_lookup(connection, symbols)
 
+    # The buffer exists only for the trailing RVOL/range/ATR windows computed
+    # above. Each session's developing walk reads only that session's bars, and
+    # the classify/score/sector legs are per-row, so everything below runs on the
+    # output window alone. Run over the whole 60-day buffer (122k rows) and
+    # filtered at the end, this was ~105s of an ~118s live pass (profiled
+    # 2026-09-15: 86s in the row-wise sector_direction apply, 20s in the walk).
+    df = df[(df["session_date"] >= start) & (df["session_date"] < end)]
     developed = []
     for (_symbol, _session_date), group in df.groupby(["symbol", "session_date"], sort=True):
         developed.append(compute_session_developing(group.sort_values("time")))
     out = pd.concat(developed, ignore_index=True) if developed else pd.DataFrame()
     if out.empty:
+        if grid_filter:
+            out.attrs["grid_filter"] = grid_filter
         return out
 
     out["sector20"] = out["symbol"].map(symbol_to_sector20)
