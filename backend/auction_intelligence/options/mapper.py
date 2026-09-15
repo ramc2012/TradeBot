@@ -491,6 +491,17 @@ class OptionStrategyMapper:
             )
 
         if not entries:
+            ages = []
+            for side_key in ("ce", "pe"):
+                try:
+                    stamp = datetime.fromisoformat(str((row.get(side_key) or {}).get("as_of")).replace("Z", "+00:00"))
+                    ages.append(round((datetime.now(timezone.utc) - stamp).total_seconds()))
+                except (TypeError, ValueError):
+                    ages.append(None)
+            logger.info(
+                f"[AuctionIQ] ATM watchlist quote refused for {underlying} {expiry_iso}: "
+                f"ce_age_s={ages[0]} pe_age_s={ages[1]} max_age_s=120"
+            )
             return None
         return OptionChain(
             symbol=app_symbol,

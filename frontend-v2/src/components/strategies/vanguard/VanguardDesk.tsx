@@ -172,7 +172,7 @@ export default function VanguardDesk() {
   const strategyJournals = useQuery({
     queryKey: ["vanguard", "strategy-journals"],
     queryFn: (): Promise<any> => getVanguardStrategyJournals().then((r) => r.data),
-    refetchInterval: 10_000,
+    refetchInterval: REFRESH_MS.summary,
     enabled: activeTab === "watchlist",
   });
   const book = useQuery({

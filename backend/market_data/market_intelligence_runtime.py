@@ -1158,6 +1158,18 @@ class MarketIntelligenceRuntime:
         except Exception as exc:  # noqa: BLE001 — includes asyncio.TimeoutError
             logger.warning(f"[MarketIntelligence] Spot gap-fill failed/timed out: {exc}")
             spot_gap_fill = {"status": "error", "error": str(exc)}
+        # gap_fill above is DB-only under LOCAL_ONLY and could never refill a
+        # mid-session restart hole in today's index tape; heal it from the public
+        # Upstox intraday endpoint (bounded, cooldown-gated, never overwrites live).
+        try:
+            from market_data.stock_spot_sweeper import heal_index_intraday_gaps
+
+            spot_gap_fill["index_intraday_heal"] = await _timed("index_intraday_heal", asyncio.wait_for(
+                heal_index_intraday_gaps(tuple(NSE_INDEX_SCOPE)),
+                timeout=60.0,
+            ))
+        except Exception as exc:  # noqa: BLE001 — includes asyncio.TimeoutError
+            logger.warning(f"[MarketIntelligence] Index intraday heal failed/timed out: {exc}")
         option_chains = await _timed("option_chains", self.refresh_index_option_chains())
         # Top up 30m option premium candles across the full ATM watchlist
         # so S1's MACD scan sees fresh bars throughout the session.

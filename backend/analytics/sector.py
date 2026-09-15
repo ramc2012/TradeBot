@@ -424,6 +424,23 @@ class SectorRotationTracker:
             }
 
         stock_series = await self._load_stock_history_map(timeframe)
+        # Everything below is pure CPU over already-loaded series (~200 RRG
+        # trails). Run on the event loop it blocked the strategies process for
+        # 1.1-1.8s every hour (loop-stall sampler, 2026-09-15), stalling every
+        # lane runner sharing that loop.
+        return await asyncio.to_thread(
+            self._compose_relative_strength, timeframe, index_series, stock_series, source, detail
+        )
+
+    def _compose_relative_strength(
+        self,
+        timeframe: str,
+        index_series: dict[str, list[tuple[datetime, float]]],
+        stock_series: dict[str, list[tuple[datetime, float]]],
+        source: str,
+        detail: Any,
+    ) -> dict:
+        period_config = TIMEFRAME_CONFIG[timeframe]
         benchmark_series = index_series[BENCHMARK_APP_SYMBOL]
         benchmark_closes = [close for _, close in benchmark_series]
         benchmark_change_pct = self._period_change_pct(benchmark_closes, period_config["change_periods"])

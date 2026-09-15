@@ -28,3 +28,20 @@ def test_trading_calendar_update_can_add_exchange_closure(tmp_path) -> None:
     calendar.update(payload)
 
     assert calendar.is_exchange_open("MCX", datetime(2026, 5, 29, 18, 0, tzinfo=IST)) is False
+
+
+def test_trading_calendar_has_bse_sessions_for_sensex(tmp_path) -> None:
+    calendar = TradingCalendar(path=tmp_path / "calendar.json")
+
+    assert calendar.is_exchange_open("BSE", datetime(2026, 9, 16, 10, 0, tzinfo=IST)) is True
+    assert calendar.is_exchange_open("BSE", datetime(2026, 9, 16, 15, 45, tzinfo=IST)) is False
+    # BSE shares NSE's 2026 trading holidays.
+    assert calendar.is_exchange_open("BSE", datetime(2026, 9, 14, 10, 0, tzinfo=IST)) is False
+
+
+def test_trading_calendar_saved_file_without_bse_still_serves_bse(tmp_path) -> None:
+    path = tmp_path / "calendar.json"
+    path.write_text('{"enabled": true, "exchanges": {"NSE": {}, "MCX": {}}}', encoding="utf-8")
+    calendar = TradingCalendar(path=path)
+
+    assert calendar.is_exchange_open("BSE", datetime(2026, 9, 16, 11, 0, tzinfo=IST)) is True

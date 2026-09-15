@@ -49,6 +49,11 @@ DEFAULT_WATCHLIST_TTL = 900
 # observed by this builder.
 FROZEN_LADDER_TTL_SECONDS = 60.0
 DEFAULT_EXPIRY_TTL = 300
+# Each broker contract call is bounded well inside get_expiries' 30s per-symbol
+# deadline. Unbounded, the Upstox retry/backoff loop consumed the whole 30s, the
+# persisted-ladder fallback was never reached, nothing was cached, and the next
+# build repeated it: 297 TimeoutErrors across 9 symbols on 2026-09-15.
+BROKER_EXPIRY_CALL_TIMEOUT_SECONDS = 10.0
 DEFAULT_PARTIAL_TTL = 900
 DEFAULT_BUILD_LOCK_TTL = 120
 WATCHLIST_CACHE_VERSION = "v12"
@@ -2464,7 +2469,10 @@ class ATMWatchlistService:
         # Upstox contract metadata is the canonical expiry ladder when available.
         if upstox_adapter is not None and not expiries:
             try:
-                contracts = await upstox_adapter.get_option_contracts(meta.underlying_key)
+                contracts = await asyncio.wait_for(
+                    upstox_adapter.get_option_contracts(meta.underlying_key),
+                    timeout=BROKER_EXPIRY_CALL_TIMEOUT_SECONDS,
+                )
                 expiries = sorted({str(row.get("expiry")) for row in contracts if row.get("expiry")})
                 if _is_nse_derivatives_symbol(meta.symbol):
                     expiries = _normalize_nse_expiry_ladder(expiries)
@@ -2479,7 +2487,10 @@ class ATMWatchlistService:
         if fyers_adapter is not None and not expiries:
             try:
                 fyers_sym = self._to_fyers_symbol(meta)
-                contracts = await fyers_adapter.get_option_contracts(fyers_sym)
+                contracts = await asyncio.wait_for(
+                    fyers_adapter.get_option_contracts(fyers_sym),
+                    timeout=BROKER_EXPIRY_CALL_TIMEOUT_SECONDS,
+                )
                 expiries = sorted({str(row.get("expiry")) for row in contracts if row.get("expiry")})
                 if _is_nse_derivatives_symbol(meta.symbol):
                     expiries = _normalize_nse_expiry_ladder(expiries)

@@ -60,6 +60,10 @@ NSE_CAS_CLOSE = "15:35"
 
 _DEFAULT_SESSIONS: dict[str, list[dict[str, str]]] = {
     "NSE": [{"key": "regular", "label": "Regular", "open": "09:15", "close": "15:30"}],
+    # BSE (SENSEX/BANKEX) was missing, so `_sessions_for_date("BSE", ...)` was
+    # always empty: `is_exchange_open("BSE")` never returned True and the
+    # directional lane could not open a SENSEX entry from 2026-06-04 onward.
+    "BSE": [{"key": "regular", "label": "Regular", "open": "09:15", "close": "15:30"}],
     "MCX": [
         {"key": "morning", "label": "Morning", "open": "09:00", "close": "17:00"},
         {"key": "evening", "label": "Evening", "open": "17:00", "close": "23:30"},
@@ -108,7 +112,7 @@ _MCX_2026_EVENING_ONLY = [
 
 
 def _default_exceptions(exchange: str) -> list[dict[str, Any]]:
-    if exchange == "NSE":
+    if exchange in {"NSE", "BSE"}:
         return [
             {"date": day, "name": name, "status": "closed", "sessions": []}
             for day, name in _NSE_2026_CLOSED
@@ -219,6 +223,7 @@ def _normalize_config(raw: dict[str, Any] | None) -> dict[str, Any]:
         "timezone": "Asia/Kolkata",
         "exchanges": {
             "NSE": _normalize_exchange_config("NSE", (raw.get("exchanges") or {}).get("NSE")),
+            "BSE": _normalize_exchange_config("BSE", (raw.get("exchanges") or {}).get("BSE")),
             "MCX": _normalize_exchange_config("MCX", (raw.get("exchanges") or {}).get("MCX")),
         },
     }

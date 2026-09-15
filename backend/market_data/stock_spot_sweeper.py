@@ -145,7 +145,9 @@ async def _stock_universe(limit: int) -> list[tuple[str, str]]:
     return universe
 
 
-async def _upsert(symbol: str, instrument_key: str, interval: str, rows: list[dict]) -> int:
+async def _upsert(
+    symbol: str, instrument_key: str, interval: str, rows: list[dict], *, source: str = SOURCE,
+) -> int:
     if not rows:
         return 0
     async with AsyncSessionLocal() as session:
@@ -166,7 +168,7 @@ async def _upsert(symbol: str, instrument_key: str, interval: str, rows: list[di
                 "underlying": symbol,
                 "interval": interval,
                 "open": r["open"], "high": r["high"], "low": r["low"], "close": r["close"],
-                "volume": r["volume"], "source": SOURCE,
+                "volume": r["volume"], "source": source,
             }
             for r in rows
         ])
@@ -441,3 +443,118 @@ async def sweep_stock_spot(
     except Exception as exc:  # noqa: BLE001 — data maintenance never breaks the supervisor
         logger.warning(f"[stock-spot-sweep] pass failed: {type(exc).__name__}: {exc}")
         return {"status": "error", "error": f"{type(exc).__name__}: {exc}"}
+
+
+# ── Same-session index 1-minute heal ────────────────────────────────────────
+# A restart mid-session (host reboot 2026-09-15 11:44 IST) leaves today's index
+# 1-minute tape starting at the restart. Nothing could refill it: both runtimes
+# run MARKET_INTELLIGENCE_STRATEGY_LOCAL_ONLY, so gap_fill_spot_history reads
+# only the DB, and its broker leg would have used /historical-candle, which never
+# returns the current session. The auction lane's open-coverage check then
+# refused NIFTY/BANKNIFTY/SENSEX for the rest of the day. The intraday endpoint
+# is public, so the heal needs no session and spends no authenticated budget.
+INDEX_HEAL_SOURCE = "upstox_intraday_heal"
+INDEX_HEAL_SCOPE = ("NIFTY", "BANKNIFTY", "FINNIFTY", "MIDCPNIFTY", "SENSEX")
+_IST = ZoneInfo("Asia/Kolkata")
+_INDEX_HEAL_COOLDOWN: dict[str, float] = {}
+
+
+async def _index_keys(symbols: tuple[str, ...]) -> list[tuple[str, str]]:
+    async with AsyncSessionLocal() as session:
+        rows = (await session.execute(text(
+            """
+            SELECT symbol, spot_instrument_key
+            FROM fo_underlying_catalog
+            WHERE kind = 'INDEX' AND spot_instrument_key LIKE '%|%'
+            ORDER BY symbol
+            """
+        ))).fetchall()
+    return [(str(sym), str(key)) for sym, key in rows if str(sym) in symbols]
+
+
+async def _session_minutes_present(symbols: list[str], start: datetime, end: datetime) -> dict[str, int]:
+    """Distinct completed 1-minute bars per index in [start, end) — literal time bounds."""
+    async with AsyncSessionLocal() as session:
+        rows = (await session.execute(text(
+            """
+            SELECT underlying, COUNT(DISTINCT time) AS n
+            FROM underlying_spot_candles
+            WHERE interval = '1minute'
+              AND time >= :start AND time < :end
+              AND underlying = ANY(:symbols)
+            GROUP BY underlying
+            """
+        ), {"start": start, "end": end, "symbols": symbols})).fetchall()
+    return {str(sym): int(n or 0) for sym, n in rows}
+
+
+async def heal_index_intraday_gaps(
+    symbols: tuple[str, ...] = INDEX_HEAL_SCOPE,
+    *,
+    min_missing: int = 5,
+    settle_minutes: int = 3,
+    cooldown_seconds: float = 600.0,
+    now: Optional[datetime] = None,
+) -> dict[str, Any]:
+    """Fill today's missing index 1-minute bars from Upstox intraday. Never raises.
+
+    Cheap when healthy: one bounded COUNT per call; the broker is touched only
+    for an index short by ``min_missing`` bars, at most once per cooldown.
+    ``ON CONFLICT DO NOTHING`` — live-tick bars are never overwritten.
+    """
+    if not bool(getattr(settings, "INDEX_INTRADAY_HEAL_ENABLED", True)):
+        return {"status": "disabled"}
+    try:
+        from core.trading_calendar import trading_calendar
+
+        current = (now or datetime.now(timezone.utc)).astimezone(_IST)
+        if not trading_calendar.has_exchange_session("NSE", current.date()):
+            return {"status": "skipped_no_session"}
+        session_open = current.replace(hour=9, minute=15, second=0, microsecond=0)
+        session_close = current.replace(hour=15, minute=30, second=0, microsecond=0)
+        horizon = min(current - timedelta(minutes=settle_minutes), session_close)
+        expected = int((horizon - session_open).total_seconds() // 60)
+        if expected < min_missing:
+            return {"status": "skipped_too_early"}
+
+        keys = await _index_keys(symbols)
+        present = await _session_minutes_present(
+            [sym for sym, _ in keys],
+            session_open.astimezone(timezone.utc),
+            horizon.astimezone(timezone.utc),
+        )
+        clock = monotonic()
+        short = [
+            (sym, key) for sym, key in keys
+            if expected - present.get(sym, 0) >= min_missing
+            and _INDEX_HEAL_COOLDOWN.get(sym, 0.0) <= clock
+        ]
+        summary: dict[str, Any] = {"status": "ok", "expected": expected, "present": present, "healed": {}}
+        if not short:
+            return summary
+
+        async with httpx.AsyncClient(timeout=_HTTP_TIMEOUT) as client:
+            for sym, key in short:
+                _INDEX_HEAL_COOLDOWN[sym] = clock + cooldown_seconds
+                encoded = urllib.parse.quote(key, safe="")
+                try:
+                    with broker_class(CLASS_BULK):
+                        raw = await _get_candles(
+                            client, f"{UPSTOX_V3}/historical-candle/intraday/{encoded}/minutes/1"
+                        )
+                    stamp_now = now or datetime.now(timezone.utc)
+                    rows = [
+                        r for r in completed_rows(_normalize(raw), "1minute", stamp_now)
+                        if session_open <= r["time"].astimezone(_IST) < session_close
+                    ]
+                    summary["healed"][sym] = await _upsert(
+                        sym, key, "1minute", rows, source=INDEX_HEAL_SOURCE
+                    )
+                except Exception as exc:  # noqa: BLE001 — one index never aborts the heal
+                    summary["healed"][sym] = f"error: {exc}"
+        if summary["healed"]:
+            logger.info(f"[index-intraday-heal] expected={expected} present={present} healed={summary['healed']}")
+        return summary
+    except Exception as exc:  # noqa: BLE001 — data maintenance must not raise
+        logger.warning(f"[index-intraday-heal] failed: {exc}")
+        return {"status": "error", "error": str(exc)}

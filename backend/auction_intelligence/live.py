@@ -568,7 +568,11 @@ async def _build_analysis_from_session_rows(
 
     service_config = clone_default_config()
     service_config["market_profile"]["tick_size"] = tick_size
-    service = AuctionIntelligenceService(service_config)
+    # Paper deployments evaluate the governor in paper mode here too. Without it
+    # the desk snapshot logged "Broker connectivity unavailable" / "Market data
+    # is stale" for every symbol (1,776 lines on 2026-09-15) — infra checks the
+    # paper book itself never applies.
+    service = AuctionIntelligenceService(service_config, paper_mode=bool(settings.PAPER_TRADING_ONLY))
     enrichment_timeout_seconds = float(
         DEFAULT_CONFIG.get("options_mapping", {}).get(
             "live_enrichment_timeout_seconds",
