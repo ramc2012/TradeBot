@@ -102,12 +102,52 @@ def _needs_refresh(newest: datetime | None, interval: str) -> bool:
     return (datetime.now(timezone.utc) - newest) > timedelta(minutes=minutes)
 
 
+_WATCHLIST_LEGS_SQL = text(
+    """
+    SELECT symbol, expiry, strike, option_type
+    FROM vanguard_swing_watchlist_items
+    WHERE source_session >= :since
+    UNION
+    SELECT symbol, expiry, strike, option_type
+    FROM vanguard_watchlist_items
+    WHERE source_session >= :since
+    """
+)
+
+
+async def _watchlist_legs(lookback_days: int = 6) -> list[dict[str, Any]]:
+    """Contracts the vanguard watchlists are OBSERVING but do not hold.
+
+    An observation list is only measurable if both ends of its mark exist. They
+    did not: on 2026-09-11 every one of the 20 swing picks was missing the exit
+    bar, 18 of 20 on 10-Sep and 11 of 20 on 04-Sep, because a chosen contract
+    that is not ATM and not held by anyone stops being collected the moment the
+    watchlist rotates. Every performance number the lane published was computed
+    on whichever contracts happened to stay liquid — a survivorship-biased
+    subsample. These legs are maintained for the same reason held legs are.
+    """
+    since = (_now_ist() - timedelta(days=lookback_days)).date()
+    try:
+        async with AsyncSessionLocal() as session:
+            rows = (await session.execute(_WATCHLIST_LEGS_SQL, {"since": since})).mappings().all()
+    except Exception as exc:  # noqa: BLE001 — a missing vanguard table is not fatal here
+        logger.debug(f"[HeldCandles] watchlist legs unavailable: {exc}")
+        return []
+    return [dict(row) for row in rows]
+
+
 async def refresh_held_position_candles(
     *,
     intervals: tuple[str, ...] = DEFAULT_INTERVALS,
     limit: int = 80,
+    include_watchlist: bool = True,
 ) -> dict[str, Any]:
-    """One pass: refresh the premium series of every open NSE option leg."""
+    """One pass: refresh the premium series of every open NSE option leg.
+
+    Also covers the vanguard watchlists' observed contracts, which are not held
+    by anyone and would otherwise stop being collected the moment they leave
+    ATM — see `_watchlist_legs`.
+    """
     from market_data.option_history import option_history_service
     from market_data.option_subscription_manager import _open_nse_option_positions
 
@@ -118,12 +158,35 @@ async def refresh_held_position_candles(
     failures: dict[str, str] = {}
     seen: set[tuple[str, str, float, str, str]] = set()
 
-    for pos in positions:
-        underlying = str(getattr(pos, "underlying", "") or "").upper()
-        expiry_raw = str(getattr(pos, "expiry", "") or "").strip()
-        option_type = str(getattr(pos, "option_type", "") or "").upper()
-        strike = getattr(pos, "strike", None)
-        instrument_key = getattr(pos, "instrument_key", None)
+    # (underlying, expiry, strike, option_type, instrument_key, origin)
+    legs: list[tuple[str, str, Any, str, Any, str]] = [
+        (
+            str(getattr(pos, "underlying", "") or "").upper(),
+            str(getattr(pos, "expiry", "") or "").strip(),
+            getattr(pos, "strike", None),
+            str(getattr(pos, "option_type", "") or "").upper(),
+            getattr(pos, "instrument_key", None),
+            "held",
+        )
+        for pos in positions
+    ]
+    watchlist_rows = await _watchlist_legs() if include_watchlist else []
+    legs.extend(
+        (
+            str(row.get("symbol") or "").upper(),
+            str(row.get("expiry") or "")[:10],
+            row.get("strike"),
+            str(row.get("option_type") or "").upper(),
+            # `instrument` on these tables is a display symbol, not an Upstox
+            # instrument key: resolve by contract instead of passing a wrong key.
+            None,
+            "watchlist",
+        )
+        for row in watchlist_rows
+    )
+    watchlist_legs = 0
+
+    for underlying, expiry_raw, strike, option_type, instrument_key, origin in legs:
         if not (underlying and expiry_raw and option_type in ("CE", "PE") and strike):
             continue
         try:
@@ -138,6 +201,8 @@ async def refresh_held_position_candles(
                 continue
             seen.add(key)
             checked += 1
+            if origin == "watchlist":
+                watchlist_legs += 1
             label = f"{underlying} {strike_f:g} {option_type} {interval}"
             try:
                 newest = await _newest_bar(underlying, expiry, strike_f, option_type, interval)
@@ -166,6 +231,7 @@ async def refresh_held_position_candles(
 
     summary = {
         "held_legs": len(seen),
+        "watchlist_legs": watchlist_legs,
         "checked": checked,
         "refreshed": refreshed,
         "skipped_fresh": skipped_fresh,

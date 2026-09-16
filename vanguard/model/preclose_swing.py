@@ -89,6 +89,26 @@ def _decision_rows(connection) -> tuple[datetime | None, list[dict]]:
 # marks is recorded rather than hidden.
 MIN_CHAIN_BREADTH = float(os.environ.get("VANGUARD_SWING_MIN_CHAIN_BREADTH", "0.5"))
 
+# ── Selection shape, measured 2026-09-15 ────────────────────────────────────
+# Five sessions of realised next-session returns say three things:
+#   * The list never held a top-10 mover on either side, and its picks sat at
+#     the 32nd-72nd percentile of the day's own ranking.
+#   * The winners were CHEAP CONVEXITY: |delta| 0.11-0.25 at Rs 10-60, on names
+#     that moved 3-5%. The list bought |delta| 0.44-0.58.
+#   * Direction was the binding constraint, not strike: the decision-bar layer's
+#     cross-sectional direction IC was +0.048 over 5 sessions (n=1,044), while
+#     conviction-vs-|move| is the one relationship that has ever measured
+#     positive here (t=+8.23, 2026-08-27 study). So magnitude enters the rank.
+# Every one of these is env-tunable and must be re-measured over 20+ sessions
+# (research/watchlist_coverage.py) before either ranker leaves shadow.
+WING_DELTA_TARGET = float(os.environ.get("VANGUARD_SWING_WING_DELTA", "0.20"))
+WING_DELTA_MIN = float(os.environ.get("VANGUARD_SWING_WING_DELTA_MIN", "0.15"))
+WING_DELTA_MAX = float(os.environ.get("VANGUARD_SWING_WING_DELTA_MAX", "0.25"))
+MAGNITUDE_WEIGHT = float(os.environ.get("VANGUARD_SWING_MAGNITUDE_WEIGHT", "0.30"))
+# A list drawn from a sliver of the market is not a ranking of the market. The
+# resolvable universe swung 358 - 7,242 contracts across those five sessions.
+MIN_UNIVERSE_ROWS = int(os.environ.get("VANGUARD_SWING_MIN_UNIVERSE_ROWS", "2000"))
+
 
 def resolve_chain_bar(connection, ts: datetime, symbols: list[str]) -> datetime | None:
     """Newest 30m option bar at or before `ts` with a usable cross-section."""
@@ -128,12 +148,14 @@ def _percentiles(values: list[float]) -> np.ndarray:
 
 
 def form_candidates(connection, direction: ListwiseMLP, contract: ListwiseMLP,
-                    ts: datetime, evaluations: list[dict]) -> list[dict]:
+                    ts: datetime, evaluations: list[dict]) -> tuple[list[dict], dict]:
+    """Returns (candidates, diagnostics). The diagnostics carry the resolvable
+    universe size, which decides whether a list may be published at all."""
     by_symbol = {row["symbol"]: row for row in evaluations}
     source_session = ts.astimezone(IST).date()
     chain_ts = resolve_chain_bar(connection, ts, list(by_symbol))
     if chain_ts is None:
-        return []
+        return [], {"universe_rows": 0, "chain_ts": None}
     with connection.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cursor:
         cursor.execute(
             SOURCE_OPTIONS_SQL,
@@ -155,10 +177,10 @@ def form_candidates(connection, direction: ListwiseMLP, contract: ListwiseMLP,
             abs(abs(row["option_delta"] or 0.5) - 0.5), row["strike"]))
         selected = [(atm, "ATM")]
         wings = [row for row in front if row["option_delta"] is not None
-                 and abs(abs(row["option_delta"]) - 0.25) <= 0.12]
+                 and WING_DELTA_MIN <= abs(row["option_delta"]) <= WING_DELTA_MAX]
         if wings:
             wing = min(wings, key=lambda row: (
-                abs(abs(row["option_delta"]) - 0.25), row["strike"]))
+                abs(abs(row["option_delta"]) - WING_DELTA_TARGET), row["strike"]))
             if wing["strike"] != atm["strike"]:
                 selected.append((wing, "WING_25D"))
         base_features = feature_row(base_row, _instrument({**base_row, **atm}), side, ts)
@@ -186,9 +208,17 @@ def form_candidates(connection, direction: ListwiseMLP, contract: ListwiseMLP,
                 })
     direction_pct = _percentiles([row["direction_score"] for row in candidates])
     contract_pct = _percentiles([row["contract_score"] for row in candidates])
+    conviction_pct = _percentiles([
+        float((by_symbol.get(row["symbol"]) or {}).get("conviction") or 0.0)
+        for row in candidates
+    ])
     for index, row in enumerate(candidates):
-        row["combined_score"] = float(0.60 * direction_pct[index] + 0.40 * contract_pct[index])
-    return candidates
+        ranker = 0.60 * direction_pct[index] + 0.40 * contract_pct[index]
+        row["conviction_pct"] = float(conviction_pct[index])
+        row["combined_score"] = float(
+            (1.0 - MAGNITUDE_WEIGHT) * ranker + MAGNITUDE_WEIGHT * conviction_pct[index]
+        )
+    return candidates, {"universe_rows": len(option_rows), "chain_ts": chain_ts}
 
 
 def select_top(candidates: list[dict], top_n: int) -> list[dict]:
@@ -346,7 +376,16 @@ def create_watchlist(connection, *, top_n: int = 10, allow_replay: bool = False,
     if existing:
         return {"created": False, "reason": "immutable session already exists",
                 "source_session": str(source_session), "item_count": existing[0], "status": existing[1]}
-    selected = select_top(form_candidates(connection, direction, contract, ts, evaluations), top_n)
+    candidates, universe = form_candidates(connection, direction, contract, ts, evaluations)
+    if universe["universe_rows"] < MIN_UNIVERSE_ROWS:
+        # Publishing a "top ten either side" drawn from a sliver of the market
+        # states a ranking the data cannot support. Refuse, and say how thin.
+        return {"created": False,
+                "reason": (f"resolvable universe {universe['universe_rows']} contracts is below "
+                           f"the {MIN_UNIVERSE_ROWS} floor; the chain sweep is too thin to rank"),
+                "source_session": str(source_session),
+                "universe_rows": universe["universe_rows"]}
+    selected = select_top(candidates, top_n)
     if not selected:
         return {"created": False, "reason": "no liquid contract expressions", "source_session": str(source_session)}
     refusal = ("historical replay is observation-only" if allow_replay else
