@@ -139,21 +139,42 @@ class UpstoxChainBuilder:
         # Front expiry comes from fo_contract_catalog (the Upstox instrument
         # master, 213 underlyings) rather than fo_expiry_catalog, which only
         # carries 9 names and would silently cover 4% of the universe.
+        #
+        # INDICES TAKE THE FRONT *AND* THE NEXT EXPIRY (2026-09-15). The front
+        # expiry on an index expiry day IS the contract expiring that day: on
+        # 15-Sep the NIFTY sweep collected 157 contracts of the expiring 15-Sep
+        # weekly and nothing of 22-Sep, so the swing lane had no fittable slice
+        # it could hold for 1-5 sessions and refused every bar with
+        # `surface_unusable` — the same on 08-Sep, and on SENSEX every Thursday.
+        # Stocks keep one expiry: they are monthly-only, so rn=2 would be a
+        # month out and would double a 213-name sweep for no reader.
         sql = """
-            SELECT c.underlying, u.underlying_key, MIN(c.expiry) AS front_expiry
-            FROM fo_contract_catalog c
-            JOIN fo_underlying_catalog u ON u.symbol = c.underlying
-            WHERE c.expiry >= CURRENT_DATE
-              AND u.underlying_key IS NOT NULL
-            GROUP BY c.underlying, u.underlying_key
-            ORDER BY c.underlying
+            SELECT underlying, underlying_key, expiry
+            FROM (
+                SELECT c.underlying, u.underlying_key, c.expiry, u.kind,
+                       ROW_NUMBER() OVER (
+                           PARTITION BY c.underlying ORDER BY c.expiry ASC
+                       ) AS rn
+                FROM (
+                    SELECT DISTINCT underlying, expiry
+                    FROM fo_contract_catalog
+                    WHERE expiry >= CURRENT_DATE
+                ) c
+                JOIN fo_underlying_catalog u ON u.symbol = c.underlying
+                WHERE u.underlying_key IS NOT NULL
+            ) ranked
+            WHERE rn = 1 OR (kind = 'INDEX' AND rn = 2)
+            ORDER BY underlying ASC, expiry ASC
         """
         async with AsyncSessionLocal() as session:
             rows = (await session.execute(text(sql))).all()
 
         self._universe = [(r[0], r[1], r[2]) for r in rows]
         self._universe_day = today
-        logger.info(f"[upstox-chain] universe: {len(self._universe)} underlyings for {today}")
+        logger.info(
+            f"[upstox-chain] universe: {len(self._universe)} (underlying, expiry) pairs "
+            f"across {len({row[0] for row in self._universe})} underlyings for {today}"
+        )
         return self._universe
 
     @staticmethod
@@ -176,10 +197,11 @@ class UpstoxChainBuilder:
         polled = submitted = skipped = failed = 0
 
         for symbol, underlying_key, front_expiry in universe:
-            if now_mono < self._next_due.get(symbol, 0.0):
+            due_key = f"{symbol}:{front_expiry.isoformat()}"
+            if now_mono < self._next_due.get(due_key, 0.0):
                 skipped += 1
                 continue
-            self._next_due[symbol] = now_mono + POLL_INTERVAL_SECONDS
+            self._next_due[due_key] = now_mono + POLL_INTERVAL_SECONDS
 
             try:
                 # Same governance as the Fyers builder: a broad-universe sweep

@@ -178,6 +178,30 @@ _DDL: tuple[str, ...] = (
     """,
     "CREATE INDEX IF NOT EXISTS idx_ipfac_lookup ON index_paper_factors (underlying, factor, session_date DESC)",
     "CREATE INDEX IF NOT EXISTS idx_ipfac_run ON index_paper_factors (run_id, session_date DESC)",
+    # Entry decided at bar t, fill owed at the observed +1 bar (2026-09-15).
+    # Live, the +1 bar is still arriving when the decision is made — the option
+    # chain sweep lands 45-60 minutes behind its bar — so the lane refused every
+    # BANKNIFTY/SENSEX candidate with `no_lagged_fill` even though the contract
+    # printed minutes later (7 of 7 on 15-Sep, 8 on 11-Sep, 8 on 08-Sep). The
+    # decision is parked here with everything needed to fill it, and a later
+    # pass fills at that bar's OBSERVED close. No lookahead: the price is still
+    # the +1 bar's own print, never the decision bar's.
+    """
+    CREATE TABLE IF NOT EXISTS index_paper_pending_entries (
+        underlying    text        NOT NULL,
+        session_date  date        NOT NULL,
+        bar_ts        timestamptz NOT NULL,
+        fill_bar_ts   timestamptz,
+        run_id        text,
+        payload       jsonb       NOT NULL,
+        status        text        NOT NULL DEFAULT 'pending',
+        resolution    text,
+        created_at    timestamptz NOT NULL DEFAULT now(),
+        updated_at    timestamptz NOT NULL DEFAULT now(),
+        PRIMARY KEY (underlying, bar_ts)
+    )
+    """,
+    "CREATE INDEX IF NOT EXISTS idx_ippend_open ON index_paper_pending_entries (status, session_date, underlying)",
 )
 
 

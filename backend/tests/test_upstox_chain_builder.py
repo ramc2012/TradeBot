@@ -163,3 +163,48 @@ def test_the_builder_is_disabled_by_default():
     from core.config import Settings
 
     assert Settings().UPSTOX_CHAIN_BUILDER_ENABLED is False
+
+
+def test_an_indexs_second_expiry_is_polled_rather_than_skipped(monkeypatch):
+    """Poll cadence is per (symbol, expiry), not per symbol.
+
+    Indices now carry the front AND the next expiry (2026-09-15): on an index
+    expiry day the front expiry IS the contract expiring that day, so the swing
+    lane had no holdable slice and refused every bar with `surface_unusable`.
+    Keying `_next_due` by symbol alone would have let the first expiry's poll
+    suppress the second one for the whole 30-minute cadence.
+    """
+    import asyncio
+    from datetime import date as _date
+    from types import SimpleNamespace
+
+    from market_data.upstox_chain_builder import UpstoxChainBuilder
+
+    builder = UpstoxChainBuilder()
+    universe = [
+        ("NIFTY", "NSE_INDEX|Nifty 50", _date(2026, 9, 15)),
+        ("NIFTY", "NSE_INDEX|Nifty 50", _date(2026, 9, 22)),
+    ]
+    calls: list[tuple[str, str]] = []
+
+    async def fake_universe():
+        return universe
+
+    class _Adapter:
+        async def get_option_chain(self, key, expiry):
+            calls.append((key, expiry))
+            return SimpleNamespace(entries=[], spot_price=0.0)
+
+    async def fake_adapter():
+        return _Adapter()
+
+    monkeypatch.setattr(builder, "_load_universe", fake_universe)
+    monkeypatch.setattr(type(builder), "_adapter", staticmethod(fake_adapter))
+
+    first = asyncio.run(builder.poll_once(now_mono=1_000.0))
+    assert first["polled"] == 2
+    assert {expiry for _, expiry in calls} == {"2026-09-15", "2026-09-22"}
+
+    # Both are inside the cadence now, so a second pass polls neither.
+    second = asyncio.run(builder.poll_once(now_mono=1_001.0))
+    assert second["polled"] == 0 and second["skipped"] == 2

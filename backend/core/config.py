@@ -744,6 +744,15 @@ class Settings(BaseSettings):
     # watchlist row is younger than this; older quotes = skip-and-report
     # (no fail-open entries against stale premiums).
     DIRECTIONAL_STOCK_WATCHLIST_MAX_AGE_SECONDS: int = 1200
+    # ATM watchlist row freshness (2026-09-15). The live_refresh path used to
+    # rebuild a cached row only if it predated today's 09:15 open, so the day's
+    # first build was the day's only build and every directional stock candidate
+    # went stale ~20 minutes later (210/210 skipped as `option_quotes_stale_*`
+    # on 15-Sep from 12:38). Rows older than this re-enter the build queue,
+    # OLDEST FIRST and capped per pass so a 215-name universe cannot turn one
+    # refresh into a full-universe rebuild against the shared broker budget.
+    ATM_WATCHLIST_ROW_MAX_AGE_SECONDS: int = 900
+    ATM_WATCHLIST_MAX_AGED_REFRESH_PER_PASS: int = 40
     # Just-in-time watchlist refresh for the directional stock batch
     # (2026-07-17): the BG universe build rotates all ~217 F&O names over
     # HOURS, so stock snapshot rows aged far past the 1200s bound on day one

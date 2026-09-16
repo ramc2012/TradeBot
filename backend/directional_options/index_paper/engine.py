@@ -23,6 +23,8 @@ Every path ends in a journal write, including the ones that do nothing.
 """
 from __future__ import annotations
 
+import asyncio
+import json
 import math
 from collections import Counter
 from dataclasses import dataclass, field
@@ -323,29 +325,126 @@ async def resolve_lot_size(underlying: str, expiry: date) -> int | None:
     return int(rows[0].lot_size) if rows else None
 
 
-_DECIDED_SQL = text(
+# `one_entry_decision_per_session` means ONE ENTRY per session. Scoping the old
+# query by run_id made it per-RUN, so every 15-minute pass re-decided the same
+# bar: 25 journal rows for 12 real decisions on 2026-09-15, and a funnel that
+# double-counted every refusal. Entry exclusivity is now counted on entries, and
+# re-journaling is prevented per bar instead.
+_ENTERED_SQL = text(
     """
     SELECT count(*) AS n
     FROM index_paper_decisions
     WHERE underlying = :underlying
       AND session_date = :session_date
-      AND action IN ('enter', 'skip')
-      AND (CAST(:run_id AS text) IS NULL OR run_id = CAST(:run_id AS text))
+      AND action = 'enter'
+    """
+)
+
+_BAR_DECIDED_SQL = text(
+    """
+    SELECT count(*) AS n
+    FROM index_paper_decisions
+    WHERE underlying = :underlying
+      AND bar_ts = :bar_ts
+      AND action IN ('enter', 'skip', 'pending')
     """
 )
 
 
-async def already_decided_this_session(
-    underlying: str, session_date: date, run_id: str | None
-) -> bool:
+async def already_entered_this_session(underlying: str, session_date: date) -> bool:
     async with AsyncSessionLocal() as session:
         row = (
             await session.execute(
-                _DECIDED_SQL,
-                {"underlying": underlying, "session_date": session_date, "run_id": run_id},
+                _ENTERED_SQL, {"underlying": underlying, "session_date": session_date}
             )
         ).first()
     return bool(row and row.n)
+
+
+async def already_decided_this_session(
+    underlying: str, session_date: date, run_id: str | None = None
+) -> bool:
+    """Back-compatible name; entry-scoped, and deliberately ignores run_id."""
+    return await already_entered_this_session(underlying, session_date)
+
+
+async def already_decided_bar(underlying: str, bar_ts: datetime) -> bool:
+    async with AsyncSessionLocal() as session:
+        row = (
+            await session.execute(
+                _BAR_DECIDED_SQL, {"underlying": underlying, "bar_ts": bar_ts}
+            )
+        ).first()
+    return bool(row and row.n)
+
+
+# ── D1: decisions parked for a fill bar that has not printed yet ────────────
+_PENDING_UPSERT = text(
+    """
+    INSERT INTO index_paper_pending_entries
+        (underlying, session_date, bar_ts, fill_bar_ts, run_id, payload, status)
+    VALUES (:underlying, :session_date, :bar_ts, :fill_bar_ts, :run_id,
+            CAST(:payload AS jsonb), 'pending')
+    ON CONFLICT (underlying, bar_ts) DO UPDATE
+        SET payload = EXCLUDED.payload,
+            fill_bar_ts = EXCLUDED.fill_bar_ts,
+            run_id = EXCLUDED.run_id,
+            updated_at = now()
+    """
+)
+
+_PENDING_OPEN = text(
+    """
+    SELECT underlying, session_date, bar_ts, fill_bar_ts, run_id, payload
+    FROM index_paper_pending_entries
+    WHERE underlying = :underlying AND status = 'pending'
+    ORDER BY bar_ts
+    """
+)
+
+_PENDING_RESOLVE = text(
+    """
+    UPDATE index_paper_pending_entries
+       SET status = :status, resolution = :resolution, updated_at = now()
+     WHERE underlying = :underlying AND bar_ts = :bar_ts
+    """
+)
+
+
+async def record_pending_entry(
+    *, underlying: str, session_date: date, bar_ts: datetime,
+    fill_bar_ts: datetime | None, run_id: str | None, payload: dict[str, Any],
+) -> None:
+    async with AsyncSessionLocal() as session:
+        await session.execute(_PENDING_UPSERT, {
+            "underlying": underlying, "session_date": session_date, "bar_ts": bar_ts,
+            "fill_bar_ts": fill_bar_ts, "run_id": run_id,
+            "payload": json.dumps(payload, default=str),
+        })
+        await session.commit()
+
+
+async def open_pending_entries(underlying: str) -> list[dict[str, Any]]:
+    async with AsyncSessionLocal() as session:
+        rows = (await session.execute(_PENDING_OPEN, {"underlying": underlying})).mappings().all()
+    out: list[dict[str, Any]] = []
+    for row in rows:
+        item = dict(row)
+        if isinstance(item.get("payload"), str):
+            item["payload"] = json.loads(item["payload"])
+        out.append(item)
+    return out
+
+
+async def resolve_pending_entry(
+    underlying: str, bar_ts: datetime, status: str, resolution: str
+) -> None:
+    async with AsyncSessionLocal() as session:
+        await session.execute(_PENDING_RESOLVE, {
+            "underlying": underlying, "bar_ts": bar_ts,
+            "status": status, "resolution": resolution[:400],
+        })
+        await session.commit()
 
 
 _NEXT_BAR_SQL = text(
@@ -1062,12 +1161,73 @@ async def evaluate_entry(
                        detail=f"fill bar {lagged.isoformat() if lagged else 'none'}")
         )
         if not quote or quote.get("close") is None:
-            await refuse(
-                "no_lagged_fill",
-                f"the chosen contract did not print at the +{config.entry_lag_bars} bar; "
-                "refusing to fill at a price that was not observable when the order would have gone in",
+            # Two different facts wore one reason code. A bar AFTER the fill bar
+            # exists => the fill bar is closed and this contract genuinely never
+            # printed: refuse. Otherwise the +1 bar is merely still arriving --
+            # the chain sweep lands 45-60 min behind its bar -- so park the
+            # decision and fill later at that bar's OWN observed close. The lane
+            # refused 7 of 7 BANKNIFTY candidates this way on 2026-09-15 while
+            # the contracts printed minutes afterwards.
+            settled = bool(lagged) and bool(await next_bars(underlying, lagged, 1))
+            if settled:
+                await refuse(
+                    "no_lagged_fill",
+                    f"the chosen contract did not print at the +{config.entry_lag_bars} bar; "
+                    "refusing to fill at a price that was not observable when the order would have gone in",
+                    candidate=candidate.as_dict(), sizing=sizing_payload,
+                )
+                await resolve_pending_entry(
+                    underlying, bar_ts, "refused", "contract never printed at the fill bar")
+                return
+            parked_greeks = _greeks_for(
+                candidate.slice_, candidate.strike, side, candidate.implied_vol, config.risk_free)
+            await record_pending_entry(
+                underlying=underlying, session_date=session_date, bar_ts=bar_ts,
+                fill_bar_ts=lagged, run_id=run_id,
+                payload={
+                    "side": side,
+                    "strike": candidate.strike,
+                    "expiry": candidate.slice_.expiry.isoformat(),
+                    "candidate": candidate.as_dict(),
+                    "sizing": sizing_payload,
+                    "panel": panel_payload,
+                    "vol_context": vol_ctx,
+                    "gates": [g.as_dict() for g in gates],
+                    "direction_score": direction_score,
+                    "round_trip_cost_fraction": rt,
+                    "signal_price": candidate.premium,
+                    "quantity": sizing.quantity,
+                    "lots": sizing.lots,
+                    "lot_size": candidate.lot_size,
+                    "volume": candidate.volume,
+                    "oi": candidate.oi,
+                    "log_moneyness": candidate.log_moneyness,
+                    "implied_vol": candidate.implied_vol,
+                    "vega": candidate.vega,
+                    "greeks": {
+                        "delta": parked_greeks.delta, "gamma": parked_greeks.gamma,
+                        "vega": parked_greeks.vega, "theta": parked_greeks.theta,
+                    },
+                    "mv_delta": _mv_delta(candidate.slice_, candidate.strike, parked_greeks),
+                    "forward": candidate.slice_.forward,
+                    "spot": candidate.slice_.spot,
+                    "planned_sessions": candidate.hold.planned_sessions,
+                    "adverse_move_per_unit": sizing.adverse_move_per_unit or 0.0,
+                    "breakeven_ratio": candidate.geometry.breakeven_ratio,
+                },
+            )
+            await journal.record_decision(
+                run_id=run_id, decided_at=bar_ts, session_date=session_date, bar_ts=bar_ts,
+                underlying=underlying, action="pending", reason_code="awaiting_lagged_fill",
+                reason=(
+                    f"the +{config.entry_lag_bars} fill bar has not finished printing; the decision is "
+                    "parked and fills at that bar's own observed close"
+                ),
+                gates=gates, vol_context=vol_ctx, view=panel_payload,
                 candidate=candidate.as_dict(), sizing=sizing_payload,
             )
+            result.decisions.append(
+                {"action": "pending", "reason_code": "awaiting_lagged_fill"})
             return
         fill_ts, fill_reference = lagged, float(quote["close"])
 
@@ -1131,6 +1291,7 @@ async def evaluate_entry(
     )
 
     await book.open_position(position)
+    await resolve_pending_entry(underlying, bar_ts, "filled", position.position_id)
     await journal.record_fill(
         position_id=position.position_id, filled_at=fill_ts, estimate=fill,
         detail={
@@ -1208,6 +1369,166 @@ async def probe_breakeven_ratio(
     return best
 
 
+async def fill_pending_entries(
+    underlying: str,
+    config: IndexPaperConfig,
+    run_id: str | None,
+    result: PassResult,
+) -> None:
+    """Fill decisions parked at bar t, once their +1 bar prints.
+
+    The price is that bar's OWN observed close, exactly as the immediate path
+    would have paid: parking changes WHEN the fill is recognised, never WHAT it
+    pays. Needs no surface -- a parked decision is already fully specified -- so
+    this runs even on a bar whose surface will not fit. A decision never crosses
+    a session boundary: if the session ended before the fill bar printed, the
+    decision expires unfilled rather than becoming a stale next-day order.
+    """
+    pending = await open_pending_entries(underlying)
+    if not pending:
+        return
+    latest = await latest_bar_ts(underlying)
+    open_positions = await book.list_open()
+    for row in pending:
+        bar_ts = row["bar_ts"]
+        payload = row["payload"] or {}
+        session_date = row["session_date"]
+        if latest is not None and ist_session_date(latest) != session_date:
+            await resolve_pending_entry(
+                underlying, bar_ts, "expired",
+                "the session ended before the fill bar printed")
+            continue
+
+        fill_bar = row.get("fill_bar_ts")
+        if fill_bar is None:
+            later = await next_bars(underlying, bar_ts, config.entry_lag_bars)
+            fill_bar = later[config.entry_lag_bars - 1] if len(later) >= config.entry_lag_bars else None
+        if fill_bar is None:
+            continue
+
+        try:
+            expiry = date.fromisoformat(str(payload["expiry"]))
+            strike = float(payload["strike"])
+            side = str(payload["side"])
+        except (KeyError, TypeError, ValueError):
+            await resolve_pending_entry(underlying, bar_ts, "expired", "unreadable parked payload")
+            continue
+
+        quote = await contract_quote(underlying, fill_bar, expiry, strike, side)
+        if not quote or quote.get("close") is None:
+            if await next_bars(underlying, fill_bar, 1):
+                await resolve_pending_entry(
+                    underlying, bar_ts, "refused",
+                    "contract never printed at the fill bar")
+                await journal.record_decision(
+                    run_id=run_id, decided_at=bar_ts, session_date=session_date, bar_ts=bar_ts,
+                    underlying=underlying, action="skip", reason_code="no_lagged_fill",
+                    reason=("the chosen contract never printed at the fill bar; the parked "
+                            "decision expired unfilled"),
+                    candidate=payload.get("candidate"), sizing=payload.get("sizing"),
+                    view=payload.get("panel"), vol_context=payload.get("vol_context"),
+                )
+            continue
+
+        # Exposure is re-checked AT FILL TIME: the book may have moved while the
+        # decision sat parked, and a limit is a limit when the order goes in.
+        same = [p for p in open_positions if p.underlying == underlying]
+        if same or len(open_positions) >= config.max_concurrent_positions:
+            await resolve_pending_entry(
+                underlying, bar_ts, "expired",
+                f"exposure limit at fill time: {len(open_positions)} open, {len(same)} on {underlying}")
+            continue
+
+        quantity = int(payload.get("quantity") or 0)
+        lots = int(payload.get("lots") or 0)
+        if quantity <= 0 or lots <= 0:
+            await resolve_pending_entry(underlying, bar_ts, "expired", "parked decision had no size")
+            continue
+
+        fill = estimate_fill(
+            float(quote["close"]), quantity, "buy", "entry",
+            model=config.cost_model,
+            volume=payload.get("volume"), oi=payload.get("oi"),
+            log_moneyness=payload.get("log_moneyness"),
+            sigma=payload.get("implied_vol"),
+            vega_per_vol_point=float(payload.get("vega") or 0.0) * 0.01,
+        )
+        greeks = payload.get("greeks") or {}
+        adverse = float(payload.get("adverse_move_per_unit") or 0.0)
+        position = PaperPosition(
+            position_id=book.new_position_id(underlying),
+            status="open",
+            session_date=session_date,
+            underlying=underlying,
+            expiry=expiry,
+            strike=strike,
+            option_type=side,
+            lots=lots,
+            lot_size=int(payload.get("lot_size") or 0),
+            quantity=quantity,
+            entry_ts=fill_bar,
+            entry_premium=fill.fill_price,
+            entry_cost=fill.charges["total"],
+            entry_iv=payload.get("implied_vol"),
+            entry_forward=payload.get("forward"),
+            entry_spot=payload.get("spot"),
+            entry_delta=greeks.get("delta"),
+            entry_gamma=greeks.get("gamma"),
+            entry_vega=greeks.get("vega"),
+            entry_theta=greeks.get("theta"),
+            entry_mv_delta=payload.get("mv_delta"),
+            stop_premium=max(fill.fill_price - adverse, 0.0),
+            target_premium=fill.fill_price + adverse * config.reward_multiple,
+            max_hold_bars=int(payload.get("planned_sessions") or config.horizon_sessions),
+            latest_ts=fill_bar,
+            latest_premium=fill.fill_price,
+            latest_iv=payload.get("implied_vol"),
+            unrealized_pnl=-fill.charges["total"],
+            payload={
+                "panel": payload.get("panel"),
+                "vol_context": payload.get("vol_context"),
+                "sizing": payload.get("sizing"),
+                "fill": fill.as_dict(),
+                "candidate": payload.get("candidate"),
+                "round_trip_cost_fraction": payload.get("round_trip_cost_fraction"),
+                "entry_slippage_total": fill.slippage_per_unit * quantity,
+                "decision_bar": bar_ts.isoformat(),
+                "fill_bar": fill_bar.isoformat(),
+                "signal_price": payload.get("signal_price"),
+                "fill_reference_price": float(quote["close"]),
+                "deferred_fill": True,
+            },
+        )
+        await book.open_position(position)
+        open_positions.append(position)
+        await resolve_pending_entry(underlying, bar_ts, "filled", position.position_id)
+        await journal.record_fill(
+            position_id=position.position_id, filled_at=fill_bar, estimate=fill,
+            detail={
+                "candidate": payload.get("candidate"),
+                "direction_score": payload.get("direction_score"),
+                "decision_bar": bar_ts.isoformat(),
+                "signal_price": payload.get("signal_price"),
+                "deferred_fill": True,
+            },
+        )
+        await journal.record_decision(
+            run_id=run_id, decided_at=bar_ts, session_date=session_date, bar_ts=bar_ts,
+            underlying=underlying, action="enter", reason_code="entered",
+            reason=(
+                f"long {strike:g}{side} exp {expiry} x{lots} lots at {fill.fill_price:.2f}, "
+                f"filled at the parked +{config.entry_lag_bars} bar {fill_bar.isoformat()}"
+            ),
+            position_id=position.position_id, view=payload.get("panel"),
+            candidate=payload.get("candidate"), sizing=payload.get("sizing"),
+            vol_context=payload.get("vol_context"),
+        )
+        result.entries += 1
+        result.decisions.append(
+            {"action": "enter", "reason_code": "entered", "position_id": position.position_id,
+             "deferred_fill": True})
+
+
 async def run_underlying(
     underlying: str,
     *,
@@ -1256,6 +1577,19 @@ async def run_underlying(
         panel_direction=direction_score, view=panel.as_dict(), run_id=run_id,
     )
 
+    # 1b. Fill anything parked at an EARLIER bar whose +1 bar has since printed.
+    # Deliberately ahead of the surface check: a parked decision is already made
+    # and does not need today's surface to fit.
+    await fill_pending_entries(symbol, cfg, run_id, result)
+
+    # 1c. One journal row per bar. Consecutive 15-minute passes re-evaluate the
+    # same 30-minute bar; without this every decision was written twice.
+    if await already_decided_bar(symbol, ts):
+        if not snapshot.ok:
+            result.status = snapshot.status
+            result.reason = snapshot.reason
+        return result
+
     # 2. Then, at most once a session, consider adding.
     if not snapshot.ok:
         result.status = snapshot.status
@@ -1270,8 +1604,8 @@ async def run_underlying(
 
     if ts.astimezone(IST).time() < cfg.entry_decision_after_ist:
         return result
-    if cfg.one_entry_decision_per_session and await already_decided_this_session(
-        symbol, session_date, run_id
+    if cfg.one_entry_decision_per_session and await already_entered_this_session(
+        symbol, session_date
     ):
         return result
 

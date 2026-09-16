@@ -1474,15 +1474,40 @@ class ATMWatchlistService:
         # this, Friday's snapshots (213 stocks) live forever in prior_rows
         # and the stock universe never refreshes on Monday morning.
         stale_force_refresh_count = 0
+        aged_refresh_count = 0
         if live_refresh and prior_rows:
             today_session_open = datetime.combine(
                 datetime.now(IST).date(), dt_time(9, 15), tzinfo=IST
             ).astimezone(UTC)
+            # AGE, not just "built today" (2026-09-15). The pre-open test alone
+            # meant the day's FIRST build was the day's ONLY build: rows stamped
+            # 11:46-12:18 after a restart stayed "cached" for the rest of the
+            # session, so every one of the 210 directional stock candidates was
+            # skipped as `option_quotes_stale_13070s` from ~12:38 onward. The
+            # same shape is visible on 11-Sep (204 names at 09:xx, then 26-35).
+            # Rows older than the age ceiling re-enter pending, OLDEST FIRST and
+            # hard-capped per pass so a 215-name universe cannot turn one live
+            # refresh into a full-universe rebuild against the broker budget.
+            from core.config import settings as _settings
+
+            row_max_age = float(getattr(_settings, "ATM_WATCHLIST_ROW_MAX_AGE_SECONDS", 0) or 0)
+            age_cutoff = (
+                datetime.now(UTC) - timedelta(seconds=row_max_age) if row_max_age > 0 else None
+            )
             stale_symbols: list[str] = []
+            aged: list[tuple[datetime, str]] = []
             for symbol, row in list(prior_rows.items()):
                 latest = _latest_watchlist_row_time([row])
                 if latest is None or latest < today_session_open:
                     stale_symbols.append(symbol)
+                elif age_cutoff is not None and latest < age_cutoff:
+                    aged.append((latest, symbol))
+            if aged:
+                cap = int(getattr(_settings, "ATM_WATCHLIST_MAX_AGED_REFRESH_PER_PASS", 0) or 0)
+                aged.sort(key=lambda item: item[0])
+                chosen = [sym for _, sym in (aged[:cap] if cap > 0 else aged)]
+                aged_refresh_count = len(chosen)
+                stale_symbols.extend(chosen)
             if stale_symbols:
                 stale_force_refresh_count = len(stale_symbols)
                 # Drop them from prior_rows so they re-enter pending and the
@@ -1492,7 +1517,7 @@ class ATMWatchlistService:
         pending = [m for m in underlyings if m.symbol not in prior_rows]
         logger.info(
             f"[ATM watchlist] {len(prior_rows)} cached, {len(pending)} to fetch for {selected_expiry} ({scope_key}) "
-            f"(stale_force_refresh={stale_force_refresh_count})"
+            f"(stale_force_refresh={stale_force_refresh_count} of which aged={aged_refresh_count})"
         )
         coverage_target = (
             len(underlyings)
