@@ -781,7 +781,23 @@ class DirectionalOptionsPaperStore:
         rag_context = dict(snapshot.get("rag_context") or {})
         recorded_at = str(snapshot.get("decision_at") or snapshot.get("as_of") or _utc_now())
         execution_ready = bool(data_status.get("execution_ready"))
-        actionable = bool(signal and contract and risk.get("approved") and execution_ready)
+        # Defence in depth: the selector/policy normally turns an ineligible
+        # joint-payoff candidate into risk.approved=False.  The paper ledger is
+        # the final execution boundary, though, and must not trust that an
+        # upstream caller remembered the gate.  This specifically prevents a
+        # candidate whose own evidence says ``eligible: false`` / ``no trade``
+        # from opening when a stale or hand-built payload still carries an
+        # approved risk block.  Legacy candidates have no research payload and
+        # retain their existing behaviour.
+        research = contract.get("research") if isinstance(contract.get("research"), dict) else {}
+        research_eligible = not research or research.get("eligible") is True
+        actionable = bool(
+            signal
+            and contract
+            and risk.get("approved")
+            and execution_ready
+            and research_eligible
+        )
         latest_spot = float(snapshot.get("spot_price") or 0.0)
         latest_mark = float(contract.get("option_price") or 0.0) if contract else 0.0
 
@@ -798,8 +814,9 @@ class DirectionalOptionsPaperStore:
             # — surfaced so the journal/UI shows WHY a position was small.
             "iv_sizing_factor": signal.get("iv_sizing_factor"),
             "selection_reason": snapshot.get("selection_reason"),
-            "approved": bool(risk.get("approved")),
+            "approved": bool(risk.get("approved")) and research_eligible,
             "execution_ready": execution_ready,
+            "research_eligible": research_eligible,
             "trading_symbol": contract.get("trading_symbol"),
             "instrument_key": contract.get("instrument_key"),
             "option_type": contract.get("option_type"),

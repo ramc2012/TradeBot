@@ -814,6 +814,8 @@ export const getIndexSwingAttribution = (limit = 50) =>
 
 export const getVanguardSummary = () => api.get("/api/vanguard/summary");
 export const getVanguardModel = () => api.get("/api/vanguard/model");
+export const getVanguardObservationFollowup = (lane: "swing" | "next_session" = "swing") =>
+  api.get("/api/vanguard/observation-followup", { params: { lane } });
 export const getVanguardWatchlist = (sessions = 20, source_session?: string) =>
   api.get("/api/vanguard/watchlist", { params: { sessions, source_session } });
 export const getVanguardStrategyJournals = (source_session?: string, limit = 200) =>

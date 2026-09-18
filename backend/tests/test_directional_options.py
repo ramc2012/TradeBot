@@ -894,6 +894,52 @@ async def test_directional_options_paper_store_tracks_open_and_closed_positions(
 
 
 @pytest.mark.asyncio
+async def test_paper_store_refuses_joint_research_no_trade_even_if_risk_is_approved(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The durable paper boundary must independently enforce no-trade evidence."""
+    store = DirectionalOptionsPaperStore(tmp_path / "directional-paper")
+    state = _isolate_directional_paper_store(store, monkeypatch)
+    journal: list[dict] = []
+
+    async def capture(payload: dict) -> None:
+        journal.append(dict(payload))
+
+    monkeypatch.setattr(store, "_append_journal", capture)
+    payload = {
+        "selection": {"underlying": "SENSEX", "timeframe": "3minute"},
+        "snapshot": {
+            "as_of": "2026-09-16T04:19:53+00:00",
+            "underlying": "SENSEX",
+            "spot_price": 75400.0,
+            "signal": {"direction": "PE", "confidence": 0.72},
+            "regime": {"label": "micro_trend"},
+            "selected_contract": {
+                "trading_symbol": "SENSEX 75500 PE 24 SEP 26",
+                "instrument_key": "BSE_FO|SENSEX75500PE",
+                "option_type": "PE",
+                "expiry": "2026-09-24",
+                "strike": 75500.0,
+                "option_price": 1433.05,
+                "lot_size": 10,
+                "research": {"eligible": False, "cost_stress_2x": -21.0},
+            },
+            "risk": {"approved": True, "quantity_lots": 1, "quantity_units": 10},
+            "selection_reason": "joint scenario edge -21.00; no trade",
+            "data_status": {"execution_ready": True},
+        },
+    }
+
+    result = await store.sync_snapshot(payload)
+
+    assert result["open_positions"] == 0
+    assert state["open_positions"] == []
+    assert journal[0]["approved"] is False
+    assert journal[0]["research_eligible"] is False
+
+
+@pytest.mark.asyncio
 async def test_directional_options_paper_store_reports_current_nifty_monthly_expiry(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

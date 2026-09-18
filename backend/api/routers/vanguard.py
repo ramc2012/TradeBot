@@ -1780,7 +1780,48 @@ async def observation_followup(lane: str = Query('swing', pattern='^(swing|next_
                             'direction_hit_rate':mean(v>0 for v in directions) if directions else None,
                             'qualified_n':sum(bool(r.get('qualified')) for r,_ in valid),
                             'assessment':'descriptive_only_requires_frozen_chronological_holdout'})
+    # Prospective evidence gate.  Historical model gates and a populated
+    # watchlist are not permission to promote: each frozen model must first
+    # accumulate enough independent source sessions and show positive central
+    # tendency on BOTH horizons it was designed to predict.  This is a read-only
+    # verdict; it never retrains, changes membership, writes tickets, or calls a
+    # broker.
+    minimum_source_sessions = 20
+    promotion_gates = []
+    for model in sorted({r['model_version'] for r in items}):
+        reasons = []
+        primary = [q for q in quality if q['model_version'] == model and q['horizon'] in (1, 2)]
+        for horizon in (1, 2):
+            row = next((q for q in primary if q['horizon'] == horizon), None)
+            if row is None:
+                reasons.append(f'session +{horizon}: no quality row')
+                continue
+            if row['sessions'] < minimum_source_sessions:
+                reasons.append(
+                    f"session +{horizon}: {row['sessions']}/{minimum_source_sessions} source sessions"
+                )
+            for field, label in (
+                ('mean_return', 'mean premium return'),
+                ('median_return', 'median premium return'),
+            ):
+                value = row[field]
+                if value is None or value <= 0:
+                    reasons.append(f'session +{horizon}: {label} is not positive')
+            if row['positive_fraction'] is None or row['positive_fraction'] <= 0.5:
+                reasons.append(f'session +{horizon}: premium win rate is not above 50%')
+            if row['direction_hit_rate'] is None or row['direction_hit_rate'] <= 0.5:
+                reasons.append(f'session +{horizon}: direction hit rate is not above 50%')
+        promotion_gates.append({
+            'model_version': model,
+            'gate_passed': not reasons,
+            'status': 'eligible_for_review' if not reasons else 'hold_shadow',
+            'minimum_source_sessions': minimum_source_sessions,
+            'primary_horizons': [1, 2],
+            'reasons': reasons,
+            'policy': 'Prospective frozen evidence only; passing permits human review, never automatic promotion.',
+        })
     return {'items':items,'quality':quality,'updated_at':max((r['updated_at'] for r in rows),default=None),
             'status':'ok','paper_only':True,'units':'fraction',
+            'promotion_gates':promotion_gates,
             'horizon_basis':'Trading sessions after the entry session; session 0 is entry day. At least the 15:15 IST observation required.',
             'validation':'No retraining or promotion. Models remain separate; repeated symbols are correlated. Horizon selection requires a frozen, untouched chronological holdout.'}

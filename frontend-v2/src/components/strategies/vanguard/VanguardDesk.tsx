@@ -88,6 +88,7 @@ import {
   getVanguardFunnel,
   getVanguardMarket,
   getVanguardModel,
+  getVanguardObservationFollowup,
   getVanguardStrategyJournals,
   getVanguardWatchlist,
   getVanguardPipeline,
@@ -103,6 +104,7 @@ import {
 import { useQuote, useQuotesConnection } from "@/hooks/useQuoteStore";
 
 import ObservationFollowup from "./ObservationFollowup";
+import VanguardPerformance from "./VanguardPerformance";
 import { DecisionFlowTab } from "./DecisionFlow";
 import { MarketTab } from "./MarketTab";
 import { ResearchTab } from "./ResearchTab";
@@ -161,13 +163,13 @@ export default function VanguardDesk() {
     queryKey: ["vanguard", "model"],
     queryFn: (): Promise<any> => getVanguardModel().then((r) => r.data),
     refetchInterval: REFRESH_MS.summary,
-    enabled: activeTab === "model",
+    enabled: activeTab === "model" || activeTab === "performance",
   });
   const watchlist = useQuery({
     queryKey: ["vanguard", "watchlist", watchlistSession],
     queryFn: (): Promise<any> => getVanguardWatchlist(20, watchlistSession || undefined).then((r) => r.data),
     refetchInterval: REFRESH_MS.summary,
-    enabled: activeTab === "watchlist",
+    enabled: activeTab === "watchlist" || activeTab === "performance",
   });
   const strategyJournals = useQuery({
     queryKey: ["vanguard", "strategy-journals"],
@@ -184,7 +186,7 @@ export default function VanguardDesk() {
   const attribution = useQuery({
     queryKey: ["vanguard", "attribution"],
     queryFn: (): Promise<any> => getVanguardAttribution().then((r) => r.data),
-    enabled: activeTab === "attribution",
+    enabled: activeTab === "attribution" || activeTab === "performance",
   });
   const backtests = useQuery({
     queryKey: ["vanguard", "backtests"],
@@ -244,6 +246,12 @@ export default function VanguardDesk() {
     queryFn: (): Promise<any> => getVanguardRisk().then((r) => r.data),
     enabled: activeTab === "research",
   });
+  const followupPerformance = useQuery({
+    queryKey: ["vanguard", "observation-followup", "swing", "performance"],
+    queryFn: (): Promise<any> => getVanguardObservationFollowup("swing").then((r) => r.data),
+    enabled: activeTab === "performance",
+    refetchInterval: REFRESH_MS.summary,
+  });
 
   const s = summary.data;
   const thresholds = s?.thresholds;
@@ -263,6 +271,7 @@ export default function VanguardDesk() {
         { key: "model", label: "Model", icon: BrainCircuit },
         { key: "watchlist", label: "Watchlist", icon: Activity },
         { key: "followup", label: "Follow-through", icon: Activity },
+        { key: "performance", label: "Performance", icon: Activity },
         { key: "sentiment", label: "Sentiment", icon: Gauge },
         { key: "oiFutures", label: "Futures OI", icon: Layers },
         { key: "mp", label: "MP structure", icon: Layers },
@@ -300,6 +309,15 @@ export default function VanguardDesk() {
       )}
       {activeTab === "model" && <ModelTab data={model.data} />}
       {activeTab === "followup" && <ObservationFollowup />}
+      {activeTab === "performance" && (
+        <VanguardPerformance
+          summary={summary.data}
+          model={model.data}
+          watchlist={watchlist.data}
+          attribution={attribution.data}
+          followup={followupPerformance.data}
+        />
+      )}
       {activeTab === "watchlist" && <WatchlistTab data={watchlist.data} strategies={strategyJournals.data}
         selectedSession={watchlistSession} onSession={setWatchlistSession}
         onBtst={() => setActiveTab("mp")} />}

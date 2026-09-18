@@ -18,6 +18,11 @@ async def test_followup_keeps_models_and_missing_horizons_separate(monkeypatch):
     assert a['positive_fraction']==.5 and a['direction_hit_rate']==1
     assert all(q['n']==0 and q['mean_return'] is None for q in result['quality'] if q['horizon']==2)
     assert len(result['items'])==4 and result['paper_only']
+    gate_a=next(g for g in result['promotion_gates'] if g['model_version']=='A')
+    assert gate_a['status']=='hold_shadow' and gate_a['gate_passed'] is False
+    assert gate_a['primary_horizons']==[1,2]
+    assert any('1/20 source sessions' in reason for reason in gate_a['reasons'])
+    assert any('session +2' in reason for reason in gate_a['reasons'])
 
 @pytest.mark.asyncio
 async def test_missing_table_is_explicit_not_zero_quality(monkeypatch):

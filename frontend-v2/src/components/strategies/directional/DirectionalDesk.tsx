@@ -57,6 +57,7 @@ import PaperTradingTab from "./PaperTradingTab";
 import PolicyLearningTab from "./PolicyLearningTab";
 import OptionAnalyticsPanel from "./OptionAnalyticsPanel";
 import DistributionDesk from "./DistributionDesk";
+import DirectionalPerformanceDiagnostics from "./DirectionalPerformanceDiagnostics";
 
 const DEFAULT_UNDERLYING = "NIFTY";
 // FAST-lane timeframe policy (2026-07-15): the desk mirrors the lane's
@@ -316,10 +317,16 @@ export default function DirectionalDesk() {
       {activeTab === "policy" ? <PolicyLearningTab /> : null}
 
       {activeTab === "performance" ? (
-        <PaperPerformance
-          summary={paper.summary.data as Record<string, number> | undefined}
-          positions={livePaper.positions.data as PositionsPayload | undefined}
-        />
+        <div className="space-y-4">
+          <DirectionalPerformanceDiagnostics
+            summary={paper.summary.data as Record<string, number> | undefined}
+            positions={livePaper.positions.data as PositionsPayload | undefined}
+          />
+          <PaperPerformance
+            summary={paper.summary.data as Record<string, number> | undefined}
+            positions={livePaper.positions.data as PositionsPayload | undefined}
+          />
+        </div>
       ) : null}
       {activeTab === "signal-quality" ? (
         <SignalQualityTab laneKeys={["directional_options", "directional_positioning"]} title="Directional signal validation" />
