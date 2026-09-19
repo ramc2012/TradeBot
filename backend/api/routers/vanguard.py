@@ -628,7 +628,14 @@ async def strategy_journals(
                   count(i.id) FILTER (WHERE i.entry_mark IS NOT NULL) marked,
                   count(i.id) FILTER (WHERE i.status='closed') resolved,
                   count(i.id) FILTER (WHERE i.return_pct>0) winners,
-                  avg(i.return_pct) FILTER (WHERE i.entry_mark IS NOT NULL) avg_return_pct
+                  avg(i.return_pct) FILTER (WHERE i.entry_mark IS NOT NULL) avg_return_pct,
+                  count(i.id) FILTER (WHERE i.paper_position) paper_positions,
+                  count(i.id) FILTER (WHERE i.day_1_return_pct IS NOT NULL) day_1_resolved,
+                  count(i.id) FILTER (WHERE i.day_2_return_pct IS NOT NULL) day_2_resolved,
+                  count(i.id) FILTER (WHERE i.day_3_return_pct IS NOT NULL) day_3_resolved,
+                  avg(i.day_1_return_pct) FILTER (WHERE i.day_1_return_pct IS NOT NULL) day_1_avg_return_pct,
+                  avg(i.day_2_return_pct) FILTER (WHERE i.day_2_return_pct IS NOT NULL) day_2_avg_return_pct,
+                  avg(i.day_3_return_pct) FILTER (WHERE i.day_3_return_pct IS NOT NULL) day_3_avg_return_pct
            FROM vanguard_swing_watchlist_runs r
            LEFT JOIN vanguard_swing_watchlist_items i USING (source_session)
            GROUP BY r.source_session,r.prediction_ts,r.direction_model_version,

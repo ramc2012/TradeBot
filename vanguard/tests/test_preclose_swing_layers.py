@@ -20,6 +20,10 @@ class _Model:
         self.role, self.status, self.version = role, status, f"{role}_v1"
 
 
+class _HorizonModel(_Model):
+    feature_names = ("horizon_2", "horizon_3")
+
+
 def _row(symbol, side, score, oi, mark=50.0):
     return {"symbol": symbol, "option_type": side, "horizon_sessions": 1,
             "expected_net_lower": 0.02, "strike": 100, "combined_score": score, "direction_score": score,
@@ -122,6 +126,14 @@ def test_the_actionable_list_is_capped_at_ten(sized):
         _evaluations(), TS, 1e6, None)
     assert sum(1 for row in rows if row["actionable"]) == preclose_swing.MAX_ACTIONABLE
     assert any("cap" in (row["actionable_reason"] or "") for row in rows)
+
+
+def test_d3_requires_a_model_artifact_that_declares_horizon_3():
+    assert preclose_swing._horizon_features(_HorizonModel("direction", "shadow"), 1) == [0.0, 0.0]
+    assert preclose_swing._horizon_features(_HorizonModel("direction", "shadow"), 2) == [1.0, 0.0]
+    assert preclose_swing._horizon_features(_HorizonModel("direction", "shadow"), 3) == [0.0, 1.0]
+    with pytest.raises(ValueError, match="horizon_3"):
+        preclose_swing._horizon_features(_Model("direction", "shadow"), 3)
 
 
 class _ChainCursor:

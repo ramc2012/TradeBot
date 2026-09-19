@@ -32,7 +32,8 @@ class _Connection:
 def _stub_models(monkeypatch, universe_rows: int):
     monkeypatch.setattr(
         preclose_swing, "_model",
-        lambda connection, role: SimpleNamespace(version=f"{role}-v1", status="shadow"),
+        lambda connection, role: SimpleNamespace(version=f"{role}-v2", status="shadow",
+                                                  feature_names=("horizon_2", "horizon_3")),
     )
     monkeypatch.setattr(preclose_swing, "_decision_rows", lambda connection: (TS, [{"symbol": "NIFTY"}]))
     monkeypatch.setattr(

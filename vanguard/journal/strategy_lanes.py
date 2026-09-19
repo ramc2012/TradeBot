@@ -105,11 +105,11 @@ def mark_open_mp_journals(connection) -> int:
 
 
 def _future_sessions(connection, source_session):
-    """Use NSE sessions, even if the archive is missing an entire day."""
+    """Use the next three NSE sessions, even if the archive misses a day."""
     from model.market_calendar import is_session
     sessions = []
     day = source_session
-    while len(sessions) < 2:
+    while len(sessions) < 3:
         day += timedelta(days=1)
         if is_session(day):
             sessions.append(day)
@@ -168,12 +168,15 @@ def track_swing(connection) -> dict[str, int]:
                    entry_ts=%s,entry_mark=%s,latest_ts=%s,latest_mark=%s,return_pct=%s,
                    max_return_pct=%s,min_return_pct=%s,
                    day_1_ts=%s,day_1_mark=%s,day_1_return_pct=%s,
-                   day_2_ts=%s,day_2_mark=%s,day_2_return_pct=%s,status=%s,updated_at=now()
+                   day_2_ts=%s,day_2_mark=%s,day_2_return_pct=%s,
+                   day_3_ts=%s,day_3_mark=%s,day_3_return_pct=%s,
+                   status=%s,updated_at=now()
                    ,net_return_pct=%s WHERE id=%s""",
                 (result["entry_ts"], entry_mark, result["latest_ts"], latest_mark, current_return,
                  result["max_return_pct"], result["min_return_pct"],
                  *(day_marks.get(1, (None, None, None))),
-                 *(day_marks.get(2, (None, None, None))), status, result["net_return_pct"], item["id"]),
+                 *(day_marks.get(2, (None, None, None))),
+                 *(day_marks.get(3, (None, None, None))), status, result["net_return_pct"], item["id"]),
             )
             cursor.execute(
                 """UPDATE vanguard_strategy_journal SET event_ts=%s,status=%s,

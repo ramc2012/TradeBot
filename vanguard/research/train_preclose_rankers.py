@@ -1,4 +1,4 @@
-"""Train the two shadow rankers for the pre-close 1-2 session swing lane.
+"""Train the two shadow rankers for the pre-close 1-3 session swing lane.
 
 Decision features stop at the 14:15 IST bar (available at 14:45).  Historical
 entry is the 14:45 bar close (available at 15:15), so the label includes the
@@ -27,25 +27,26 @@ from model.nonlinear_selector import FEATURE_NAMES, feature_row  # noqa: E402
 from research.train_nonlinear_selector import chronological_split  # noqa: E402
 
 DEFAULT_DSN = "postgresql://nomadcurie:nomadcurie@localhost:5433/nomadcurie"
-DIRECTION_FEATURES = FEATURE_NAMES + ("horizon_2",)
-CONTRACT_FEATURES = FEATURE_NAMES + ("horizon_2", "contract_is_wing",)
+DIRECTION_FEATURES = FEATURE_NAMES + ("horizon_2", "horizon_3")
+CONTRACT_FEATURES = FEATURE_NAMES + ("horizon_2", "horizon_3", "contract_is_wing",)
 IST = ZoneInfo("Asia/Kolkata")
 
 BASE_SQL = r"""
 WITH session_calendar AS MATERIALIZED (
     SELECT session_date,lead(session_date,1) OVER (ORDER BY session_date) AS day_1,
-           lead(session_date,2) OVER (ORDER BY session_date) AS day_2
+           lead(session_date,2) OVER (ORDER BY session_date) AS day_2,
+           lead(session_date,3) OVER (ORDER BY session_date) AS day_3
     FROM (SELECT DISTINCT (time AT TIME ZONE 'Asia/Kolkata')::date session_date
           FROM underlying_spot_candles WHERE interval='30minute') d
 ), candidates AS MATERIALIZED (
-    SELECT ce.*,sc.day_1,sc.day_2
+    SELECT ce.*,sc.day_1,sc.day_2,sc.day_3
     FROM candidate_evaluations ce JOIN session_calendar sc
       ON sc.session_date=(ce.ts AT TIME ZONE 'Asia/Kolkata')::date
     WHERE (ce.ts AT TIME ZONE 'Asia/Kolkata')::time=time '14:15'
-      AND sc.day_2 IS NOT NULL
+      AND sc.day_3 IS NOT NULL
 ), bounds AS MATERIALIZED (
     SELECT min(ts)-interval '1 day' lo,
-           ((max(day_2)+1)::date::timestamp AT TIME ZONE 'Asia/Kolkata') hi
+           ((max(day_3)+1)::date::timestamp AT TIME ZONE 'Asia/Kolkata') hi
     FROM candidates
 ), spot_marks AS MATERIALIZED (
     SELECT DISTINCT ON (s.underlying,s.time) s.underlying,s.time,s.close
@@ -61,7 +62,8 @@ SELECT ce.*,
        source_spot.close::double precision source_spot,
        entry_spot.close::double precision entry_spot,
        day_1_spot.close::double precision day_1_spot,
-       day_2_spot.close::double precision day_2_spot
+       day_2_spot.close::double precision day_2_spot,
+       day_3_spot.close::double precision day_3_spot
 FROM candidates ce
 JOIN spot_marks source_spot ON source_spot.underlying=ce.symbol AND source_spot.time=ce.ts
 JOIN spot_marks entry_spot ON entry_spot.underlying=ce.symbol
@@ -70,6 +72,8 @@ JOIN spot_marks day_1_spot ON day_1_spot.underlying=ce.symbol
   AND day_1_spot.time=((ce.day_1+time '14:45') AT TIME ZONE 'Asia/Kolkata')
 JOIN spot_marks day_2_spot ON day_2_spot.underlying=ce.symbol
   AND day_2_spot.time=((ce.day_2+time '14:45') AT TIME ZONE 'Asia/Kolkata')
+JOIN spot_marks day_3_spot ON day_3_spot.underlying=ce.symbol
+  AND day_3_spot.time=((ce.day_3+time '14:45') AT TIME ZONE 'Asia/Kolkata')
 WHERE entry_spot.close>0
 ORDER BY ce.ts,ce.symbol
 """
@@ -99,12 +103,13 @@ ORDER BY o.underlying,o.expiry,o.strike,o.option_type,
 """
 
 MARKS_SQL = r"""
-WITH wanted(source_ts,symbol,option_type,expiry,strike,entry_time,day_1_time,day_2_time) AS
+WITH wanted(source_ts,symbol,option_type,expiry,strike,entry_time,day_1_time,day_2_time,day_3_time) AS
      (VALUES %s)
 SELECT w.source_ts,w.symbol,w.option_type,w.expiry,w.strike,
        entry_mark.close::double precision entry_option,
        day_1_mark.close::double precision day_1_option,
-       day_2_mark.close::double precision day_2_option
+       day_2_mark.close::double precision day_2_option,
+       day_3_mark.close::double precision day_3_option
 FROM wanted w
 JOIN LATERAL (
     SELECT o.close FROM option_premium_candles o
@@ -127,6 +132,13 @@ JOIN LATERAL (
       AND o.time=w.day_2_time
     ORDER BY (o.source='upstox') DESC,o.source,o.synced_at DESC LIMIT 1
 ) day_2_mark ON true
+JOIN LATERAL (
+    SELECT o.close FROM option_premium_candles o
+    WHERE o.underlying=w.symbol AND o.option_type=w.option_type
+      AND o.expiry=w.expiry AND o.strike=w.strike AND o.interval='30minute'
+      AND o.time=w.day_3_time
+    ORDER BY (o.source='upstox') DESC,o.source,o.synced_at DESC LIMIT 1
+) day_3_mark ON true
 """
 
 def _instrument(row: dict) -> dict:
@@ -159,7 +171,10 @@ def load_examples(connection, cost_pct: float = 0.01) -> dict[str, tuple]:
     contracts = []
     for number, (source_ts, session_rows) in enumerate(sorted(by_ts.items()), start=1):
         by_symbol = {row["symbol"]: row for row in session_rows}
-        min_expiry = max(row["day_2"] for row in session_rows)
+        # A D+3 label must remain on a live contract through the D+3 mark.
+        # Using D+2 here admitted expiry-week contracts that could not carry
+        # the requested three-session holding period and biased the cohort.
+        min_expiry = max(row["day_3"] for row in session_rows)
         with connection.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cursor:
             cursor.execute(SOURCE_OPTIONS_SQL, (source_ts, list(by_symbol), min_expiry))
             option_rows = cursor.fetchall()
@@ -195,6 +210,7 @@ def load_examples(connection, cost_pct: float = 0.01) -> dict[str, tuple]:
             datetime.combine(source_session, time(14, 45), IST).astimezone(UTC),
             datetime.combine(row["day_1"], time(14, 45), IST).astimezone(UTC),
             datetime.combine(row["day_2"], time(14, 45), IST).astimezone(UTC),
+            datetime.combine(row["day_3"], time(14, 45), IST).astimezone(UTC),
         ))
     with connection.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cursor:
         for start in range(0, len(wanted), 1000):
@@ -217,20 +233,20 @@ def load_examples(connection, cost_pct: float = 0.01) -> dict[str, tuple]:
         session = (row["ts"].astimezone(IST).date() if row["ts"].tzinfo else row["ts"].date())
         base = feature_row(dict(row), _instrument(row), row["option_type"], row["ts"])
         sign = 1.0 if row["option_type"] == "CE" else -1.0
-        for horizon in (1, 2):
-            group = f"{session}|h{horizon}"
+        for horizon in (1, 2, 3):
             spot_exit = row[f"day_{horizon}_spot"]
             directional_target = float(np.clip(sign * (spot_exit / row["entry_spot"] - 1.0), -0.20, 0.20))
             direction_key = (row["ts"], row["symbol"], row["option_type"], horizon)
             if row["contract_kind"] == "ATM" and direction_key not in seen_direction:
-                direction[0].append(np.append(base, float(horizon == 2)))
+                direction[0].append(np.append(base, [float(horizon == 2), float(horizon == 3)]))
                 direction[1].append(directional_target)
                 direction[2].append(session)
                 direction[3].append(f"{row['ts'].isoformat()}|{row['symbol']}|{row['option_type']}|h{horizon}")
                 seen_direction.add(direction_key)
             option_exit = row[f"day_{horizon}_option"]
             option_target = float(np.clip(option_exit / row["entry_option"] - 1.0 - cost_pct, -0.90, 4.0))
-            contract[0].append(np.append(base, [float(horizon == 2), float(row["contract_kind"] == "WING_25D")]))
+            contract[0].append(np.append(base, [float(horizon == 2), float(horizon == 3),
+                                                 float(row["contract_kind"] == "WING_25D")]))
             contract[1].append(option_target)
             contract[2].append(session)
             contract[3].append(
@@ -248,7 +264,14 @@ def train_role(connection, role: str, dataset: tuple, feature_names: tuple[str, 
                epochs: int, write: bool) -> dict:
     x, y, sessions, identities = dataset
     train, validation, test, train_days, validation_days, test_days = chronological_split(sessions)
-    groups = np.asarray([f"{day}|{identity.rsplit('|',1)[-1]}" for day, identity in zip(sessions, identities)])
+    # The product is top-10 CE AND top-10 PE.  Train each side/horizon as its
+    # own ranking group; a mixed group lets the stronger side crowd the other
+    # side out of the loss and then asks selection to recover two leaderboards.
+    def group_key(day, identity):
+        parts = identity.split('|')
+        side = next((part for part in parts if part in ("CE", "PE")), "UNKNOWN")
+        return f"{day}|{side}|{parts[-1]}"
+    groups = np.asarray([group_key(day, identity) for day, identity in zip(sessions, identities)])
     model, fit = fit_listwise_mlp(
         x[train], y[train], groups[train], x[validation], y[validation], groups[validation],
         feature_names, epochs=epochs, seed=20260904 if role == "direction" else 20260905,
@@ -264,7 +287,7 @@ def train_role(connection, role: str, dataset: tuple, feature_names: tuple[str, 
         and (test_metrics["selected_mean"] or 0.0) > 0.0
         and (test_metrics["positive_group_rate"] or 0.0) >= 0.50
     )
-    version = f"listwise_preclose_{role}_v1_{datetime.now(UTC):%Y%m%dT%H%M%SZ}"
+    version = f"listwise_preclose_{role}_v2_{datetime.now(UTC):%Y%m%dT%H%M%SZ}"
     model.version, model.role, model.status = version, role, "shadow"
     if role == "contract":
         # Validation calibration is experimental. The test slice is never fit.
@@ -281,12 +304,13 @@ def train_role(connection, role: str, dataset: tuple, feature_names: tuple[str, 
         "gate": "test overlap@10>=2, selected mean>0, positive groups>=50%",
         "activation": "shadow watchlist only; no ticket or broker path",
         "target": (
-            "side-adjusted underlying return from source-session 14:45 close to D+1/D+2 14:45 close"
+            "side-adjusted underlying return from source-session 14:45 close to D+1/D+2/D+3 14:45 close"
             if role == "direction" else
-            "exact ATM/25-delta option net return from source-session 14:45 close to D+1/D+2 14:45 close"
+            "exact ATM/25-delta option net return from source-session 14:45 close to D+1/D+2/D+3 14:45 close"
         ),
         "overnight_included": True, "cost_pct": 0.01 if role == "contract" else 0.0,
         "embargo_sessions": 2,
+        "ranking_group": "source session x CE/PE side x horizon",
     }
     card = {"version": version, "role": role, "status": "shadow", "metrics": metrics}
     print(json.dumps(card, indent=2), flush=True)

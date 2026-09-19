@@ -1,0 +1,1572 @@
+{
+  "session": "2026-09-18",
+  "cost_pct": 0.01,
+  "days": [
+    {
+      "source_session": "2026-09-02",
+      "track_session": "2026-09-03",
+      "candidate_symbols": 0,
+      "candidate_contracts": 0,
+      "frozen": {
+        "selected": 10,
+        "resolved": 9,
+        "wins": 7,
+        "hit_rate": 0.7777777777777778,
+        "mean_net": 0.12814012391562513,
+        "ce": 0,
+        "pe": 10
+      },
+      "candidates": {
+        "selected": 0,
+        "resolved": 0,
+        "wins": 0,
+        "hit_rate": null,
+        "mean_net": null,
+        "ce": 0,
+        "pe": 0
+      },
+      "frozen_before_entry": true,
+      "by_side": {
+        "CE": {
+          "selected": 0,
+          "resolved": 0,
+          "wins": 0,
+          "hit_rate": null,
+          "mean_net": null,
+          "ce": 0,
+          "pe": 0
+        },
+        "PE": {
+          "selected": 0,
+          "resolved": 0,
+          "wins": 0,
+          "hit_rate": null,
+          "mean_net": null,
+          "ce": 0,
+          "pe": 0
+        }
+      },
+      "challengers": {
+        "margin": {
+          "selected": 0,
+          "resolved": 0,
+          "wins": 0,
+          "hit_rate": null,
+          "mean_net": null,
+          "ce": 0,
+          "pe": 0
+        },
+        "source_traded": {
+          "selected": 0,
+          "resolved": 0,
+          "wins": 0,
+          "hit_rate": null,
+          "mean_net": null,
+          "ce": 0,
+          "pe": 0
+        },
+        "median": {
+          "selected": 0,
+          "resolved": 0,
+          "wins": 0,
+          "hit_rate": null,
+          "mean_net": null,
+          "ce": 0,
+          "pe": 0
+        },
+        "balanced": {
+          "selected": 0,
+          "resolved": 0,
+          "wins": 0,
+          "hit_rate": null,
+          "mean_net": null,
+          "ce": 0,
+          "pe": 0
+        },
+        "source_traded_balanced": {
+          "selected": 0,
+          "resolved": 0,
+          "wins": 0,
+          "hit_rate": null,
+          "mean_net": null,
+          "ce": 0,
+          "pe": 0
+        }
+      }
+    },
+    {
+      "source_session": "2026-09-03",
+      "track_session": "2026-09-04",
+      "candidate_symbols": 206,
+      "candidate_contracts": 411,
+      "frozen": {
+        "selected": 10,
+        "resolved": 6,
+        "wins": 3,
+        "hit_rate": 0.5,
+        "mean_net": 0.0636101005077328,
+        "ce": 9,
+        "pe": 1
+      },
+      "candidates": {
+        "selected": 411,
+        "resolved": 257,
+        "wins": 97,
+        "hit_rate": 0.377431906614786,
+        "mean_net": -0.042898398858820394,
+        "ce": 205,
+        "pe": 206
+      },
+      "frozen_before_entry": true,
+      "by_side": {
+        "CE": {
+          "selected": 205,
+          "resolved": 144,
+          "wins": 58,
+          "hit_rate": 0.4027777777777778,
+          "mean_net": -0.0022843726500633467,
+          "ce": 205,
+          "pe": 0
+        },
+        "PE": {
+          "selected": 206,
+          "resolved": 113,
+          "wins": 39,
+          "hit_rate": 0.34513274336283184,
+          "mean_net": -0.09465432606290018,
+          "ce": 0,
+          "pe": 206
+        }
+      },
+      "challengers": {
+        "margin": {
+          "selected": 10,
+          "resolved": 6,
+          "wins": 3,
+          "hit_rate": 0.5,
+          "mean_net": 0.0636101005077328,
+          "ce": 9,
+          "pe": 1
+        },
+        "source_traded": {
+          "selected": 0,
+          "resolved": 0,
+          "wins": 0,
+          "hit_rate": null,
+          "mean_net": null,
+          "ce": 0,
+          "pe": 0
+        },
+        "median": {
+          "selected": 10,
+          "resolved": 8,
+          "wins": 3,
+          "hit_rate": 0.375,
+          "mean_net": -0.014316258031807458,
+          "ce": 9,
+          "pe": 1
+        },
+        "balanced": {
+          "selected": 10,
+          "resolved": 6,
+          "wins": 3,
+          "hit_rate": 0.5,
+          "mean_net": 0.07426854667149813,
+          "ce": 5,
+          "pe": 5
+        },
+        "source_traded_balanced": {
+          "selected": 0,
+          "resolved": 0,
+          "wins": 0,
+          "hit_rate": null,
+          "mean_net": null,
+          "ce": 0,
+          "pe": 0
+        }
+      }
+    },
+    {
+      "source_session": "2026-09-04",
+      "track_session": "2026-09-07",
+      "candidate_symbols": 207,
+      "candidate_contracts": 412,
+      "frozen": {
+        "selected": 10,
+        "resolved": 9,
+        "wins": 4,
+        "hit_rate": 0.4444444444444444,
+        "mean_net": -0.015033050678937824,
+        "ce": 9,
+        "pe": 1
+      },
+      "candidates": {
+        "selected": 412,
+        "resolved": 395,
+        "wins": 175,
+        "hit_rate": 0.4430379746835443,
+        "mean_net": -0.010217532361970214,
+        "ce": 206,
+        "pe": 206
+      },
+      "frozen_before_entry": true,
+      "by_side": {
+        "CE": {
+          "selected": 206,
+          "resolved": 202,
+          "wins": 53,
+          "hit_rate": 0.2623762376237624,
+          "mean_net": -0.07537802401303197,
+          "ce": 206,
+          "pe": 0
+        },
+        "PE": {
+          "selected": 206,
+          "resolved": 193,
+          "wins": 122,
+          "hit_rate": 0.6321243523316062,
+          "mean_net": 0.057981531438622926,
+          "ce": 0,
+          "pe": 206
+        }
+      },
+      "challengers": {
+        "margin": {
+          "selected": 10,
+          "resolved": 9,
+          "wins": 4,
+          "hit_rate": 0.4444444444444444,
+          "mean_net": -0.015033050678937824,
+          "ce": 9,
+          "pe": 1
+        },
+        "source_traded": {
+          "selected": 0,
+          "resolved": 0,
+          "wins": 0,
+          "hit_rate": null,
+          "mean_net": null,
+          "ce": 0,
+          "pe": 0
+        },
+        "median": {
+          "selected": 10,
+          "resolved": 9,
+          "wins": 3,
+          "hit_rate": 0.3333333333333333,
+          "mean_net": -0.04422781887019858,
+          "ce": 7,
+          "pe": 3
+        },
+        "balanced": {
+          "selected": 10,
+          "resolved": 8,
+          "wins": 6,
+          "hit_rate": 0.75,
+          "mean_net": 0.046068496094406976,
+          "ce": 5,
+          "pe": 5
+        },
+        "source_traded_balanced": {
+          "selected": 0,
+          "resolved": 0,
+          "wins": 0,
+          "hit_rate": null,
+          "mean_net": null,
+          "ce": 0,
+          "pe": 0
+        }
+      }
+    },
+    {
+      "source_session": "2026-09-08",
+      "track_session": "2026-09-09",
+      "candidate_symbols": 6,
+      "candidate_contracts": 12,
+      "frozen": {
+        "selected": 6,
+        "resolved": 6,
+        "wins": 6,
+        "hit_rate": 1.0,
+        "mean_net": 0.5795328919163366,
+        "ce": 5,
+        "pe": 1
+      },
+      "candidates": {
+        "selected": 12,
+        "resolved": 12,
+        "wins": 6,
+        "hit_rate": 0.5,
+        "mean_net": 0.11027479646356962,
+        "ce": 6,
+        "pe": 6
+      },
+      "frozen_before_entry": true,
+      "by_side": {
+        "CE": {
+          "selected": 6,
+          "resolved": 6,
+          "wins": 5,
+          "hit_rate": 0.8333333333333334,
+          "mean_net": 0.47461864903678125,
+          "ce": 6,
+          "pe": 0
+        },
+        "PE": {
+          "selected": 6,
+          "resolved": 6,
+          "wins": 1,
+          "hit_rate": 0.16666666666666666,
+          "mean_net": -0.254069056109642,
+          "ce": 0,
+          "pe": 6
+        }
+      },
+      "challengers": {
+        "margin": {
+          "selected": 6,
+          "resolved": 6,
+          "wins": 6,
+          "hit_rate": 1.0,
+          "mean_net": 0.5795328919163366,
+          "ce": 5,
+          "pe": 1
+        },
+        "source_traded": {
+          "selected": 6,
+          "resolved": 6,
+          "wins": 6,
+          "hit_rate": 1.0,
+          "mean_net": 0.5795328919163366,
+          "ce": 5,
+          "pe": 1
+        },
+        "median": {
+          "selected": 6,
+          "resolved": 6,
+          "wins": 6,
+          "hit_rate": 1.0,
+          "mean_net": 0.5795328919163364,
+          "ce": 5,
+          "pe": 1
+        },
+        "balanced": {
+          "selected": 6,
+          "resolved": 6,
+          "wins": 6,
+          "hit_rate": 1.0,
+          "mean_net": 0.5795328919163366,
+          "ce": 5,
+          "pe": 1
+        },
+        "source_traded_balanced": {
+          "selected": 6,
+          "resolved": 6,
+          "wins": 6,
+          "hit_rate": 1.0,
+          "mean_net": 0.5795328919163366,
+          "ce": 5,
+          "pe": 1
+        }
+      }
+    },
+    {
+      "source_session": "2026-09-09",
+      "track_session": "2026-09-10",
+      "candidate_symbols": 210,
+      "candidate_contracts": 418,
+      "frozen": {
+        "selected": 10,
+        "resolved": 10,
+        "wins": 1,
+        "hit_rate": 0.1,
+        "mean_net": 0.030243674083002915,
+        "ce": 8,
+        "pe": 2
+      },
+      "candidates": {
+        "selected": 418,
+        "resolved": 418,
+        "wins": 153,
+        "hit_rate": 0.3660287081339713,
+        "mean_net": -0.027760064788122756,
+        "ce": 209,
+        "pe": 209
+      },
+      "frozen_before_entry": true,
+      "by_side": {
+        "CE": {
+          "selected": 209,
+          "resolved": 209,
+          "wins": 60,
+          "hit_rate": 0.28708133971291866,
+          "mean_net": -0.057469896745237795,
+          "ce": 209,
+          "pe": 0
+        },
+        "PE": {
+          "selected": 209,
+          "resolved": 209,
+          "wins": 93,
+          "hit_rate": 0.4449760765550239,
+          "mean_net": 0.0019497671689922664,
+          "ce": 0,
+          "pe": 209
+        }
+      },
+      "challengers": {
+        "margin": {
+          "selected": 10,
+          "resolved": 10,
+          "wins": 1,
+          "hit_rate": 0.1,
+          "mean_net": 0.030243674083002915,
+          "ce": 8,
+          "pe": 2
+        },
+        "source_traded": {
+          "selected": 0,
+          "resolved": 0,
+          "wins": 0,
+          "hit_rate": null,
+          "mean_net": null,
+          "ce": 0,
+          "pe": 0
+        },
+        "median": {
+          "selected": 10,
+          "resolved": 10,
+          "wins": 1,
+          "hit_rate": 0.1,
+          "mean_net": 0.05720256695299386,
+          "ce": 7,
+          "pe": 3
+        },
+        "balanced": {
+          "selected": 10,
+          "resolved": 10,
+          "wins": 1,
+          "hit_rate": 0.1,
+          "mean_net": -0.030489239027588638,
+          "ce": 5,
+          "pe": 5
+        },
+        "source_traded_balanced": {
+          "selected": 0,
+          "resolved": 0,
+          "wins": 0,
+          "hit_rate": null,
+          "mean_net": null,
+          "ce": 0,
+          "pe": 0
+        }
+      }
+    },
+    {
+      "source_session": "2026-09-10",
+      "track_session": "2026-09-11",
+      "candidate_symbols": 209,
+      "candidate_contracts": 416,
+      "frozen": {
+        "selected": 10,
+        "resolved": 10,
+        "wins": 3,
+        "hit_rate": 0.3,
+        "mean_net": -0.11144747813457792,
+        "ce": 9,
+        "pe": 1
+      },
+      "candidates": {
+        "selected": 416,
+        "resolved": 416,
+        "wins": 184,
+        "hit_rate": 0.4423076923076923,
+        "mean_net": 0.0026684287958981625,
+        "ce": 207,
+        "pe": 209
+      },
+      "frozen_before_entry": true,
+      "by_side": {
+        "CE": {
+          "selected": 207,
+          "resolved": 207,
+          "wins": 129,
+          "hit_rate": 0.6231884057971014,
+          "mean_net": 0.09688277182864051,
+          "ce": 207,
+          "pe": 0
+        },
+        "PE": {
+          "selected": 209,
+          "resolved": 209,
+          "wins": 55,
+          "hit_rate": 0.2631578947368421,
+          "mean_net": -0.09064434157624374,
+          "ce": 0,
+          "pe": 209
+        }
+      },
+      "challengers": {
+        "margin": {
+          "selected": 10,
+          "resolved": 10,
+          "wins": 3,
+          "hit_rate": 0.3,
+          "mean_net": -0.11144747813457792,
+          "ce": 9,
+          "pe": 1
+        },
+        "source_traded": {
+          "selected": 0,
+          "resolved": 0,
+          "wins": 0,
+          "hit_rate": null,
+          "mean_net": null,
+          "ce": 0,
+          "pe": 0
+        },
+        "median": {
+          "selected": 10,
+          "resolved": 10,
+          "wins": 1,
+          "hit_rate": 0.1,
+          "mean_net": -0.1146416359176348,
+          "ce": 7,
+          "pe": 3
+        },
+        "balanced": {
+          "selected": 10,
+          "resolved": 10,
+          "wins": 2,
+          "hit_rate": 0.2,
+          "mean_net": -0.15306159735148803,
+          "ce": 5,
+          "pe": 5
+        },
+        "source_traded_balanced": {
+          "selected": 0,
+          "resolved": 0,
+          "wins": 0,
+          "hit_rate": null,
+          "mean_net": null,
+          "ce": 0,
+          "pe": 0
+        }
+      }
+    },
+    {
+      "source_session": "2026-09-11",
+      "track_session": "2026-09-15",
+      "candidate_symbols": 11,
+      "candidate_contracts": 18,
+      "frozen": {
+        "selected": 10,
+        "resolved": 8,
+        "wins": 0,
+        "hit_rate": 0.0,
+        "mean_net": -0.2565208487576798,
+        "ce": 9,
+        "pe": 1
+      },
+      "candidates": {
+        "selected": 18,
+        "resolved": 14,
+        "wins": 5,
+        "hit_rate": 0.35714285714285715,
+        "mean_net": -0.020915499109592086,
+        "ce": 11,
+        "pe": 7
+      },
+      "frozen_before_entry": true,
+      "by_side": {
+        "CE": {
+          "selected": 11,
+          "resolved": 9,
+          "wins": 0,
+          "hit_rate": 0.0,
+          "mean_net": -0.2728160586603273,
+          "ce": 11,
+          "pe": 0
+        },
+        "PE": {
+          "selected": 7,
+          "resolved": 5,
+          "wins": 5,
+          "hit_rate": 1.0,
+          "mean_net": 0.4325055080817314,
+          "ce": 0,
+          "pe": 7
+        }
+      },
+      "challengers": {
+        "margin": {
+          "selected": 10,
+          "resolved": 8,
+          "wins": 0,
+          "hit_rate": 0.0,
+          "mean_net": -0.2565208487576798,
+          "ce": 9,
+          "pe": 1
+        },
+        "source_traded": {
+          "selected": 10,
+          "resolved": 8,
+          "wins": 0,
+          "hit_rate": 0.0,
+          "mean_net": -0.2565208487576798,
+          "ce": 9,
+          "pe": 1
+        },
+        "median": {
+          "selected": 10,
+          "resolved": 8,
+          "wins": 0,
+          "hit_rate": 0.0,
+          "mean_net": -0.2963252824877136,
+          "ce": 9,
+          "pe": 1
+        },
+        "balanced": {
+          "selected": 7,
+          "resolved": 5,
+          "wins": 1,
+          "hit_rate": 0.2,
+          "mean_net": -0.26509726595768557,
+          "ce": 5,
+          "pe": 2
+        },
+        "source_traded_balanced": {
+          "selected": 7,
+          "resolved": 5,
+          "wins": 1,
+          "hit_rate": 0.2,
+          "mean_net": -0.26509726595768557,
+          "ce": 5,
+          "pe": 2
+        }
+      }
+    },
+    {
+      "source_session": "2026-09-15",
+      "track_session": "2026-09-16",
+      "candidate_symbols": 208,
+      "candidate_contracts": 415,
+      "frozen": {
+        "selected": 10,
+        "resolved": 10,
+        "wins": 1,
+        "hit_rate": 0.1,
+        "mean_net": -0.09848146841136332,
+        "ce": 9,
+        "pe": 1
+      },
+      "candidates": {
+        "selected": 415,
+        "resolved": 389,
+        "wins": 148,
+        "hit_rate": 0.38046272493573263,
+        "mean_net": -0.02942902951458146,
+        "ce": 207,
+        "pe": 208
+      },
+      "frozen_before_entry": true,
+      "by_side": {
+        "CE": {
+          "selected": 207,
+          "resolved": 194,
+          "wins": 89,
+          "hit_rate": 0.4587628865979381,
+          "mean_net": 0.02138637261203456,
+          "ce": 207,
+          "pe": 0
+        },
+        "PE": {
+          "selected": 208,
+          "resolved": 195,
+          "wins": 59,
+          "hit_rate": 0.30256410256410254,
+          "mean_net": -0.07998383983541996,
+          "ce": 0,
+          "pe": 208
+        }
+      },
+      "challengers": {
+        "margin": {
+          "selected": 10,
+          "resolved": 10,
+          "wins": 1,
+          "hit_rate": 0.1,
+          "mean_net": -0.09848146841136332,
+          "ce": 9,
+          "pe": 1
+        },
+        "source_traded": {
+          "selected": 0,
+          "resolved": 0,
+          "wins": 0,
+          "hit_rate": null,
+          "mean_net": null,
+          "ce": 0,
+          "pe": 0
+        },
+        "median": {
+          "selected": 10,
+          "resolved": 10,
+          "wins": 1,
+          "hit_rate": 0.1,
+          "mean_net": -0.10178740426234696,
+          "ce": 8,
+          "pe": 2
+        },
+        "balanced": {
+          "selected": 10,
+          "resolved": 10,
+          "wins": 3,
+          "hit_rate": 0.3,
+          "mean_net": -0.11276610775478857,
+          "ce": 5,
+          "pe": 5
+        },
+        "source_traded_balanced": {
+          "selected": 0,
+          "resolved": 0,
+          "wins": 0,
+          "hit_rate": null,
+          "mean_net": null,
+          "ce": 0,
+          "pe": 0
+        }
+      }
+    },
+    {
+      "source_session": "2026-09-16",
+      "track_session": "2026-09-17",
+      "candidate_symbols": 42,
+      "candidate_contracts": 83,
+      "frozen": {
+        "selected": 10,
+        "resolved": 10,
+        "wins": 5,
+        "hit_rate": 0.5,
+        "mean_net": -0.016860903983005722,
+        "ce": 10,
+        "pe": 0
+      },
+      "candidates": {
+        "selected": 83,
+        "resolved": 83,
+        "wins": 34,
+        "hit_rate": 0.40963855421686746,
+        "mean_net": -0.042920052722966055,
+        "ce": 41,
+        "pe": 42
+      },
+      "frozen_before_entry": true,
+      "by_side": {
+        "CE": {
+          "selected": 41,
+          "resolved": 41,
+          "wins": 29,
+          "hit_rate": 0.7073170731707317,
+          "mean_net": 0.25495731558324847,
+          "ce": 41,
+          "pe": 0
+        },
+        "PE": {
+          "selected": 42,
+          "resolved": 42,
+          "wins": 5,
+          "hit_rate": 0.11904761904761904,
+          "mean_net": -0.3337051027361756,
+          "ce": 0,
+          "pe": 42
+        }
+      },
+      "challengers": {
+        "margin": {
+          "selected": 10,
+          "resolved": 10,
+          "wins": 5,
+          "hit_rate": 0.5,
+          "mean_net": -0.016860903983005722,
+          "ce": 10,
+          "pe": 0
+        },
+        "source_traded": {
+          "selected": 10,
+          "resolved": 10,
+          "wins": 5,
+          "hit_rate": 0.5,
+          "mean_net": -0.016860903983005722,
+          "ce": 10,
+          "pe": 0
+        },
+        "median": {
+          "selected": 10,
+          "resolved": 10,
+          "wins": 7,
+          "hit_rate": 0.7,
+          "mean_net": 0.43801075222530017,
+          "ce": 10,
+          "pe": 0
+        },
+        "balanced": {
+          "selected": 10,
+          "resolved": 10,
+          "wins": 2,
+          "hit_rate": 0.2,
+          "mean_net": -0.09364724437999246,
+          "ce": 5,
+          "pe": 5
+        },
+        "source_traded_balanced": {
+          "selected": 10,
+          "resolved": 10,
+          "wins": 2,
+          "hit_rate": 0.2,
+          "mean_net": -0.09364724437999246,
+          "ce": 5,
+          "pe": 5
+        }
+      }
+    },
+    {
+      "source_session": "2026-09-17",
+      "track_session": "2026-09-18",
+      "candidate_symbols": 208,
+      "candidate_contracts": 416,
+      "frozen": {
+        "selected": 10,
+        "resolved": 10,
+        "wins": 4,
+        "hit_rate": 0.4,
+        "mean_net": 0.08890780210742007,
+        "ce": 10,
+        "pe": 0
+      },
+      "candidates": {
+        "selected": 416,
+        "resolved": 408,
+        "wins": 151,
+        "hit_rate": 0.3700980392156863,
+        "mean_net": -0.046264414143204,
+        "ce": 208,
+        "pe": 208
+      },
+      "frozen_before_entry": true,
+      "by_side": {
+        "CE": {
+          "selected": 208,
+          "resolved": 203,
+          "wins": 118,
+          "hit_rate": 0.5812807881773399,
+          "mean_net": 0.1127652902844854,
+          "ce": 208,
+          "pe": 0
+        },
+        "PE": {
+          "selected": 208,
+          "resolved": 205,
+          "wins": 33,
+          "hit_rate": 0.16097560975609757,
+          "mean_net": -0.2037426092594036,
+          "ce": 0,
+          "pe": 208
+        }
+      },
+      "challengers": {
+        "margin": {
+          "selected": 10,
+          "resolved": 10,
+          "wins": 4,
+          "hit_rate": 0.4,
+          "mean_net": 0.08890780210742007,
+          "ce": 10,
+          "pe": 0
+        },
+        "source_traded": {
+          "selected": 10,
+          "resolved": 9,
+          "wins": 2,
+          "hit_rate": 0.2222222222222222,
+          "mean_net": -0.08260583207649025,
+          "ce": 8,
+          "pe": 2
+        },
+        "median": {
+          "selected": 10,
+          "resolved": 10,
+          "wins": 4,
+          "hit_rate": 0.4,
+          "mean_net": 0.020847568049145785,
+          "ce": 8,
+          "pe": 2
+        },
+        "balanced": {
+          "selected": 10,
+          "resolved": 10,
+          "wins": 4,
+          "hit_rate": 0.4,
+          "mean_net": -0.057648919331097115,
+          "ce": 5,
+          "pe": 5
+        },
+        "source_traded_balanced": {
+          "selected": 10,
+          "resolved": 9,
+          "wins": 0,
+          "hit_rate": 0.0,
+          "mean_net": -0.22885398472914048,
+          "ce": 5,
+          "pe": 5
+        }
+      }
+    }
+  ],
+  "leaders": {
+    "CE": [
+      {
+        "symbol": "LTF",
+        "expiry": "2026-09-29",
+        "strike": 305.0,
+        "option_type": "CE",
+        "entry": 5.55,
+        "exit": 11.35,
+        "return": 1.045045045045045,
+        "model_scored": false,
+        "model_score": null,
+        "frozen_rank": null
+      },
+      {
+        "symbol": "INDHOTEL",
+        "expiry": "2026-09-29",
+        "strike": 730.0,
+        "option_type": "CE",
+        "entry": 7.8,
+        "exit": 15.75,
+        "return": 1.0192307692307692,
+        "model_scored": true,
+        "model_score": -0.037414092841994206,
+        "frozen_rank": null
+      },
+      {
+        "symbol": "COLPAL",
+        "expiry": "2026-09-29",
+        "strike": 1900.0,
+        "option_type": "CE",
+        "entry": 9.2,
+        "exit": 18.4,
+        "return": 1.0,
+        "model_scored": false,
+        "model_score": null,
+        "frozen_rank": null
+      },
+      {
+        "symbol": "HDFCBANK",
+        "expiry": "2026-09-29",
+        "strike": 720.0,
+        "option_type": "CE",
+        "entry": 9.5,
+        "exit": 18.75,
+        "return": 0.9736842105263158,
+        "model_scored": true,
+        "model_score": 0.02119117879985826,
+        "frozen_rank": null
+      },
+      {
+        "symbol": "UPL",
+        "expiry": "2026-09-29",
+        "strike": 560.0,
+        "option_type": "CE",
+        "entry": 5.85,
+        "exit": 10.65,
+        "return": 0.8205128205128205,
+        "model_scored": true,
+        "model_score": -0.020151816905930833,
+        "frozen_rank": null
+      },
+      {
+        "symbol": "CDSL",
+        "expiry": "2026-09-29",
+        "strike": 1360.0,
+        "option_type": "CE",
+        "entry": 25.6,
+        "exit": 44.0,
+        "return": 0.71875,
+        "model_scored": false,
+        "model_score": null,
+        "frozen_rank": null
+      },
+      {
+        "symbol": "PAGEIND",
+        "expiry": "2026-09-29",
+        "strike": 36000.0,
+        "option_type": "CE",
+        "entry": 241.0,
+        "exit": 400.05,
+        "return": 0.6599585062240664,
+        "model_scored": false,
+        "model_score": null,
+        "frozen_rank": null
+      },
+      {
+        "symbol": "CGPOWER",
+        "expiry": "2026-09-29",
+        "strike": 900.0,
+        "option_type": "CE",
+        "entry": 13.5,
+        "exit": 22.25,
+        "return": 0.6481481481481481,
+        "model_scored": false,
+        "model_score": null,
+        "frozen_rank": null
+      },
+      {
+        "symbol": "PAYTM",
+        "expiry": "2026-09-29",
+        "strike": 1800.0,
+        "option_type": "CE",
+        "entry": 30.5,
+        "exit": 50.2,
+        "return": 0.6459016393442623,
+        "model_scored": false,
+        "model_score": null,
+        "frozen_rank": null
+      },
+      {
+        "symbol": "UNOMINDA",
+        "expiry": "2026-09-29",
+        "strike": 1240.0,
+        "option_type": "CE",
+        "entry": 12.75,
+        "exit": 19.85,
+        "return": 0.5568627450980392,
+        "model_scored": false,
+        "model_score": null,
+        "frozen_rank": null
+      }
+    ],
+    "PE": [
+      {
+        "symbol": "MARUTI",
+        "expiry": "2026-09-29",
+        "strike": 12300.0,
+        "option_type": "PE",
+        "entry": 124.9,
+        "exit": 205.9,
+        "return": 0.6485188150520417,
+        "model_scored": false,
+        "model_score": null,
+        "frozen_rank": null
+      },
+      {
+        "symbol": "SUNPHARMA",
+        "expiry": "2026-09-29",
+        "strike": 1860.0,
+        "option_type": "PE",
+        "entry": 12.9,
+        "exit": 18.15,
+        "return": 0.4069767441860465,
+        "model_scored": true,
+        "model_score": -0.012241455220734401,
+        "frozen_rank": null
+      },
+      {
+        "symbol": "TCS",
+        "expiry": "2026-09-29",
+        "strike": 2100.0,
+        "option_type": "PE",
+        "entry": 25.5,
+        "exit": 35.5,
+        "return": 0.39215686274509803,
+        "model_scored": false,
+        "model_score": null,
+        "frozen_rank": null
+      },
+      {
+        "symbol": "NESTLEIND",
+        "expiry": "2026-09-29",
+        "strike": 1380.0,
+        "option_type": "PE",
+        "entry": 17.75,
+        "exit": 24.4,
+        "return": 0.37464788732394366,
+        "model_scored": true,
+        "model_score": 0.005984034928630075,
+        "frozen_rank": null
+      },
+      {
+        "symbol": "ICICIBANK",
+        "expiry": "2026-09-29",
+        "strike": 1350.0,
+        "option_type": "PE",
+        "entry": 12.75,
+        "exit": 17.35,
+        "return": 0.3607843137254902,
+        "model_scored": true,
+        "model_score": -0.012241075671415746,
+        "frozen_rank": null
+      },
+      {
+        "symbol": "KPITTECH",
+        "expiry": "2026-09-29",
+        "strike": 550.0,
+        "option_type": "PE",
+        "entry": 10.85,
+        "exit": 14.6,
+        "return": 0.3456221198156682,
+        "model_scored": false,
+        "model_score": null,
+        "frozen_rank": null
+      },
+      {
+        "symbol": "LUPIN",
+        "expiry": "2026-09-29",
+        "strike": 2100.0,
+        "option_type": "PE",
+        "entry": 26.0,
+        "exit": 33.1,
+        "return": 0.27307692307692305,
+        "model_scored": false,
+        "model_score": null,
+        "frozen_rank": null
+      },
+      {
+        "symbol": "KAYNES",
+        "expiry": "2026-09-29",
+        "strike": 3500.0,
+        "option_type": "PE",
+        "entry": 76.45,
+        "exit": 91.2,
+        "return": 0.19293655984303465,
+        "model_scored": true,
+        "model_score": 0.02937412892981863,
+        "frozen_rank": null
+      },
+      {
+        "symbol": "DIVISLAB",
+        "expiry": "2026-09-29",
+        "strike": 9300.0,
+        "option_type": "PE",
+        "entry": 87.45,
+        "exit": 103.3,
+        "return": 0.1812464265294454,
+        "model_scored": true,
+        "model_score": 0.004165598670760946,
+        "frozen_rank": null
+      },
+      {
+        "symbol": "TATACONSUM",
+        "expiry": "2026-09-29",
+        "strike": 1010.0,
+        "option_type": "PE",
+        "entry": 12.95,
+        "exit": 15.0,
+        "return": 0.1583011583011583,
+        "model_scored": true,
+        "model_score": -0.0033642275675721464,
+        "frozen_rank": null
+      }
+    ]
+  },
+  "policy": "09:45 to 15:15 IST completed-candle close; exact contracts; shadow only",
+  "caveat": "Archived coverage, not every exchange contract; hindsight leaders are not executable selection skill. Zero chain-snapshot volume is unknown trade activity, not proof of illiquidity. The model target is 1-2-session underlying direction; this benchmark measures one-session option premium.",
+  "market": {
+    "CE": {
+      "selected": 155,
+      "resolved": 155,
+      "wins": 78,
+      "hit_rate": 0.5032258064516129,
+      "mean_net": 0.06101215901084971,
+      "ce": 155,
+      "pe": 0
+    },
+    "PE": {
+      "selected": 145,
+      "resolved": 145,
+      "wins": 24,
+      "hit_rate": 0.16551724137931034,
+      "mean_net": -0.18763239849789187,
+      "ce": 0,
+      "pe": 145
+    }
+  },
+  "selected": [
+    {
+      "rank": 1,
+      "symbol": "FORCEMOT",
+      "option_type": "CE",
+      "strike": "17500.0",
+      "expiry": "2026-09-29",
+      "ranking_score": 0.12762939954839092,
+      "q50_return": 0.07238841988067574,
+      "source_volume": 0,
+      "entry_volume": 0,
+      "return": 0.17687074829931973
+    },
+    {
+      "rank": 2,
+      "symbol": "CANBK",
+      "option_type": "CE",
+      "strike": "117.5",
+      "expiry": "2026-09-29",
+      "ranking_score": 0.12355324941902229,
+      "q50_return": 0.11397420390204399,
+      "source_volume": 0,
+      "entry_volume": 0,
+      "return": -0.04492753623188406
+    },
+    {
+      "rank": 3,
+      "symbol": "BANDHANBNK",
+      "option_type": "CE",
+      "strike": "170.0",
+      "expiry": "2026-09-29",
+      "ranking_score": 0.11922934435531303,
+      "q50_return": 0.07682479053192046,
+      "source_volume": 0,
+      "entry_volume": 0,
+      "return": 0.5272727272727272
+    },
+    {
+      "rank": 4,
+      "symbol": "MANAPPURAM",
+      "option_type": "CE",
+      "strike": "315.0",
+      "expiry": "2026-09-29",
+      "ranking_score": 0.11823331144281325,
+      "q50_return": 0.10995056658414284,
+      "source_volume": 0,
+      "entry_volume": 0,
+      "return": 0.0
+    },
+    {
+      "rank": 5,
+      "symbol": "BSE",
+      "option_type": "CE",
+      "strike": "3200.0",
+      "expiry": "2026-09-29",
+      "ranking_score": 0.108762445975664,
+      "q50_return": 0.10099736342139515,
+      "source_volume": 0,
+      "entry_volume": 0,
+      "return": -0.12423076923076923
+    },
+    {
+      "rank": 6,
+      "symbol": "GAIL",
+      "option_type": "CE",
+      "strike": "167.5",
+      "expiry": "2026-09-29",
+      "ranking_score": 0.1059232720601265,
+      "q50_return": 0.05159508140730827,
+      "source_volume": 0,
+      "entry_volume": 0,
+      "return": 0.0
+    },
+    {
+      "rank": 7,
+      "symbol": "PIIND",
+      "option_type": "CE",
+      "strike": "2300.0",
+      "expiry": "2026-09-29",
+      "ranking_score": 0.10587810721043513,
+      "q50_return": 0.0888489407146253,
+      "source_volume": 0,
+      "entry_volume": 51800,
+      "return": 0.06904761904761905
+    },
+    {
+      "rank": 8,
+      "symbol": "BHARATFORG",
+      "option_type": "CE",
+      "strike": "1900.0",
+      "expiry": "2026-09-29",
+      "ranking_score": 0.10223454085392893,
+      "q50_return": 0.09556351611935089,
+      "source_volume": 0,
+      "entry_volume": 0,
+      "return": -0.005087620124364048
+    },
+    {
+      "rank": 9,
+      "symbol": "BAJAJHLDNG",
+      "option_type": "CE",
+      "strike": "11000.0",
+      "expiry": "2026-09-29",
+      "ranking_score": 0.10130033413257686,
+      "q50_return": 0.11080224814698475,
+      "source_volume": 0,
+      "entry_volume": 0,
+      "return": 0.4217948717948718
+    },
+    {
+      "rank": 10,
+      "symbol": "BOSCHLTD",
+      "option_type": "CE",
+      "strike": "47500.0",
+      "expiry": "2026-09-29",
+      "ranking_score": 0.10048783580021581,
+      "q50_return": 0.05903508522500542,
+      "source_volume": 0,
+      "entry_volume": 0,
+      "return": -0.03166201975331979
+    }
+  ],
+  "scored_leaders": {
+    "CE": [
+      {
+        "symbol": "ABCAPITAL",
+        "option_type": "CE",
+        "strike": "390.0",
+        "expiry": "2026-09-29",
+        "return": 1.3309859154929577,
+        "ranking_score": 0.03211743187045419
+      },
+      {
+        "symbol": "ADANIGREEN",
+        "option_type": "CE",
+        "strike": "1260.0",
+        "expiry": "2026-09-29",
+        "return": 1.095679012345679,
+        "ranking_score": 0.03490298580273414
+      },
+      {
+        "symbol": "INDHOTEL",
+        "option_type": "CE",
+        "strike": "730.0",
+        "expiry": "2026-09-29",
+        "return": 1.0192307692307692,
+        "ranking_score": -0.037414092841994206
+      },
+      {
+        "symbol": "HDFCBANK",
+        "option_type": "CE",
+        "strike": "720.0",
+        "expiry": "2026-09-29",
+        "return": 0.9736842105263158,
+        "ranking_score": 0.02119117879985826
+      },
+      {
+        "symbol": "JUBLFOOD",
+        "option_type": "CE",
+        "strike": "480.0",
+        "expiry": "2026-09-29",
+        "return": 0.926829268292683,
+        "ranking_score": -0.014835059919697018
+      },
+      {
+        "symbol": "LTF",
+        "option_type": "CE",
+        "strike": "300.0",
+        "expiry": "2026-09-29",
+        "return": 0.8294117647058824,
+        "ranking_score": -0.0064506441263562225
+      },
+      {
+        "symbol": "CGPOWER",
+        "option_type": "CE",
+        "strike": "880.0",
+        "expiry": "2026-09-29",
+        "return": 0.8227848101265823,
+        "ranking_score": -0.0007723468707325175
+      },
+      {
+        "symbol": "UPL",
+        "option_type": "CE",
+        "strike": "560.0",
+        "expiry": "2026-09-29",
+        "return": 0.8205128205128205,
+        "ranking_score": -0.020151816905930833
+      },
+      {
+        "symbol": "RVNL",
+        "option_type": "CE",
+        "strike": "200.0",
+        "expiry": "2026-09-29",
+        "return": 0.8096947935368043,
+        "ranking_score": -0.01404360204554611
+      },
+      {
+        "symbol": "APLAPOLLO",
+        "option_type": "CE",
+        "strike": "2140.0",
+        "expiry": "2026-09-29",
+        "return": 0.7556615017878426,
+        "ranking_score": 0.07054001062821272
+      }
+    ],
+    "PE": [
+      {
+        "symbol": "MARUTI",
+        "option_type": "PE",
+        "strike": "12400.0",
+        "expiry": "2026-09-29",
+        "return": 1.0630459551842006,
+        "ranking_score": -0.04899509716744084
+      },
+      {
+        "symbol": "COALINDIA",
+        "option_type": "PE",
+        "strike": "420.0",
+        "expiry": "2026-09-29",
+        "return": 0.6907216494845361,
+        "ranking_score": -0.060619033370970216
+      },
+      {
+        "symbol": "LUPIN",
+        "option_type": "PE",
+        "strike": "2080.0",
+        "expiry": "2026-09-29",
+        "return": 0.5161290322580645,
+        "ranking_score": -0.04326154428576188
+      },
+      {
+        "symbol": "SUNPHARMA",
+        "option_type": "PE",
+        "strike": "1860.0",
+        "expiry": "2026-09-29",
+        "return": 0.4069767441860465,
+        "ranking_score": -0.012241455220734401
+      },
+      {
+        "symbol": "NESTLEIND",
+        "option_type": "PE",
+        "strike": "1380.0",
+        "expiry": "2026-09-29",
+        "return": 0.37464788732394366,
+        "ranking_score": 0.005984034928630075
+      },
+      {
+        "symbol": "ICICIBANK",
+        "option_type": "PE",
+        "strike": "1350.0",
+        "expiry": "2026-09-29",
+        "return": 0.3607843137254902,
+        "ranking_score": -0.012241075671415746
+      },
+      {
+        "symbol": "KPITTECH",
+        "option_type": "PE",
+        "strike": "560.0",
+        "expiry": "2026-09-29",
+        "return": 0.35,
+        "ranking_score": 0.01630440558871437
+      },
+      {
+        "symbol": "TITAN",
+        "option_type": "PE",
+        "strike": "4850.0",
+        "expiry": "2026-09-29",
+        "return": 0.26054054054054054,
+        "ranking_score": 0.06957674775178718
+      },
+      {
+        "symbol": "KAYNES",
+        "option_type": "PE",
+        "strike": "3500.0",
+        "expiry": "2026-09-29",
+        "return": 0.19293655984303465,
+        "ranking_score": 0.02937412892981863
+      },
+      {
+        "symbol": "DIVISLAB",
+        "option_type": "PE",
+        "strike": "9300.0",
+        "expiry": "2026-09-29",
+        "return": 0.1812464265294454,
+        "ranking_score": 0.004165598670760946
+      }
+    ]
+  },
+  "overlap_at_10": {
+    "CE": 0,
+    "PE": 0
+  },
+  "chronological_comparison": {
+    "earlier": {
+      "margin": {
+        "sessions": 6,
+        "selected": 56,
+        "resolved": 49,
+        "wins": 17,
+        "hit_rate": 0.3469387755102041,
+        "mean_net": 0.01753787077258751
+      },
+      "median": {
+        "sessions": 6,
+        "selected": 56,
+        "resolved": 51,
+        "wins": 14,
+        "hit_rate": 0.27450980392156865,
+        "mean_net": 0.0003847836836010469
+      },
+      "balanced": {
+        "sessions": 6,
+        "selected": 53,
+        "resolved": 45,
+        "wins": 19,
+        "hit_rate": 0.4222222222222222,
+        "mean_net": 0.02511915348229044
+      },
+      "source_traded": {
+        "sessions": 6,
+        "selected": 16,
+        "resolved": 14,
+        "wins": 6,
+        "hit_rate": 0.42857142857142855,
+        "mean_net": 0.10178789724547009
+      },
+      "source_traded_balanced": {
+        "sessions": 6,
+        "selected": 13,
+        "resolved": 11,
+        "wins": 7,
+        "hit_rate": 0.6363636363636364,
+        "mean_net": 0.19561009288269016
+      }
+    },
+    "later": {
+      "margin": {
+        "sessions": 3,
+        "selected": 30,
+        "resolved": 30,
+        "wins": 10,
+        "hit_rate": 0.3333333333333333,
+        "mean_net": -0.008811523428982993
+      },
+      "median": {
+        "sessions": 3,
+        "selected": 30,
+        "resolved": 30,
+        "wins": 12,
+        "hit_rate": 0.4,
+        "mean_net": 0.11902363867069966
+      },
+      "balanced": {
+        "sessions": 3,
+        "selected": 30,
+        "resolved": 30,
+        "wins": 9,
+        "hit_rate": 0.3,
+        "mean_net": -0.08802075715529271
+      },
+      "source_traded": {
+        "sessions": 3,
+        "selected": 20,
+        "resolved": 19,
+        "wins": 7,
+        "hit_rate": 0.3684210526315789,
+        "mean_net": -0.04800323834307734
+      },
+      "source_traded_balanced": {
+        "sessions": 3,
+        "selected": 20,
+        "resolved": 19,
+        "wins": 2,
+        "hit_rate": 0.10526315789473684,
+        "mean_net": -0.1576925424401152
+      }
+    }
+  }
+}

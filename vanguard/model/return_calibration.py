@@ -16,7 +16,9 @@ def calibrate_returns(scores, net_returns, sessions, horizons, *, bins=5):
     sessions, horizons = np.asarray(sessions).astype(str), np.asarray(horizons)
     result = {"basis": "validation_only_net_option_return", "min_sessions": MIN_SESSIONS,
               "bins": []}
-    for horizon in (1, 2):
+    # Keep D+1/D+2/D+3 calibration separate; mixing horizons makes a score
+    # look profitable simply because a longer holding period had more time.
+    for horizon in (1, 2, 3):
         eligible = (horizons == horizon) & np.isfinite(scores) & np.isfinite(net_returns)
         if not eligible.any():
             continue

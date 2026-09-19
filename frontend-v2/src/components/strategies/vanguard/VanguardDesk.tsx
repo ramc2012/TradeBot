@@ -507,7 +507,7 @@ type VanguardLane = "swing_1_2d" | "gap_overnight" | "oversold_mtf";
 
 function LaneTabs({ lane, onLane, journals }: { lane: VanguardLane; onLane: (lane: VanguardLane) => void; journals?: any }) {
   const labels: [VanguardLane, string][] = [
-    ["swing_1_2d", "Swing 1–2d"], ["gap_overnight", "Overnight"], ["oversold_mtf", "Oversold MTF"],
+    ["swing_1_2d", "Swing 1–3d"], ["gap_overnight", "Overnight"], ["oversold_mtf", "Oversold MTF"],
   ];
   return <div className="inline-flex rounded-xl border border-bg-border bg-bg-card p-1" role="tablist" aria-label="Vanguard strategy journals">
     {labels.map(([key, label]) => <button key={key} type="button" role="tab" aria-selected={lane === key}
@@ -561,6 +561,10 @@ function CurrentSwingRow({ row, provisional, sharedReason }: {
     const parsed = num(value);
     return parsed == null ? "—" : `${parsed >= 0 ? "+" : ""}${(parsed * 100).toFixed(2)}%`;
   };
+  const trackedReturns = [1, 2, 3].map((horizon) => ({
+    horizon,
+    value: row[`day_${horizon}_return_pct`],
+  }));
   return <tr className="border-b border-bg-border/50">
     <td className="py-2 pr-3 font-mono text-text-muted">#{row.side_rank ?? row.rank}</td>
     <td className="py-2 pr-3">
@@ -578,12 +582,15 @@ function CurrentSwingRow({ row, provisional, sharedReason }: {
       {row.status !== "closed" && quote?.ltp != null && <div className="text-[10px] text-accent-green">live · ≤150 ms batch</div>}
     </td>
     <td className={`py-2 pr-3 text-right font-mono ${tone(liveReturn)}`}>{pct(liveReturn)}</td>
+    {trackedReturns.map(({ horizon, value }) => <td key={horizon}
+      className={`py-2 pr-3 text-right font-mono ${tone(num(value))}`}>{pct(value)}</td>)}
     <td className="py-2 pr-3"><StatusBadge
       label={String(row.status ?? (provisional ? "provisional" : "awaiting_entry")).replaceAll("_", " ")}
       variant={row.status === "closed" ? "success" : provisional ? "info" : "warn"} /></td>
     <td className="py-2 pr-3">
       {row.actionable_reason !== undefined
         ? <>
+            {row.paper_position && <StatusBadge label="paper tracked" variant="info" />}
             <StatusBadge label={row.actionable ? "actionable" : "research only"}
               variant={row.actionable ? "success" : "info"} />
             {row.actionable_reason && row.actionable_reason !== sharedReason
@@ -605,14 +612,14 @@ function CurrentSwingRow({ row, provisional, sharedReason }: {
 /** The daily output is two layers, so the desk shows two, not one list with a
  *  flag. The research ranking is mandatory and always complete; the actionable
  *  list is allowed to be empty and has to say why it is. */
-function ActionableBanner({ swing }: { swing: any }) {
+function ActionableBanner({ swing, total }: { swing: any; total: number }) {
   const actionable = swing?.actionable;
   if (!actionable) return null;
   const empty = (actionable.count ?? 0) === 0;
   return <div className={`rounded-xl border p-3 text-sm ${empty
     ? "border-accent-amber/40 bg-accent-amber/5" : "border-accent-green/40 bg-accent-green/5"}`}>
     <div className="flex flex-wrap items-center gap-2">
-      <StatusBadge label={`actionable ${actionable.count ?? 0}/10`} variant={empty ? "warn" : "success"} />
+      <StatusBadge label={`actionable ${actionable.count ?? 0}/${total || 20}`} variant={empty ? "warn" : "success"} />
       <span className="text-text-secondary">
         Gates: {actionable.gates}. An empty actionable list is a valid daily output.
       </span>
@@ -683,7 +690,7 @@ function WatchlistTab({ data, strategies, selectedSession, onSession, onBtst }: 
       </div>
 
       {view === "current" && (currentHead ? <Section
-        title="Current · 1–2 session directional ranking"
+        title="Current · 1–3 session directional ranking"
         icon={<Activity size={16} />}
         description={preview && !swingRun
           ? "Latest completed model snapshot. It remains provisional until the EOD freeze."
@@ -700,14 +707,23 @@ function WatchlistTab({ data, strategies, selectedSession, onSession, onBtst }: 
             detail={swingRun ? `${research.CE.length} CE · ${research.PE.length} PE` : "one side per underlying"} />
           <MetricTile
             label={swingRun ? "Actionable" : "Positive margin"}
-            value={swingRun ? `${strategies?.swing?.actionable?.count ?? 0}/10` : `${currentHead.qualified ?? 0}/${currentHead.item_count ?? 0}`}
+            value={swingRun ? `${strategies?.swing?.actionable?.count ?? 0}/${research.CE.length + research.PE.length || 20}` : `${currentHead.qualified ?? 0}/${currentHead.item_count ?? 0}`}
             detail={swingRun ? "after confidence, liquidity and M7" : "chosen CE/PE margin above zero"}
           />
           <MetricTile label="Model" value={String(currentHead.direction_model_version ?? currentHead.model_version).replace("mlp_quantile_", "")} />
         </div>
-        {swingRun && <div className="mt-3"><ActionableBanner swing={strategies?.swing} /></div>}
+        {swingRun && <>
+          <div className="mt-3 grid grid-cols-3 gap-2">
+            {[1, 2, 3].map((horizon) => <MetricTile key={horizon}
+              label={`Tracked D+${horizon}`}
+              value={pct(swingRun[`day_${horizon}_avg_return_pct`] ?? currentHead[`day_${horizon}_avg_return_pct`])}
+              detail={`${swingRun[`day_${horizon}_resolved`] ?? currentHead[`day_${horizon}_resolved`] ?? 0} resolved`} />)}
+          </div>
+          <div className="mt-3"><ActionableBanner swing={strategies?.swing}
+            total={research.CE.length + research.PE.length} /></div>
+        </>}
         <div className="mt-3 overflow-x-auto">
-          <table className="w-full min-w-[1080px] text-sm">
+          <table className="w-full min-w-[1320px] text-sm">
             <thead>
               <tr className="border-b border-bg-border text-left text-[11px] uppercase tracking-wider text-text-muted">
                 <th className="py-2 pr-3">Rank</th>
@@ -717,6 +733,9 @@ function WatchlistTab({ data, strategies, selectedSession, onSession, onBtst }: 
                 <th className="py-2 pr-3 text-right">Entry</th>
                 <th className="py-2 pr-3 text-right">Latest</th>
                 <th className="py-2 pr-3 text-right">Gross return</th>
+                <th className="py-2 pr-3 text-right">D+1 return</th>
+                <th className="py-2 pr-3 text-right">D+2 return</th>
+                <th className="py-2 pr-3 text-right">D+3 return</th>
                 <th className="py-2 pr-3">Tracker state</th>
                 <th className="py-2 pr-3">Qualification</th>
               </tr>
@@ -725,7 +744,7 @@ function WatchlistTab({ data, strategies, selectedSession, onSession, onBtst }: 
               {swingRun
                 ? (["CE", "PE"] as const).flatMap((side) => [
                     <tr key={`head-${side}`} className="border-b border-bg-border/50">
-                      <td colSpan={9} className="pt-4 pb-1 text-[11px] uppercase tracking-wider text-text-muted">
+                      <td colSpan={12} className="pt-4 pb-1 text-[11px] uppercase tracking-wider text-text-muted">
                         Top {research[side].length} {side}
                       </td>
                     </tr>,
@@ -740,10 +759,10 @@ function WatchlistTab({ data, strategies, selectedSession, onSession, onBtst }: 
           </table>
         </div>
         <p className="mt-3 text-xs text-accent-amber">
-          Directional scores are tracked for learning only. They cannot create a Vanguard ticket or broker order.
+          The top-10 CE and top-10 PE rows are paper positions. Exact-contract marks are tracked at D+1, D+2 and D+3; no broker order is created.
         </p>
       </Section> : <Section title="Current watchlist" icon={<Activity size={16} />}>
-        <p className="text-sm text-text-secondary">No current 1–2 session ranking is available.</p>
+        <p className="text-sm text-text-secondary">No current 1–3 session ranking is available.</p>
       </Section>)}
 
       {view === "frozen" && (run ? <>

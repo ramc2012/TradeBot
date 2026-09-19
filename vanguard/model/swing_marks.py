@@ -14,7 +14,7 @@ def mark_available(row):
 
 def summarize_path(item, path, sessions, now):
     horizon = int(item["horizon_sessions"])
-    if horizon not in (1, 2):
+    if horizon not in (1, 2, 3):
         raise ValueError("unsupported swing horizon")
     planned = datetime.combine(item["source_session"], time(14, 45), IST)
     entry_at = available_at(planned)

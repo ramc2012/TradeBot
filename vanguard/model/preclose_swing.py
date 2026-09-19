@@ -1,4 +1,4 @@
-"""Create the immutable pre-close 1-2-session swing watchlist.
+"""Create the immutable pre-close 1-3-session swing watchlist.
 
 The directional and exact-contract rankers cooperate here, but this module has
 no ticket or order dependency.  Normal scheduled runs only accept today's
@@ -88,6 +88,7 @@ def _decision_rows(connection) -> tuple[datetime | None, list[dict]]:
 # every row as source_mark_ts, so the <=30 min skew from the trained 14:15
 # marks is recorded rather than hidden.
 MIN_CHAIN_BREADTH = float(os.environ.get("VANGUARD_SWING_MIN_CHAIN_BREADTH", "0.5"))
+SWING_HORIZONS = (1, 2, 3)
 
 # ── Selection shape, measured 2026-09-15 ────────────────────────────────────
 # Five sessions of realised next-session returns say three things:
@@ -147,6 +148,20 @@ def _percentiles(values: list[float]) -> np.ndarray:
     return result
 
 
+def _horizon_features(model: ListwiseMLP, horizon: int) -> list[float]:
+    """Encode the horizon flags declared by the trained artifact.
+
+    v2 rankers distinguish D+1, D+2 and D+3. Refuse a silent fallback to the
+    old binary encoding: treating D+3 as D+1 would mislabel the paper result.
+    """
+    feature_names = getattr(model, "feature_names", ())
+    if "horizon_3" in feature_names:
+        return [float(horizon == 2), float(horizon == 3)]
+    if horizon == 3:
+        raise ValueError("ranker artifact has no horizon_3 feature")
+    return [float(horizon == 2)]
+
+
 def form_candidates(connection, direction: ListwiseMLP, contract: ListwiseMLP,
                     ts: datetime, evaluations: list[dict]) -> tuple[list[dict], dict]:
     """Returns (candidates, diagnostics). The diagnostics carry the resolvable
@@ -159,7 +174,7 @@ def form_candidates(connection, direction: ListwiseMLP, contract: ListwiseMLP,
     with connection.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cursor:
         cursor.execute(
             SOURCE_OPTIONS_SQL,
-            (chain_ts, list(by_symbol), _business_day(source_session, 2)),
+            (chain_ts, list(by_symbol), _business_day(source_session, max(SWING_HORIZONS))),
         )
         option_rows = [dict(row) for row in cursor.fetchall()]
     lot_sizes = _lot_sizes(connection, sorted(by_symbol))
@@ -184,15 +199,17 @@ def form_candidates(connection, direction: ListwiseMLP, contract: ListwiseMLP,
             if wing["strike"] != atm["strike"]:
                 selected.append((wing, "WING_25D"))
         base_features = feature_row(base_row, _instrument({**base_row, **atm}), side, ts)
-        for horizon in (1, 2):
+        for horizon in SWING_HORIZONS:
+            direction_horizon = _horizon_features(direction, horizon)
+            contract_horizon = _horizon_features(contract, horizon)
             direction_score = float(direction.score(
-                np.append(base_features, float(horizon == 2)))[0])
+                np.append(base_features, direction_horizon))[0])
             for option, kind in selected:
                 option_features = feature_row(
                     base_row, _instrument({**base_row, **option}), side, ts)
                 contract_score = float(contract.score(np.append(
                     option_features,
-                    [float(horizon == 2), float(kind == "WING_25D")],
+                    contract_horizon + [float(kind == "WING_25D")],
                 ))[0])
                 estimate = expected_net_return(contract.return_calibration, contract_score, horizon)
                 candidates.append({
@@ -354,6 +371,11 @@ def create_watchlist(connection, *, top_n: int = 10, allow_replay: bool = False,
     direction, contract = _model(connection, "direction"), _model(connection, "contract")
     if direction is None or contract is None:
         return {"created": False, "reason": "both shadow rank models are required"}
+    if not all("horizon_3" in getattr(model, "feature_names", ())
+               for model in (direction, contract)):
+        return {"created": False,
+                "reason": "both rankers must declare horizon_3 before the 1-3d lane can emit",
+                "paper_only": True}
     ts, evaluations = _decision_rows(connection)
     if ts is None:
         return {"created": False, "reason": "no 14:15 IST candidate snapshot"}
@@ -409,7 +431,7 @@ def create_watchlist(connection, *, top_n: int = 10, allow_replay: bool = False,
                 strike,expiry,contract_kind,direction_score,contract_score,combined_score,
                 source_mark_ts,source_mark,status,lot_size,option_volume,option_oi,
                 actionable,actionable_reason,sizing_lots,sizing_notional,sizing_risk_rupees,
-                sizing_method,expected_net_return,expected_net_lower,return_refusal) VALUES %s""",
+                sizing_method,expected_net_return,expected_net_lower,return_refusal,paper_position) VALUES %s""",
             [(source_session, row["rank"], row["side_rank"], row["symbol"], row["option_type"],
               row["horizon_sessions"], row["instrument"], row["strike"], row["expiry"],
               row["contract_kind"], row["direction_score"], row["contract_score"],
@@ -418,7 +440,7 @@ def create_watchlist(connection, *, top_n: int = 10, allow_replay: bool = False,
               bool(row.get("actionable")), row.get("actionable_reason"),
               row.get("sizing_lots"), row.get("sizing_notional"),
               row.get("sizing_risk_rupees"), row.get("sizing_method"),
-              row.get("expected_net_return"), row.get("expected_net_lower"), row.get("return_refusal"))
+              row.get("expected_net_return"), row.get("expected_net_lower"), row.get("return_refusal"), True)
              for row in selected],
         )
         psycopg2.extras.execute_values(

@@ -130,6 +130,12 @@ def report(dsn: str, limit: int) -> int:
             (session,),
         )
         chosen = cursor.fetchall()
+        cursor.execute(
+            """SELECT option_type, day_1_return_pct, day_2_return_pct, day_3_return_pct
+               FROM vanguard_swing_watchlist_items WHERE source_session=%s""",
+            (session,),
+        )
+        tracked = cursor.fetchall()
         keys = {(c["symbol"], c["option_type"], float(c["strike"]), c["expiry"]) for c in chosen}
         print(f"\n=== {session}  entry {entry_ts:%H:%M}Z -> exit {exit_ts:%d-%b %H:%M}Z "
               f"| universe {len(universe)} contracts | spots {len(moves)}")
@@ -140,6 +146,14 @@ def report(dsn: str, limit: int) -> int:
             in {(u["underlying"], u["option_type"], float(u["strike"]), u["expiry"]) for u in universe}
         )
         print(f"  markable at BOTH ends: {marked}/{len(chosen)} picks")
+        for horizon in (1, 2, 3):
+            values = [float(row[f"day_{horizon}_return_pct"]) for row in tracked
+                      if row[f"day_{horizon}_return_pct"] is not None]
+            print(f"  paper tracked D+{horizon}: {len(values)}/{len(tracked)} resolved"
+                  f" | mean {100 * sum(values) / len(values):+.2f}%"
+                  f" | hit rate {100 * sum(value > 0 for value in values) / len(values):.1f}%"
+                  if values else
+                  f"  paper tracked D+{horizon}: 0/{len(tracked)} resolved")
 
         for side in ("CE", "PE"):
             rows = sorted([u for u in universe if u["option_type"] == side], key=lambda r: -r["ret"])

@@ -29,6 +29,16 @@ def test_each_contract_settles_on_its_selected_horizon():
     assert second['return_pct']==pytest.approx(-.2)
     assert 2 not in first['day_marks']
 
+
+def test_three_session_position_tracks_all_daily_marks_and_settles_on_day_three():
+    sessions=[date(2026,9,4),date(2026,9,7),date(2026,9,8)]
+    path=[row(D,100),row(sessions[0],110),row(sessions[1],90),row(sessions[2],130)]
+    result=summarize_path(item(3),path,sessions,stamp(sessions[2],16))
+    assert result['status']=='closed'
+    assert result['return_pct']==pytest.approx(.30)
+    assert result['net_return_pct']==pytest.approx(.29)
+    assert [result['day_marks'][h][2] for h in (1,2,3)] == pytest.approx([.10,-.10,.30])
+
 def test_entry_is_frozen_and_incomplete_candles_are_excluded():
     path=[row(D,200),row(date(2026,9,4),300)]
     result=summarize_path(item(entry_ts=stamp(D),entry_mark=100),path,[date(2026,9,4)],stamp(date(2026,9,4),15,0))
@@ -55,6 +65,14 @@ def test_rank_without_net_payoff_calibration_refuses():
     assert expected_net_return(cal,101,1)['expected_net_lower'] is None
     sparse=calibrate_returns(scores,[.1]*100,['one']*100,[1]*100,bins=1)
     assert expected_net_return(sparse,50,1)['expected_net_lower'] is None
+
+
+def test_three_session_calibration_is_not_mixed_with_shorter_horizons():
+    scores=list(range(60)); sessions=[str(i//3) for i in scores]
+    cal=calibrate_returns(scores,[.03]*60,sessions,[3]*60,bins=1)
+    assert cal['bins'][0]['horizon']==3
+    assert expected_net_return(cal,50,3)['expected_net_return']==pytest.approx(.03)
+    assert expected_net_return(cal,50,2)['expected_net_lower'] is None
 
 class Cursor:
     def __init__(self,fresh,event):self.fresh,self.event=fresh,event

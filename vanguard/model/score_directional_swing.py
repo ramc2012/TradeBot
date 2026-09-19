@@ -11,6 +11,7 @@ from __future__ import annotations
 import argparse
 import os
 import sys
+from datetime import timedelta
 from types import SimpleNamespace
 
 import psycopg2
@@ -22,25 +23,50 @@ from model.nonlinear_selector import load_swing_model, prediction_rows  # noqa: 
 
 DEFAULT_DSN = "postgresql://nomadcurie:nomadcurie@localhost:5433/nomadcurie"
 TIMING_POLICY = "completed_eod_direction_1_2d_v1"
+COVERAGE_POLICY = "latest_broad_completed_bar_v1"
+MIN_COVERAGE_FRACTION = .80
+
+# A short 15:15 IST bar may contain only the actively traded subset. Choosing
+# max(ts) blindly threw away the broad 14:45 cross-section. Stay within the
+# current source session and last hour; do not reach into outcomes or fill
+# missing symbols using stale per-symbol snapshots.
+FINAL_COVERAGE_SQL = """WITH head AS (
+    SELECT max(ts) AS ts FROM candidate_evaluations
+), cohorts AS (
+    SELECT ce.ts,count(DISTINCT ce.symbol) AS candidates,
+           count(DISTINCT ce.symbol) FILTER (WHERE EXISTS (
+               SELECT 1 FROM option_premium_candles o
+               WHERE o.time=ce.ts AND o.underlying=ce.symbol
+                 AND o.interval='30minute' AND o.option_type IN ('CE','PE')
+                 AND o.expiry>(ce.ts AT TIME ZONE 'Asia/Kolkata')::date AND o.close>=5
+               GROUP BY o.underlying HAVING count(DISTINCT o.option_type)=2
+           ) AND EXISTS (
+               SELECT 1 FROM underlying_spot_candles s
+               WHERE s.time=ce.ts AND s.underlying=ce.symbol AND s.interval='30minute'
+           )) AS covered
+    FROM candidate_evaluations ce CROSS JOIN head
+    WHERE ce.ts >= head.ts - INTERVAL '1 hour' AND ce.ts <= head.ts
+      AND (ce.ts AT TIME ZONE 'Asia/Kolkata')::date=(head.ts AT TIME ZONE 'Asia/Kolkata')::date
+    GROUP BY ce.ts
+) SELECT * FROM cohorts ORDER BY ts DESC"""
+
+
+def choose_complete_bar(cohorts):
+    """Latest sufficiently broad same-session cohort, or fail closed."""
+    if not cohorts:
+        return None
+    expected = max(int(r['candidates']) for r in cohorts)
+    newest = max(r['ts'] for r in cohorts)
+    eligible = [r for r in cohorts if expected >= 10 and
+                int(r['covered']) >= max(10, expected*MIN_COVERAGE_FRACTION) and
+                newest-r['ts'] <= timedelta(hours=1)]
+    return max(eligible, key=lambda r:r['ts']) if eligible else None
 
 
 def load_final_evaluations(connection):
     with connection.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cursor:
-        cursor.execute(
-            """SELECT max(ce.ts) AS ts FROM candidate_evaluations ce
-               WHERE EXISTS (
-                   SELECT 1 FROM option_premium_candles o
-                   WHERE o.time=ce.ts AND o.underlying=ce.symbol
-                     AND o.interval='30minute' AND o.option_type IN ('CE','PE')
-                     AND o.expiry>(ce.ts AT TIME ZONE 'Asia/Kolkata')::date
-                     AND o.close>=5
-               ) AND EXISTS (
-                   SELECT 1 FROM underlying_spot_candles s
-                   WHERE s.time=ce.ts AND s.underlying=ce.symbol
-                     AND s.interval='30minute'
-               )"""
-        )
-        head = cursor.fetchone()
+        cursor.execute(FINAL_COVERAGE_SQL)
+        head = choose_complete_bar(cursor.fetchall())
         ts = head["ts"] if head else None
         if ts is None:
             return None, []
@@ -130,7 +156,8 @@ def score_latest(connection) -> dict:
         return {"scored": 0, "reason": "no compatible horizon-24 shadow model"}
     ts, evaluations = load_final_evaluations(connection)
     if ts is None or not evaluations:
-        return {"scored": 0, "reason": "candidate evaluation journal is empty"}
+        return {"scored": 0, "reason": "no sufficiently broad recent same-session cohort",
+                "coverage_policy": COVERAGE_POLICY}
     # The current front option supplies causal chain features and is marked as
     # a one-session execution proxy. The two-session outcome is measured on
     # the underlying and does not pretend the source contract survives it.
@@ -161,7 +188,7 @@ def score_latest(connection) -> dict:
             ts, evaluation.symbol, forecast["option_type"], model.version,
             forecast["q10"], forecast["q50"], forecast["q90"],
             forecast["edge"], 0.0, False,
-            "experimental 1-2-session directional shadow; no ticket path",
+            f"experimental 1-2-session directional shadow; {COVERAGE_POLICY}; no ticket path",
             instrument["instrument"], instrument["strike"], instrument["expiry"],
             instrument["premium"], instrument["source_mark_ts"],
             TIMING_POLICY, rank_score,
@@ -184,6 +211,7 @@ def score_latest(connection) -> dict:
         "evaluations": len(evaluations),
         "scored": len(rows),
         "ranking": "within-symbol CE-versus-PE conditional-median margin",
+        "coverage_policy": COVERAGE_POLICY,
         "paper_only": True,
     }
 

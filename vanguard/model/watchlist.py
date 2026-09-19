@@ -31,7 +31,7 @@ IST_TZ = timezone(timedelta(hours=5, minutes=30))
 SELECTION_RULE = (
     "final session horizon-specific model ranking; qualification is ranking_score >= versioned threshold; "
     "same completed-bar exact-contract mark required; best CE/PE per underlying; descending score; "
-    "observation-only next-session tracking, NOT a ticket list or BTST"
+    "paper-only top-10 CE/PE next-session tracking, NOT a broker ticket or BTST"
 )
 
 
@@ -93,12 +93,20 @@ def _snapshot(connection, source_session: date,
     """Read the newest model's final prediction bar for one NSE session."""
     with connection.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cursor:
         cursor.execute(
-            """SELECT p.model_version, max(p.ts) AS prediction_ts
-               FROM vanguard_model_predictions p
-               JOIN vanguard_model_versions m ON m.version=p.model_version
-               WHERE (p.ts AT TIME ZONE 'Asia/Kolkata')::date=%(session)s
-               GROUP BY p.model_version, m.created_at, m.horizon_bars
-               ORDER BY (m.horizon_bars=24) DESC, m.created_at DESC LIMIT 1""",
+            """WITH cohorts AS (
+                   SELECT p.model_version,p.ts,count(DISTINCT p.symbol) AS n,
+                          m.created_at,m.horizon_bars
+                   FROM vanguard_model_predictions p
+                   JOIN vanguard_model_versions m ON m.version=p.model_version
+                   WHERE (p.ts AT TIME ZONE 'Asia/Kolkata')::date=%(session)s
+                   GROUP BY p.model_version,p.ts,m.created_at,m.horizon_bars
+               ), coverage AS (
+                   SELECT *,max(n) OVER (PARTITION BY model_version) AS broadest,
+                            max(ts) OVER (PARTITION BY model_version) AS newest
+                   FROM cohorts
+               ) SELECT model_version,ts AS prediction_ts FROM coverage
+               WHERE n >= .80*broadest AND ts >= newest-INTERVAL '1 hour'
+               ORDER BY (horizon_bars=24) DESC,created_at DESC,ts DESC LIMIT 1""",
             {"session": source_session},
         )
         head = cursor.fetchone()
