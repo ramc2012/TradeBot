@@ -1746,16 +1746,41 @@ class DirectionalOptionsPaperStore:
             if opened_dt is not None and self._ist_day_key(opened_dt) == today_key:
                 opens_today += 1
         closes_today = 0
+        realized_today = 0.0
         for row in closed_positions:
             closed_dt = _parse_iso(row.get("closed_at"))
             if closed_dt is not None and self._ist_day_key(closed_dt) == today_key:
                 closes_today += 1
+                realized_today += float(row.get('realized_pnl') or 0)
+        try:
+            async with AsyncSessionLocal() as session:
+                value = (await session.execute(text("""
+                    SELECT COALESCE(SUM(realized_pnl), 0)
+                    FROM directional_paper_positions
+                    WHERE status='closed'
+                      AND closed_at >= (CAST(:day AS date)::timestamp AT TIME ZONE 'Asia/Kolkata')
+                      AND closed_at < ((CAST(:day AS date)+1)::timestamp AT TIME ZONE 'Asia/Kolkata')
+                """), {'day': today_key})).scalar()
+                realized_today = float(value or 0)
+        except Exception:
+            pass
+        checked_at = _utc_now()
+        stale_marks = [p for p in open_positions if not _current_mark(
+            {'premium': p.get('latest_premium'), 'mark_time': p.get('mark_time')}, checked_at)]
+        mark_times = [str(p['mark_time']) for p in open_positions if p.get('mark_time')]
 
         return {
             "open_positions": len(open_positions),
             "closed_positions": len(closed_positions),
             "opens_today": opens_today,
             "closes_today": closes_today,
+            "session_date": today_key,
+            "realized_today": round(realized_today, 2),
+            "stale_open_marks": len(stale_marks),
+            "stale_open_symbols": ', '.join(sorted({str(p.get('underlying') or '?') for p in stale_marks})),
+            "oldest_open_mark_at": min(mark_times) if mark_times else None,
+            "mark_freshness_checked_at": checked_at,
+            "valuation_status": 'stale_marks' if stale_marks else 'current',
             "cooldown_skips_today": self._cooldown_skips_by_day.get(today_key, 0),
             "realized_pnl": realized,
             "unrealized_pnl": unrealized,

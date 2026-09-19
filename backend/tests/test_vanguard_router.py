@@ -47,6 +47,7 @@ def test_watchlist_reads_selected_session_and_compares_paired_exits(monkeypatch)
     async def many(sql, params=None):
         if "LEFT JOIN vanguard_watchlist_items" in sql:
             return [{"source_session": latest, "status": "awaiting_next_session", "resolved": 0},
+                    {"source_session": date(2026,8,30), "status": "closed", "resolved": 0},
                     {"source_session": earlier, "status": "closed", "resolved": 2}]
         if params["source_session"] == latest:
             return []
@@ -69,6 +70,7 @@ def test_watchlist_reads_selected_session_and_compares_paired_exits(monkeypatch)
     assert result["latest"]["source_session"] == earlier
     assert result["current"]["source_session"] == latest
     assert result["latest_completed"]["source_session"] == earlier
+    assert result["latest_evaluated"]["source_session"] == date(2026,8,30)
     assert result["exit_summary"]["runner_exited"] == 1
     assert result["exit_summary"]["paired_hold_net_mean"] == .1
     assert not result["exit_summary"]["fully_paired"]

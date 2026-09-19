@@ -457,6 +457,21 @@ class DirectionalOptionsService:
         row_expiry = str(row.get("expiry") or "")
         row_strike = float(row.get("strike") or 0.0)
         row_otype = str(row.get("option_type") or "")
+        # The shared subscription manager owns held-leg subscriptions. Read
+        # their ticks before the rotating ATM board, retaining exchange time.
+        from market_data.data_router import data_router
+        from market_data.live_marks import registered_app_symbol
+        from market_data.option_subscription_manager import _build_fyers_monthly_option_symbol
+
+        key = str(row.get("instrument_key") or "")
+        symbols = [registered_app_symbol(key), key]
+        if not self.is_index_underlying(row_underlying):
+            symbols.append(_build_fyers_monthly_option_symbol(
+                row_underlying, row_expiry, row_strike, row_otype))
+        for symbol in dict.fromkeys(s for s in symbols if s):
+            quote = await data_router.get_live_quote(symbol, max_age_seconds=120)
+            if quote is not None:
+                return {**quote, "spot": float(row.get("latest_spot") or 0.0)}
         try:
             premium, mark_time, price_source = await self.store.latest_local_option_mark(
                 underlying=row_underlying,

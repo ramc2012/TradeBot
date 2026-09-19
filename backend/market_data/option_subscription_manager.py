@@ -571,7 +571,7 @@ async def refresh_held_position_subscriptions() -> dict[str, Any]:
     # Resolved independently: a failure in either source must not take the
     # other's legs down with it (one shared try would have let a missing
     # vanguard table silently unsubscribe the S1 watchlist).
-    for source in (_strategy1_watchlist_legs, _vanguard_swing_watchlist_legs):
+    for source in (_strategy1_watchlist_legs, _vanguard_swing_watchlist_legs, _directional_held_legs):
         try:
             wl_legs.extend(await source())
         except Exception as exc:  # noqa: BLE001
@@ -612,6 +612,24 @@ async def refresh_held_position_subscriptions() -> dict[str, Any]:
         "watchlist_resolved": watchlist_resolved,
         "subscribed": subscribed,
     }
+
+
+async def _directional_held_legs() -> list[dict[str, Any]]:
+    """Keep held directional contracts subscribed even after they leave ATM."""
+    from db.database import AsyncSessionLocal
+    from sqlalchemy import text
+
+    async with AsyncSessionLocal() as session:
+        result = await session.execute(text("""
+            SELECT underlying, option_type, expiry, strike,
+                   payload->>'instrument_key' AS instrument_key,
+                   payload->>'trading_symbol' AS trading_symbol
+            FROM directional_paper_positions
+            WHERE status='open'
+              AND expiry >= to_char(timezone('Asia/Kolkata', now()), 'YYYY-MM-DD')
+              AND strike > 0 AND option_type IN ('CE','PE')
+        """))
+        return [dict(row) for row in result.mappings().all()]
 
 
 async def _strategy1_watchlist_legs() -> list[dict[str, Any]]:

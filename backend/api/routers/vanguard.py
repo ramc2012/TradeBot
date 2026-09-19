@@ -444,6 +444,7 @@ async def model_watchlist(
             "note": "No daily model watchlist has been captured yet.",
         }
     current = runs[0]
+    latest_evaluated = next((run for run in runs if run.get('status') == 'closed'), None)
     latest_completed = next(
         (run for run in runs if run.get("status") == "closed" and (run.get("resolved") or 0) > 0),
         None,
@@ -577,6 +578,7 @@ async def model_watchlist(
         "current": current,
         "current_items": current_items,
         "latest_completed": latest_completed,
+        "latest_evaluated": latest_evaluated,
         "history": runs,
         "preview": preview,
         "preview_items": preview_items,

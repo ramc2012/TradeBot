@@ -972,6 +972,38 @@ class DataRouter:
         tick = self._tick_buffer.get(symbol)
         return tick.ltp if tick else 0.0
 
+    async def get_live_quote(self, symbol: str, *, max_age_seconds: float = 120.0) -> Optional[dict[str, Any]]:
+        """Read a shared tick with its observation time; never stamp retrieval time."""
+        candidates = []
+        tick = self._tick_buffer.get(symbol)
+        if tick is not None:
+            candidates.append({"ltp": tick.ltp, "timestamp": tick.timestamp, "symbol": tick.symbol})
+        try:
+            redis = await get_redis()
+            raw = await redis.get(f"{LATEST_TICK_KEY_PREFIX}{symbol}")
+            if raw:
+                candidates.append(json.loads(raw))
+        except Exception as exc:  # noqa: BLE001
+            logger.debug(f"[DataRouter] get_live_quote cache read failed for {symbol}: {exc}")
+        valid = []
+        for candidate in candidates:
+            try:
+                import math
+                stamp = datetime.fromisoformat(str(candidate['timestamp']).replace('Z', '+00:00'))
+                premium = float(candidate['ltp'])
+                if (candidate.get('symbol', symbol) != symbol or stamp.tzinfo is None
+                        or not math.isfinite(premium) or premium < 0):
+                    continue
+                age = (datetime.now(timezone.utc)-stamp).total_seconds()
+                if -5 <= age <= max_age_seconds:
+                    valid.append((stamp, premium))
+            except (ValueError, TypeError, KeyError):
+                continue
+        if not valid:
+            return None
+        stamp, premium = max(valid, key=lambda item: item[0])
+        return {"premium": premium, "mark_time": stamp.isoformat(), "price_source": "shared_live_tick"}
+
     async def get_live_mark(
         self,
         symbol: str,

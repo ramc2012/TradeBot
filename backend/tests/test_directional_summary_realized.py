@@ -53,3 +53,20 @@ def test_summary_realized_falls_back_when_db_unavailable(monkeypatch):
     closed = [{"realized_pnl": 100.0}, {"realized_pnl": -30.0}]
     summary = asyncio.run(_store()._summary([], closed))
     assert summary["realized_pnl"] == 70.0  # graceful fallback to in-memory sum
+
+
+def test_daily_summary_and_stale_marks_are_separate_from_lifetime(monkeypatch):
+    from datetime import datetime, timedelta, timezone
+    def offline(): raise RuntimeError('offline')
+    monkeypatch.setattr(dp, 'AsyncSessionLocal', offline)
+    now = datetime.now(timezone.utc)
+    closed = [{'realized_pnl': -30, 'closed_at': now.isoformat()},
+              {'realized_pnl': 100, 'closed_at': (now-timedelta(days=3)).isoformat()}]
+    held = [{'underlying': 'MARUTI', 'latest_premium': 50, 'unrealized_pnl': -10,
+             'mark_time': (now-timedelta(days=9)).isoformat()}]
+    summary = asyncio.run(_store()._summary(held, closed))
+    assert summary['realized_pnl'] == 70
+    assert summary['realized_today'] == -30
+    assert summary['stale_open_marks'] == 1
+    assert summary['stale_open_symbols'] == 'MARUTI'
+    assert summary['valuation_status'] == 'stale_marks'

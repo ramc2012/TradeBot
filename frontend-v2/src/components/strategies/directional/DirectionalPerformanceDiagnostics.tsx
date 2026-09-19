@@ -2,7 +2,7 @@
 
 import { AlertTriangle, ShieldCheck } from "lucide-react";
 
-import { MetricTile, Section, StatusBadge, formatSignedMoney, tone } from "@/components/desk-ui";
+import { MetricTile, Section, StatusBadge, formatIST, formatSignedMoney, tone } from "@/components/desk-ui";
 
 type Summary = Record<string, number | string | boolean | null | undefined>;
 type Position = {
@@ -90,6 +90,15 @@ export default function DirectionalPerformanceDiagnostics({
 
   return (
     <div className="space-y-4">
+      <Section title={`Session · ${summary?.session_date || "loading"}`} description="Realized P&L belongs to trades closed this IST date. Open-position P&L is since entry, not today's return.">
+        <div className="grid grid-cols-2 gap-3 md:grid-cols-4">
+          <MetricTile label="Realized today" value={summary ? formatSignedMoney(number(summary.realized_today)) : "—"} detail={`${number(summary?.closes_today)} closes · ${number(summary?.opens_today)} opens`} color={tone(number(summary?.realized_today))} />
+          <MetricTile label="Open P&L since entry" value={summary ? formatSignedMoney(number(summary.unrealized_pnl)) : "—"} detail="Recorded marks; may be stale" />
+          <MetricTile label="Marks older than 2 min" value={summary ? `${number(summary.stale_open_marks)}/${number(summary.open_positions)}` : "—"} detail="Execution freshness, including after hours" color={number(summary?.stale_open_marks) ? "text-accent-amber" : undefined} />
+          <MetricTile label="Oldest held mark" value={summary?.oldest_open_mark_at ? formatIST(String(summary.oldest_open_mark_at)) : "—"} detail="Market observation time" />
+        </div>
+        {number(summary?.stale_open_marks) > 0 && <p role="status" className="mt-3 rounded-lg border border-accent-amber/30 bg-accent-amber/5 p-3 text-xs text-amber-200">Stale marks: {String(summary?.stale_open_symbols || "unknown")}. Total equity is provisional. Held contracts are subscribed independently of ATM selection; protective exits require a fresh observed quote. Closed-market marks are expected to age.</p>}
+      </Section>
       <Section
         title="Performance diagnosis"
         icon={<AlertTriangle size={16} />}
@@ -97,7 +106,7 @@ export default function DirectionalPerformanceDiagnostics({
         rightSlot={<StatusBadge label={state} variant={state === "underperforming" ? "error" : "warn"} />}
       >
         <div className="grid grid-cols-2 gap-3 md:grid-cols-4">
-          <MetricTile label="Net P&L" value={formatSignedMoney(totalPnl)} detail={`${totalTrades} closed trades`} color={tone(totalPnl)} />
+          <MetricTile label="Net P&L" value={summary ? formatSignedMoney(totalPnl) : "—"} detail={`${totalTrades} closed trades${number(summary?.stale_open_marks) ? " · provisional marks" : ""}`} color={tone(totalPnl)} />
           <MetricTile label="Win rate" value={totalTrades ? `${(winRate * 100).toFixed(1)}%` : "—"} detail={enoughForDirectionalRetune ? "retune sample reached" : `${Math.max(0, 30 - totalTrades)} trades to 30-trade review`} />
           <MetricTile label="Largest loss share" value={grossLoss ? `${(concentration * 100).toFixed(1)}%` : "—"} detail="share of gross closed losses" color={concentration >= 0.4 ? "text-accent-red" : undefined} />
           <MetricTile label="Invalid-entry history" value={String(guardViolations.length)} detail="own evidence said no trade / negative edge" color={guardViolations.length ? "text-accent-red" : "text-accent-green"} />

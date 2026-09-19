@@ -214,18 +214,29 @@ def _register_exit_policy(connection):
 def track_open_watchlists(connection, refresh_session: date | None = None) -> dict[str, int]:
     """Audit and mark exact contracts; exit replay never writes a trading book.
 
-    Closed sessions are recomputed ONLY by the explicit repair argument. Their
-    original performance is retained once in performance_audit. Membership,
-    model versions, source marks and contract identities are never replaced.
+    Resolved outcomes stay frozen. Recent missing outcomes are retried when
+    their exact scheduled final candle arrives late. Explicit repair can still
+    recompute a whole session. Membership and contract identities never change.
     """
     registered_at = _register_exit_policy(connection)
     as_of = datetime.now(timezone.utc)
     with connection.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cursor:
         cursor.execute(
-            """SELECT * FROM vanguard_watchlist_runs
-               WHERE (status IN ('awaiting_next_session','tracking') AND %(repair)s IS NULL)
-                  OR source_session=%(repair)s ORDER BY source_session""",
-            {"repair": refresh_session})
+            """SELECT r.* FROM vanguard_watchlist_runs r
+               WHERE (%(repair)s IS NULL AND (
+                   r.status IN ('awaiting_next_session','tracking')
+                   OR (r.status='closed' AND r.track_session >= %(retry_since)s
+                       AND EXISTS (
+                           SELECT 1 FROM vanguard_watchlist_items i
+                           JOIN option_premium_candles o
+                             ON o.underlying=i.symbol AND o.expiry=i.expiry
+                            AND o.strike=i.strike AND o.option_type=i.option_type
+                            AND o.interval='30minute'
+                            AND o.time=(r.track_session + TIME '14:45') AT TIME ZONE 'Asia/Kolkata'
+                           WHERE i.source_session=r.source_session
+                             AND i.status='missing_contract'))))
+                  OR r.source_session=%(repair)s ORDER BY r.source_session""",
+            {"repair": refresh_session, "retry_since": as_of.astimezone(IST_TZ).date()-timedelta(days=7)})
         runs = cursor.fetchall()
 
     updated_items = closed_runs = 0
@@ -290,7 +301,16 @@ def track_open_watchlists(connection, refresh_session: date | None = None) -> di
         # 09:45 UTC = the declared 15:15 IST watchlist exit, not exchange close.
         statuses = []
         for item in items:
+            if run['status'] == 'closed' and refresh_session is None and item['status'] != 'missing_contract':
+                statuses.append(item['status'])
+                continue
             analysis = analyse_path(paths.get(item["id"], []), as_of)
+            if run['status'] == 'closed' and refresh_session is None:
+                analysis['reconciliation'] = {
+                    'reason': 'late_exact_session_candle',
+                    'previous_status': item['status'],
+                    'reconciled_at': as_of.isoformat(),
+                }
             good = "entry_mark" in analysis
             if good:
                 analysis["hard_stop_control"] = analyse_path(paths.get(item["id"], []), as_of,
