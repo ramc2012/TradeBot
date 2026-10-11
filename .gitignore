@@ -126,3 +126,6 @@ backend/directional_options/research/**/data/
 backend/directional_options/research/**/data_rs/
 backend/directional_options/research/divergence/data/
 backend/directional_options/research/htf_regime/data/
+
+# Raw screener.in pages cached by tools/multibagger_screen.py
+data/fundamentals/screener_cache/
