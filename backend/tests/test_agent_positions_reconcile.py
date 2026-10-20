@@ -14,10 +14,16 @@ touch a freshly-entered position).
 """
 from __future__ import annotations
 
+import sys
 from dataclasses import dataclass
 from datetime import timedelta
+from pathlib import Path
 
 import pytest
+
+# `pytest tests` puts tests/ on sys.path, not backend/. Same bootstrap the
+# other suite modules use so `paper_engine` resolves in CI.
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 import paper_engine.strategy_agent as strategy_agent_module
 from paper_engine.strategy_agent import PaperStrategyAgent, _now_ist
