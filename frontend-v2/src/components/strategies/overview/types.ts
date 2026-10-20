@@ -54,6 +54,8 @@ export type LaneView = {
   signal?: LaneSignal | null;
   /** True when the lane's status endpoint errored / returned nothing. */
   degraded?: boolean;
+  /** What the lane is for. Static, from the registry. */
+  purpose?: string;
 };
 
 /** Lanes whose open book lives on the positions-overview stream. */
@@ -69,20 +71,52 @@ export type LaneStatic = {
   key: LaneKey;
   label: string;
   href: string;
+  /** One line: what this lane is for. Not a performance claim. */
+  purpose: string;
 };
 
 /** Static registry — names + routes. Wiring/parsing happens in the desk. */
 export const LANES: LaneStatic[] = [
-  { key: "nse", label: "NSE Index · MACD", href: "/strategies/nse/live" },
-  { key: "directional", label: "Long Premium", href: "/strategies/directional" },
-  { key: "auction", label: "Auction IQ", href: "/strategies/auction" },
+  {
+    key: "nse",
+    label: "NSE Index · MACD",
+    href: "/strategies/nse/live",
+    purpose: "30m ATM premium MACD. Completed bar only.",
+  },
+  {
+    key: "directional",
+    label: "Long Premium",
+    href: "/strategies/directional",
+    purpose: "Long premium. Underlying regime, then the contract.",
+  },
+  {
+    key: "auction",
+    label: "Auction IQ",
+    href: "/strategies/auction",
+    purpose: "Market profile and order flow on index options.",
+  },
   // Fractal MP (FMP) parked out of production 2026-07-07 — revisit later. The
   // LaneKey member, STREAM_KEY_BY_LANE.fractal and the desk's `case "fractal"`
   // block stay so this file + StrategiesOverviewDesk still type-check.
   // { key: "fractal", label: "Fractal MP", href: "/strategies/fractal" },
-  { key: "gann", label: "Gann TP Delta", href: "/strategies/gann" },
-  { key: "cbe", label: "CBE Scanner", href: "/strategies/cbe" },
-  { key: "commodity", label: "Commodity", href: "/strategies/commodity" },
+  {
+    key: "gann",
+    label: "Gann TP Delta",
+    href: "/strategies/gann",
+    purpose: "Daily Gann confluence. Runner stays off until re-armed.",
+  },
+  {
+    key: "cbe",
+    label: "CBE Scanner",
+    href: "/strategies/cbe",
+    purpose: "Cross-asset rotation. A scan, not an intraday book.",
+  },
+  {
+    key: "commodity",
+    label: "Commodity",
+    href: "/strategies/commodity",
+    purpose: "MCX futures. Market profile and order flow.",
+  },
 ];
 
 /**

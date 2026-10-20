@@ -244,13 +244,14 @@ export const LANE_BOOKS: Record<BookKey, LaneBook> = {
       "There is NO order book for this lane, and none can be reconstructed. PaperPositionBook carries only open_positions and closed_positions — it has no order_log key at all. The .jsonl decision journal records LONG/SHORT intents with an entry, stop and target, but it logs no FLAT decisions, no rejections and no approved flag, and one symbol's many intents collapse into a single position — so the journal count and the position count are not comparable. It is shown below as intent context, explicitly NOT as an order book.",
     fields: {
       fees: {
-        state: "unavailable",
-        reason:
-          "This book records no brokerage, no taxes and no transaction cost of any kind. realized_pnl is therefore GROSS.",
+        state: "partial",
+        note:
+          "Closes written after the cost fix record transaction_cost, and realized_pnl on those rows is NET of statutory charges. Older rows omit the field and render UNAVAILABLE, never 0.",
       },
       slippage: {
-        state: "unavailable",
-        reason: "No slippage is modelled or recorded on this book.",
+        state: "partial",
+        note:
+          "slippage_cost on a new close is this lane's configured paper slippage, adverse on both legs. Older rows omit it.",
       },
       exitPlan: {
         state: "available",

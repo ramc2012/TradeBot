@@ -68,9 +68,17 @@ export type PositionsPayload = {
   summary?: PaperSummary;
 };
 
-/** Realized P&L of a position, tolerant of differing field names across lanes. */
+/**
+ * Realized P&L of a position.
+ *
+ * Prefer an explicit net field when the lane keeps gross on `realized_pnl`
+ * (MACD Refined). Lanes that already store net on `realized_pnl` and omit
+ * the net alias are unchanged.
+ */
 export function pnlOf(p: PaperPosition): number {
-  const v = p.realized_pnl ?? p.pnl ?? p.realised_pnl ?? p.net_pnl;
+  const net = p.realized_pnl_net ?? p.net_realized_pnl ?? p.net_pnl;
+  if (net != null && Number.isFinite(Number(net))) return Number(net);
+  const v = p.realized_pnl ?? p.pnl ?? p.realised_pnl;
   return Number(v ?? 0);
 }
 
@@ -96,16 +104,19 @@ export type TradeStats = {
   count: number;
   wins: number;
   losses: number;
-  winRate: number;
+  /** Null when the sample is empty. Zero is a measured rate, not a missing one. */
+  winRate: number | null;
   grossWin: number;
   grossLoss: number;
-  profitFactor: number;
-  avgWin: number;
-  avgLoss: number;
-  expectancy: number;
-  net: number;
-  bestPnl: number;
-  worstPnl: number;
+  /** Null on an empty sample. Infinity means wins and no losses. */
+  profitFactor: number | null;
+  avgWin: number | null;
+  avgLoss: number | null;
+  expectancy: number | null;
+  /** Sum of closed P&L. Null when nothing has closed, so a flat book is not invented. */
+  net: number | null;
+  bestPnl: number | null;
+  worstPnl: number | null;
   avgR: number | null;
   avgHoldHours: number | null;
 };
@@ -125,16 +136,16 @@ export function deriveTradeStats(closed: PaperPosition[]): TradeStats {
     count: n,
     wins: wins.length,
     losses: losses.length,
-    winRate: n ? wins.length / n : 0,
+    winRate: n ? wins.length / n : null,
     grossWin,
     grossLoss,
-    profitFactor: grossLoss > 0 ? grossWin / grossLoss : grossWin > 0 ? Infinity : 0,
-    avgWin: wins.length ? grossWin / wins.length : 0,
-    avgLoss: losses.length ? -grossLoss / losses.length : 0,
-    expectancy: n ? net / n : 0,
-    net,
-    bestPnl: n ? Math.max(...closed.map(pnlOf)) : 0,
-    worstPnl: n ? Math.min(...closed.map(pnlOf)) : 0,
+    profitFactor: n ? (grossLoss > 0 ? grossWin / grossLoss : grossWin > 0 ? Infinity : 0) : null,
+    avgWin: wins.length ? grossWin / wins.length : null,
+    avgLoss: losses.length ? -grossLoss / losses.length : null,
+    expectancy: n ? net / n : null,
+    net: n ? net : null,
+    bestPnl: n ? Math.max(...closed.map(pnlOf)) : null,
+    worstPnl: n ? Math.min(...closed.map(pnlOf)) : null,
     avgR: rVals.length ? rVals.reduce((s, r) => s + r, 0) / rVals.length : null,
     avgHoldHours: holds.length ? holds.reduce((s, h) => s + h, 0) / holds.length : null,
   };

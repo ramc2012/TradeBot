@@ -193,9 +193,13 @@ class FeatureEngine:
         annualizer = math.sqrt(252.0 * bars_per_day)
         rv = returns.rolling(int(period_cfg["rv_window"])).std().fillna(0.0) * annualizer
         frame["rv_annualized"] = rv
-        rv_min = float(rv.min()) if not rv.empty else 0.0
-        rv_max = float(rv.max()) if not rv.empty else 0.0
-        denom = max(rv_max - rv_min, 1e-9)
+        # Expanding min/max, not the whole frame. A full-sample range lets a
+        # later vol spike rewrite every earlier bar (backtest look-ahead).
+        # The last row still matches a full-sample scale of the bars seen so
+        # far, which is what the live path consumes.
+        rv_min = rv.expanding(min_periods=1).min()
+        rv_max = rv.expanding(min_periods=1).max()
+        denom = (rv_max - rv_min).clip(lower=1e-9)
         frame["rv_percentile"] = ((rv - rv_min) / denom).clip(0.0, 1.0)
         frame["range_expansion"] = (
             frame["range_pct"] / frame["range_pct"].rolling(int(period_cfg["range_window"])).mean().replace(0.0, pd.NA)

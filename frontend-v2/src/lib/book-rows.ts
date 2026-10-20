@@ -273,10 +273,10 @@ export function auctionTrade(r: Raw): BookTradeRow {
     exitSpot: num(r?.exit_spot_price),
     qty: quantityOf({ units: num(r?.quantity), lotSize: num(r?.lot_size) }),
     realized: num(r?.realized_pnl),
-    // This book records no gross/net split because it records no cost at all.
-    realizedGross: null,
-    cost: null,
-    slippage: null,
+    // New closes carry the split. Older rows omit it — null, never 0.
+    realizedGross: num(r?.realized_pnl_gross),
+    cost: num(r?.transaction_cost),
+    slippage: num(r?.slippage_cost),
     rMultiple: null,
     exitReason: str(r?.close_reason),
     // stop_price / target_price on this book are UNDERLYING index levels while

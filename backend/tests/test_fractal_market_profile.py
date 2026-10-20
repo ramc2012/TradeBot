@@ -506,7 +506,8 @@ async def test_live_crude_selection_maps_to_futures_contract(monkeypatch: pytest
 
 
 @pytest.mark.asyncio
-async def test_paper_store_calculates_short_futures_pnl(tmp_path: Path) -> None:
+async def test_paper_store_calculates_short_futures_pnl(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr("paper_engine.costs.PAPER_APPLY_COSTS", True)
     store = FMPPaperStore(tmp_path)
     actionable_snapshot = {
         "symbol_code": "CRUDEOIL",
@@ -560,8 +561,13 @@ async def test_paper_store_calculates_short_futures_pnl(tmp_path: Path) -> None:
         },
     }
     summary = await store.record_signal(flat_snapshot)
+    positions = await store.list_positions(symbol="CRUDEOIL", status="all", limit=10)
+    closed = positions["closed_positions"][0]
 
-    assert summary["realized_pnl"] == 5000.0
+    assert closed["realized_pnl_gross"] == 5000.0
+    assert closed["transaction_cost"] > 0
+    assert closed["realized_pnl"] == pytest.approx(5000.0 - closed["transaction_cost"])
+    assert summary["realized_pnl"] == pytest.approx(closed["realized_pnl"])
 
 
 @pytest.mark.asyncio
@@ -1235,9 +1241,10 @@ def _flat_followup_snapshot(
 
 
 @pytest.mark.asyncio
-async def test_auto_exit_stop_loss_on_premium_based_stop(tmp_path: Path) -> None:
+async def test_auto_exit_stop_loss_on_premium_based_stop(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """Premium-based stop (≤ 5× entry premium) triggers a stop_loss exit
     on the next snapshot when the option premium drops to or below stop."""
+    monkeypatch.setattr("paper_engine.costs.PAPER_APPLY_COSTS", True)
     store = FMPPaperStore(tmp_path)
     # Open: entry 186.5, stop 80, target 280 — all premium-scaled.
     await store.record_signal(
@@ -1258,7 +1265,10 @@ async def test_auto_exit_stop_loss_on_premium_based_stop(tmp_path: Path) -> None
     # PnL is (exit - entry) * qty for a LONG; exit_premium gets stamped
     # from latest_premium after refresh, which the second snapshot supplies.
     assert closed["exit_premium"] == 50.0
-    assert closed["realized_pnl"] == pytest.approx((50.0 - 186.5) * 65, rel=1e-6)
+    gross = (50.0 - 186.5) * 65
+    assert closed["realized_pnl_gross"] == pytest.approx(gross, rel=1e-6)
+    assert closed["transaction_cost"] > 0
+    assert closed["realized_pnl"] == pytest.approx(gross - closed["transaction_cost"], rel=1e-6)
 
 
 @pytest.mark.asyncio

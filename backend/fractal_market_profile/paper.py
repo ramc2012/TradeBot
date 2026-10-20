@@ -513,7 +513,11 @@ class FMPPaperStore:
         row["close_reason"] = reason
         if exit_premium is not None:
             row["exit_premium"] = exit_premium
-        row["realized_pnl"] = self._pnl(row, row.get("exit_premium"))
+        gross = self._pnl(row, row.get("exit_premium"))
+        charges = self._close_charges(row, row.get("exit_premium"))
+        row["realized_pnl_gross"] = gross
+        row["transaction_cost"] = charges
+        row["realized_pnl"] = round(gross - charges, 2)
         row["unrealized_pnl"] = 0.0
         if self.policy is not None:
             try:
@@ -599,6 +603,31 @@ class FMPPaperStore:
         if str(row.get("instrument_type") or row.get("option_type") or "").upper() == "FUT" and str(row.get("action") or "").upper() == "SHORT":
             return round((entry - latest) * quantity, 2)
         return round((latest - entry) * quantity, 2)
+
+    def _close_charges(self, row: dict[str, Any], exit_price: Any) -> float:
+        """Statutory round-trip on the close. Unrealized marks stay gross."""
+        try:
+            entry = float(row.get("entry_premium") or 0.0)
+            exit_ = float(exit_price or 0.0)
+            quantity = abs(int(row.get("quantity") or 0))
+        except (TypeError, ValueError):
+            return 0.0
+        instrument = str(row.get("instrument_type") or row.get("option_type") or "")
+        symbol = str(row.get("trading_symbol") or row.get("instrument_key") or row.get("underlying") or "")
+        is_short = instrument.upper() in {"FUT", "FUTURES"} and str(row.get("action") or "").upper() == "SHORT"
+        try:
+            from paper_engine.costs import round_trip_charges
+
+            return round_trip_charges(
+                symbol=symbol,
+                instrument_type=instrument,
+                entry_price=entry,
+                exit_price=exit_,
+                qty=quantity,
+                entry_action="SELL" if is_short else "BUY",
+            )
+        except Exception:
+            return 0.0
 
     def _risk_basis(self, row: dict[str, Any]) -> float:
         try:

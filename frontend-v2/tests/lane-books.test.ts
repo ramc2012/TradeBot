@@ -187,11 +187,16 @@ test("no view synthesises orders from trades", () => {
 
 // ─── 3. Absent fields say UNAVAILABLE, with the reason ──────────────────────
 
-test("fees are UNAVAILABLE on all four non-directional books, with a reason", () => {
+test("fees are UNAVAILABLE on books that still do not record them", () => {
   for (const key of BOOK_KEYS) {
     const f = bookField(key, "fees");
     if (key === "directional_options") {
       assert.equal(f.state, "available", "directional records transaction_cost on every closed row");
+      continue;
+    }
+    if (key === "auction_intelligence") {
+      assert.equal(f.state, "partial", "auction closes now record transaction_cost; legacy rows do not");
+      assert.equal(f.state === "partial" && "note" in f && /transaction_cost/i.test(f.note), true);
       continue;
     }
     assert.equal(f.state, "unavailable", `${key} claims fees it does not record`);
@@ -425,13 +430,30 @@ test("the auction trade adapter reports NO cost rather than a zero cost", () => 
     target_price: 23661.5,
     close_reason: "hard_stop",
   });
-  assert.equal(t.cost, null, "this book records no cost; null, never 0");
+  assert.equal(t.cost, null, "a legacy row records no cost; null, never 0");
   assert.equal(t.slippage, null);
   assert.equal(t.realizedGross, null);
   assert.equal(t.rMultiple, null);
   assert.equal(t.realized, -55263);
   assert.equal(t.qty.lots, 6);
   assert.equal(t.qty.units, 390);
+
+  const net = auctionTrade({
+    position_id: "p2",
+    symbol: "NIFTY22500CE",
+    quantity: 75,
+    entry_premium: 82,
+    exit_premium: 92,
+    realized_pnl: 688.4,
+    realized_pnl_gross: 750,
+    transaction_cost: 60.3,
+    slippage_cost: 1.3,
+    close_reason: "flat_signal",
+  });
+  assert.equal(net.realized, 688.4);
+  assert.equal(net.realizedGross, 750);
+  assert.equal(net.cost, 60.3);
+  assert.equal(net.slippage, 1.3);
 });
 
 test("the directional trade adapter carries the real net/gross split", () => {

@@ -32,6 +32,21 @@ def test_disabled_returns_zero(monkeypatch):
     ) == 0.0
 
 
+def test_crude_future_uses_mcx_ctt_not_nse_stt():
+    # Same notional. NSE STT is 0.02% of the sell leg; MCX CTT is 0.01%.
+    # A bare CRUDEOIL month code must not be billed as an NSE future.
+    nse = round_trip_charges(
+        symbol="NIFTY26JUNFUT", instrument_type="FUT",
+        entry_price=23000, exit_price=23100, qty=25, entry_action="BUY",
+    )
+    mcx = round_trip_charges(
+        symbol="CRUDEOIL26JUNFUT", instrument_type="FUT",
+        entry_price=23000, exit_price=23100, qty=25, entry_action="BUY",
+    )
+    assert mcx > 0
+    assert mcx < nse
+
+
 def test_degenerate_inputs_are_safe():
     assert round_trip_charges(symbol="X", instrument_type="CE", entry_price=0, exit_price=0, qty=0, entry_action="BUY") == 0.0
     assert round_trip_charges(symbol="X", instrument_type="CE", entry_price=100, exit_price=120, qty=-5, entry_action="BUY") == 0.0

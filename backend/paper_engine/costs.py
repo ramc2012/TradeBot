@@ -38,6 +38,49 @@ STAMP_FUTURE = 0.00002        # 0.002%
 # GST on (brokerage + exchange + SEBI).
 GST = 0.18
 
+# MCX roots the commodity and fractal futures books actually trade. Longer
+# roots first so SILVERM is not classified as SILVER.
+_MCX_ROOTS = (
+    "CRUDEOIL",
+    "NATURALGAS",
+    "SILVERMIC",
+    "SILVERM",
+    "SILVER",
+    "GOLDM",
+    "GOLD",
+    "COPPER",
+    "ALUMINI",
+    "ZINCMINI",
+    "ZINC",
+    "NICKEL",
+    "LEAD",
+    "COTTON",
+    "MENTHAOIL",
+    "MENTHA",
+)
+_MCX_MONTHS = ("JAN", "FEB", "MAR", "APR", "MAY", "JUN", "JUL", "AUG", "SEP", "OCT", "NOV", "DEC")
+
+
+def _is_mcx_contract(symbol: str, instrument_type: str) -> bool:
+    """True for MCX futures even when the symbol has no ``MCX:`` prefix.
+
+    ``CRUDEOIL26JUNFUT`` used to fall through to the NSE futures schedule
+    (STT 0.02% instead of CTT 0.01%). A bare NSE future such as ``NIFTYFUT``
+    must stay on the NSE schedule.
+    """
+    blob = f"{symbol} {instrument_type}".upper()
+    if "MCX:" in blob or "MCX_FO" in blob or "MCX|" in blob or blob.startswith("MCX"):
+        return True
+    for token in blob.replace(":", " ").replace("|", " ").replace("_", " ").split():
+        letters = "".join(ch for ch in token if ch.isalpha())
+        for root in _MCX_ROOTS:
+            if not letters.startswith(root):
+                continue
+            rest = letters[len(root):]
+            if rest in ("", "FUT") or rest.startswith(_MCX_MONTHS):
+                return True
+    return False
+
 
 def round_trip_charges(
     *,
@@ -71,7 +114,7 @@ def round_trip_charges(
 
         it = str(instrument_type or "").upper()
         is_option = it in ("CE", "PE")
-        is_mcx = str(symbol or "").upper().startswith("MCX")
+        is_mcx = _is_mcx_contract(str(symbol or ""), it)
 
         brokerage = 2.0 * BROKERAGE_PER_ORDER
         if is_option:

@@ -96,6 +96,9 @@ export function LaneSummaryCard({ lane }: { lane: LaneView }) {
           <div className="mt-0.5 text-[10.5px] uppercase tracking-[0.12em] text-text-muted">
             {age != null ? `scanned ${formatDuration(age)} ago` : "no recent scan"}
           </div>
+          {lane.purpose ? (
+            <p className="mt-1 text-[11.5px] leading-snug text-text-secondary">{lane.purpose}</p>
+          ) : null}
         </div>
         <StatusBadge label={statusLabel} variant={statusVariant} />
       </div>
@@ -111,7 +114,7 @@ export function LaneSummaryCard({ lane }: { lane: LaneView }) {
           <div className="text-[9.5px] uppercase tracking-[0.12em] text-text-muted">
             {lane.dayPnl != null ? "Day P&L" : "Open P&L"}
           </div>
-          <div className={clsx("mt-0.5 font-mono text-sm font-semibold", tone(pnl))}>
+          <div className={clsx("mt-0.5 font-mono text-sm font-semibold tabular-nums", tone(pnl))}>
             {pnl != null ? formatSignedMoney(pnl) : "—"}
           </div>
         </div>
