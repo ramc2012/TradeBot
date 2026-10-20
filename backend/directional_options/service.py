@@ -93,6 +93,7 @@ class DirectionalOptionsService:
             planned_stop_pct=float(self.config["risk"].get("planned_stop_pct", 0.30)),
             profit_target_pct=float(self.config["risk"].get("profit_target_pct", 0.45)),
             expiry_guard_days=float(self.config["risk"].get("expiry_guard_days", 0.8)),
+            execution_config=self.config.get("execution", {}),
         )
         self.backtester = DirectionalOptionsBacktester(
             store=self.store,

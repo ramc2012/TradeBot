@@ -112,7 +112,7 @@ def _parse_time(value: Any) -> Optional[datetime]:
 
 
 class PaperPositionBook:
-    def __init__(self, root: Path | str, *, limits: dict[str, Any] | None = None):
+    def __init__(self, root: Path | str, *, limits: dict[str, Any] | None = None, slippage_bps: float | None = None):
         self.root = resolve_journal_root(root)
         self.path = self.root / "paper_positions.json"
         self._lock = asyncio.Lock()
@@ -130,8 +130,11 @@ class PaperPositionBook:
         #   max_symbol_capital_fraction -> clamp qty so premium outgo <= frac * capital.
         #   hard_stop_premium_fraction  -> exit when the option premium falls this far.
         self.limits = dict(limits or {})
+        self.slippage_bps = slippage_bps
 
     def _slippage_bps(self) -> float:
+        if self.slippage_bps is not None:
+            return max(float(self.slippage_bps), 0.0)
         raw = self.limits.get("slippage_bps")
         if raw is not None:
             try:

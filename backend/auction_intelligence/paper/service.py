@@ -10,10 +10,10 @@ from auction_intelligence.schemas import AnalysisBundle, PaperTradeRecord
 
 
 class PaperTradingService:
-    def __init__(self, journal_root: str):
+    def __init__(self, journal_root: str, *, slippage_bps: float | None = None):
         self.writer = JournalWriter(journal_root)
         self.reader = JournalReader(journal_root)
-        self.book = PaperPositionBook(journal_root)
+        self.book = PaperPositionBook(journal_root, slippage_bps=slippage_bps)
 
     def record_analysis(self, bundle: AnalysisBundle) -> list[str]:
         written: list[str] = []

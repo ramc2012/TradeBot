@@ -96,6 +96,7 @@ class StrategyExitMixin:
                 instrument_key=pos.instrument_key,
                 interval="30minute",
                 limit=80,
+                completed_only=True,
                 allow_broker_refresh=not (settings.MARKET_INTELLIGENCE_STRATEGY_LOCAL_ONLY or settings.PAPER_TRADING_ONLY),
             )
             closes = [float(c["close"]) for c in candles if c.get("close")] if candles else []

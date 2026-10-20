@@ -1,0 +1,22 @@
+{
+  "version": "edge-v1",
+  "symbols": {"NIFTY": "NSE", "BANKNIFTY": "NSE", "CRUDEOIL": "MCX", "GOLD": "MCX"},
+  "bar_minutes": 5,
+  "range_bars": 12,
+  "atr_bars": 14,
+  "max_range_atr": 4.0,
+  "min_efficiency": 0.35,
+  "max_bar_age_seconds": 180,
+  "max_quote_age_seconds": 15,
+  "entry_timeout_seconds": 60,
+  "max_option_spread_fraction": 0.02,
+  "max_future_spread_fraction": 0.001,
+  "minimum_sessions_for_evidence": 60,
+  "minimum_trades_for_evidence": 200,
+  "evaluation": {"development_sessions": 40, "holdout_sessions": 20, "diagnostic_block_sessions": 20},
+  "lanes": {
+    "directional": {"markets": ["NSE"], "target_r": 2.0, "hold_minutes": 60},
+    "auction": {"markets": ["NSE"], "target_r": 1.0, "hold_minutes": 30},
+    "commodity": {"markets": ["MCX"], "target_r": 2.5, "hold_minutes": 90}
+  }
+}

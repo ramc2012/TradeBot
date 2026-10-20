@@ -3234,30 +3234,13 @@ class ATMWatchlistService:
             instrument_key=instrument_key,
             interval="30minute",
             limit=80,
+            completed_only=True,
         )
         if premium_closes:
             return premium_closes
-
-        async with AsyncSessionLocal() as session:
-            snapshot_rows = await session.execute(
-                text("""
-                    SELECT ltp
-                    FROM atm_option_watchlist_snapshots
-                    WHERE underlying = :underlying
-                      AND expiry = :expiry
-                      AND strike = :strike
-                      AND option_type = :option_type
-                    ORDER BY time DESC
-                    LIMIT 60
-                """),
-                {
-                    "underlying": underlying,
-                    "expiry": expiry,
-                    "strike": strike,
-                    "option_type": option_type,
-                },
-            )
-            return [float(row.ltp) for row in reversed(snapshot_rows.fetchall()) if row.ltp is not None][-60:]
+        # load_closes already aggregates snapshots into timestamped bars. Raw
+        # snapshot LTPs are not a 30-minute series and cannot be a fallback.
+        return []
 
     async def _persist_snapshot(
         self,
