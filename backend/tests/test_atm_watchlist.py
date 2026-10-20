@@ -1496,3 +1496,35 @@ def test_get_expiries_demotes_live_refresh_outside_window(monkeypatch) -> None:
 
     assert adapter_requests == []  # no broker adapter acquisition attempted
     assert payload["default_expiry"] == "2026-05-26"
+
+
+def test_s1_technicals_do_not_splice_a_forming_bar(monkeypatch) -> None:
+    """A live LTP must not move the 30-minute MACD once history exists.
+
+    S1 is a completed-bar zero-cross. Splicing the quote onto the close
+    series used to print a cross that the exit series (persisted closes
+    only) never saw.
+    """
+    service = ATMWatchlistService()
+    closes = [100.0 + ((i % 5) - 2) * 0.8 for i in range(48)]
+
+    async def fake_history(**kwargs):
+        return list(closes)
+
+    monkeypatch.setattr(service, "_load_history_closes", fake_history)
+
+    async def run(fallback: float):
+        return await service._load_technicals(
+            underlying="NIFTY",
+            expiry=date(2026, 7, 28),
+            strike=24000.0,
+            option_type="CE",
+            instrument_key="NSE:NIFTY",
+            fallback_close=fallback,
+        )
+
+    quiet = asyncio.run(run(closes[-1]))
+    spiked = asyncio.run(run(closes[-1] * 1.4))
+    assert quiet["macd"] is not None
+    assert spiked["macd"] == quiet["macd"]
+    assert spiked["macd_signal"] == quiet["macd_signal"]

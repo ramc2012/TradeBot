@@ -1100,13 +1100,20 @@ class DirectionalOptionsPaperStore:
         position["mark_time"] = mark.get("mark_time") or position.get("mark_time")
         position["unrealized_pnl"] = 0.0
         realized_gross = round((latest_premium - entry_premium) * quantity, 2)
-        # Deduct real round-trip charges (brokerage + STT + exchange txn + SEBI
-        # + GST + stamp) so paper P&L is NET, not gross — paper used to overstate
-        # live by the entire charge stack (STT alone is 0.10% of sell-side
-        # premium on index options). WS-1.4 paper fidelity. The directional book
-        # uses its own paper store (NOT PaperPortfolio), so the shared
-        # portfolio.py cost wiring doesn't reach it — apply the same shared
-        # paper_engine.costs model here. Directional is long-premium (BUY entry).
+        # Fills are worse than the printed mark by the lane's own execution
+        # model (config execution.entry_slippage_pct / exit_slippage_pct).
+        # Stops and targets still read the raw mark; the booked P&L does not.
+        # Charges are then taken on the slipped fills, same statutory model
+        # as the rest of the paper desk. Directional is long-premium (BUY).
+        from directional_options.config import DEFAULT_CONFIG
+
+        exec_cfg = DEFAULT_CONFIG.get("execution") or {}
+        entry_slip = max(float(exec_cfg.get("entry_slippage_pct") or 0.0), 0.0)
+        exit_slip = max(float(exec_cfg.get("exit_slippage_pct") or 0.0), 0.0)
+        entry_fill = entry_premium * (1.0 + entry_slip)
+        exit_fill = latest_premium * (1.0 - exit_slip)
+        fill_pnl = (exit_fill - entry_fill) * quantity
+        slippage_cost = round(realized_gross - fill_pnl, 2)
         try:
             from paper_engine.costs import round_trip_charges
             txn_cost = round_trip_charges(
@@ -1117,17 +1124,20 @@ class DirectionalOptionsPaperStore:
                     or ""
                 ),
                 instrument_type=str(position.get("option_type") or "CE"),
-                entry_price=entry_premium,
-                exit_price=latest_premium,
+                entry_price=entry_fill,
+                exit_price=exit_fill,
                 qty=quantity,
                 entry_action="BUY",
             )
         except Exception:  # noqa: BLE001
             txn_cost = 0.0
-        realized = round(realized_gross - txn_cost, 2)
+        realized = round(fill_pnl - txn_cost, 2)
         position["realized_pnl"] = realized
         position["realized_pnl_gross"] = realized_gross
         position["transaction_cost"] = round(txn_cost, 2)
+        position["slippage_cost"] = slippage_cost
+        position["entry_fill_premium"] = round(entry_fill, 4)
+        position["exit_fill_premium"] = round(exit_fill, 4)
         # Feed the realized PnL back to the RL policy so the value
         # posterior tightens and the multiplier buckets converge.
         if self.policy is not None:

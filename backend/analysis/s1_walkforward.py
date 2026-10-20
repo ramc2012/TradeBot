@@ -3,10 +3,12 @@
 Rules (exactly as specified):
   • ATM CE & PE per underlying per day (ATM = strike where |CE−PE| is smallest at the
     day's first bar — put/call parity ⇒ CE≈PE at the money).
-  • Entry: the contract's own 30-minute premium MACD crosses UP through zero
-    (prev_closed_macd < 0 < forming_macd). Detected INTRA-BAR — no wait for the 30m
-    candle to close: each 3-minute sub-bar extends the forming 30m bar and the MACD is
-    recomputed incrementally (mirrors the live synthetic-forming-bar).
+  • Entry in THIS research script: the contract's own 30-minute premium MACD
+    crosses UP through zero (prev_closed_macd < 0 < forming_macd), detected
+    intra-bar on 3-minute sub-bars. The LIVE paper lane no longer does that.
+    Live S1 enters only on a completed 30-minute close, matching the exit
+    series. Treat this script's intra-bar fills as a research variant, not as
+    a replica of the paper book.
   • Buy whichever of ATM CE / PE gives the cross. ONE position per underlying (CE or PE).
   • Hard stop: −25% on premium. Once premium reaches +50% over entry, switch to a
     TRAILING stop 25% below the running peak premium (follows the peak up).

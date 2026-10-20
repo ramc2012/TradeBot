@@ -134,7 +134,7 @@ export function TradeBook({
           open.length === 0 ? (
             <Empty label="No open positions" />
           ) : (
-            <table className="w-full border-collapse">
+            <table className="w-full border-collapse tabular-nums">
               <thead>
                 <tr className="border-b border-bg-border/60">
                   <th className={TH}>Symbol</th>
@@ -177,12 +177,12 @@ export function TradeBook({
         ) : sortedClosed.length === 0 ? (
           <Empty label="No closed trades yet" />
         ) : (
-          <table className="w-full border-collapse">
-            <thead>
-              <tr className="border-b border-bg-border/60">
-                <th className={TH}>Symbol</th>
-                <th className={TH}>Dir</th>
-                <th className={TH}>Regime</th>
+            <table className="w-full border-collapse tabular-nums">
+              <thead>
+                <tr className="border-b border-bg-border/60">
+                  <th className={TH}>Symbol</th>
+                  <th className={TH}>Dir</th>
+                  <th className={TH}>Regime</th>
                 <th className={`${TH} text-right`}>Conf</th>
                 <th className={`${TH} text-right`}>Entry → Exit</th>
                 <th className={`${TH} text-right`}>R</th>
@@ -225,7 +225,7 @@ export function TradeBook({
                   {stats.count} trades · {formatPct(stats.winRate)} win
                 </td>
                 <td className={`${TD} text-right text-text-muted`} colSpan={2}>
-                  PF {stats.profitFactor === Infinity ? "∞" : formatNumber(stats.profitFactor, 2)}
+                  PF {stats.profitFactor == null ? "—" : stats.profitFactor === Infinity ? "∞" : formatNumber(stats.profitFactor, 2)}
                 </td>
                 <td className={`${TD} text-text-muted`} colSpan={2}>
                   Exp {formatSignedMoney(stats.expectancy)}
@@ -244,8 +244,8 @@ export function TradeBook({
 
 function Empty({ label }: { label: string }) {
   return (
-    <div className="flex items-center justify-center gap-2 rounded-xl border border-dashed border-bg-border/60 px-4 py-8 text-sm text-text-muted">
-      <Layers size={15} />
+    <div className="flex items-center gap-2 rounded-md border border-dashed border-bg-border px-3 py-6 font-mono text-[11px] uppercase tracking-[0.14em] text-text-muted">
+      <Layers size={14} />
       {label}
     </div>
   );

@@ -80,12 +80,12 @@ export function DeskShell({
   children: React.ReactNode;
 }) {
   return (
-    <div className="space-y-4">
-      <header className="rounded-2xl border border-bg-border bg-bg-secondary/22 px-5 py-4">
+    <div className="space-y-3">
+      <header className="rounded-md border border-bg-border bg-bg-secondary/40 px-4 py-2.5">
         <div className="flex flex-wrap items-start justify-between gap-3">
           <div className="min-w-0">
             <div className="flex items-center gap-2">
-              <h1 className="text-xl font-semibold text-text-primary">{title}</h1>
+              <h1 className="text-base font-semibold tracking-tight text-text-primary">{title}</h1>
               {/* Paper is BLUE, live is amber. Green is reserved for
                   healthy-live / actionable-confirmed, and "we are not sending
                   real orders" is neither — it is a mode, not a health light. */}
@@ -101,7 +101,7 @@ export function DeskShell({
               ) : null}
             </div>
             {description ? (
-              <p className="mt-1 text-sm text-text-muted max-w-2xl">{description}</p>
+              <p className="mt-0.5 max-w-3xl text-[12.5px] leading-snug text-text-muted">{description}</p>
             ) : null}
             <div className="mt-2 flex flex-wrap items-center gap-3 text-[11.5px] text-text-muted">
               <span className="inline-flex items-center gap-1.5">

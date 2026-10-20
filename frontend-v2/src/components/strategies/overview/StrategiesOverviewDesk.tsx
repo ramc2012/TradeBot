@@ -369,7 +369,7 @@ export default function StrategiesOverviewDesk() {
     const out: LaneView[] = [];
 
     for (const lane of LANES) {
-      const base = { key: lane.key, label: lane.label, href: lane.href };
+      const base = { key: lane.key, label: lane.label, href: lane.href, purpose: lane.purpose };
 
       // Live open book off the shared positions stream (when this lane uses it).
       const streamKey = STREAM_KEY_BY_LANE[lane.key];
@@ -476,10 +476,8 @@ export default function StrategiesOverviewDesk() {
     [posStream.data],
   );
   const totalOpen = bookSummaries.reduce((acc, b) => acc + b.openPositions, 0);
-  const totalUnreal = lanes.reduce(
-    (acc, l) => acc + (l.unrealizedPnl ?? 0),
-    0,
-  );
+  const knownUnreal = lanes.map((l) => l.unrealizedPnl).filter((v): v is number => v != null);
+  const totalUnreal = knownUnreal.length ? knownUnreal.reduce((acc, v) => acc + v, 0) : null;
   const signalsLive = lanes.filter((l) => l.signal && (l.signal.direction || l.signal.state)).length;
 
   const isFetching =
@@ -531,15 +529,32 @@ export default function StrategiesOverviewDesk() {
             label="Open P&L"
             value={formatSignedMoney(totalUnreal)}
             color={tone(totalUnreal)}
-            detail="unrealized, streamed"
+            detail={knownUnreal.length ? `unrealized · ${knownUnreal.length} lanes reporting` : "no mark yet"}
           />
           <MetricTile label="Live signals" value={String(signalsLive)} detail="lanes with a read" />
         </section>
       ) : null}
 
+      {activeTab === "overview" && isFetching && lanes.every((l) => !l.lastScanAt && l.running == null) ? (
+        <div className="flex items-center gap-2 rounded-md border border-bg-border bg-bg-secondary/40 px-3 py-2 font-mono text-[11px] uppercase tracking-[0.14em] text-text-muted">
+          <span className="inline-block h-1.5 w-1.5 animate-pulse rounded-full bg-accent-blue" />
+          Loading lane snapshots
+        </div>
+      ) : null}
+
+      {activeTab === "overview" && !isFetching && lanes.length > 0 && lanes.every((l) => l.degraded) ? (
+        <div className="rounded-md border border-accent-red/40 bg-accent-red/10 px-3 py-2 text-[12px] text-accent-red">
+          Every lane status call failed. The cards below are empty because the desk has no snapshot, not because the books are flat.
+        </div>
+      ) : null}
+
       {activeTab === "overview" ? (
         <>
-          <section className="grid grid-cols-1 gap-3 md:grid-cols-2 xl:grid-cols-3">
+          <p className="font-mono text-[11px] leading-relaxed text-text-muted">
+            Closed P&amp;L on lanes that book costs is net of statutory charges and that lane&apos;s slippage.
+            A green number is a paper result. It is not evidence of an edge.
+          </p>
+          <section className="grid grid-cols-1 gap-2 md:grid-cols-2 xl:grid-cols-3">
             {lanes.map((lane) => (
               <LaneSummaryCard key={lane.key} lane={lane} />
             ))}
@@ -566,7 +581,7 @@ export default function StrategiesOverviewDesk() {
 
 // ── Per-lane builders ─────────────────────────────────────────────────────────
 
-type Base = { key: LaneKey; label: string; href: string };
+type Base = { key: LaneKey; label: string; href: string; purpose?: string };
 
 function buildNse(
   base: Base,

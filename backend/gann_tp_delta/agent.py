@@ -738,10 +738,28 @@ class GannTPDeltaPaperAgent:
         entry = _safe_float(position.get("entry_price"), 0.0) or 0.0
         qty_units = max(1, _safe_int(position.get("qty_units"), 1))
         # Futures can be short; options are always long the premium.
-        if str(position.get("instrument_type") or "OPTION") == "FUTURES" and str(position.get("direction") or "long") == "short":
-            realized = round((entry - exit_price) * qty_units, 2)
+        is_short = (
+            str(position.get("instrument_type") or "OPTION") == "FUTURES"
+            and str(position.get("direction") or "long") == "short"
+        )
+        if is_short:
+            gross = round((entry - exit_price) * qty_units, 2)
         else:
-            realized = round((exit_price - entry) * qty_units, 2)
+            gross = round((exit_price - entry) * qty_units, 2)
+        try:
+            from paper_engine.costs import round_trip_charges
+
+            charges = round_trip_charges(
+                symbol=str(position.get("trading_symbol") or position.get("instrument_key") or position.get("underlying") or ""),
+                instrument_type=str(position.get("instrument_type") or position.get("option_type") or "FUT"),
+                entry_price=entry,
+                exit_price=exit_price,
+                qty=qty_units,
+                entry_action="SELL" if is_short else "BUY",
+            )
+        except Exception:
+            charges = 0.0
+        realized = round(gross - charges, 2)
         closed = {**position}
         closed.update(
             {
@@ -750,6 +768,8 @@ class GannTPDeltaPaperAgent:
                 "updated_at": _now(),
                 "exit_price": round(exit_price, 2),
                 "close_reason": reason,
+                "realized_pnl_gross": gross,
+                "transaction_cost": round(float(charges), 2),
                 "realized_pnl": realized,
                 "unrealized_pnl": 0.0,
             }

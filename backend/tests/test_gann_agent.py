@@ -9,6 +9,8 @@ from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
 
+import pytest
+
 from gann_tp_delta.agent import GannTPDeltaPaperAgent
 from gann_tp_delta.config import clone_default_config
 
@@ -148,12 +150,15 @@ def test_strong_opposite_signal_closes():
 # ─── Short-futures P&L sign ──────────────────────────────────────────────────
 
 
-def test_short_futures_pnl_sign():
+def test_short_futures_pnl_sign(monkeypatch):
+    monkeypatch.setattr("paper_engine.costs.PAPER_APPLY_COSTS", True)
     ag = _agent()
     pos = {"instrument_type": "FUTURES", "direction": "short", "entry_price": 5000.0,
            "current_price": 4900.0, "qty_units": 100}
     closed = ag._close_position(pos, "gann_target")
-    assert closed["realized_pnl"] == 10000.0  # short gained as price fell
+    assert closed["realized_pnl_gross"] == 10000.0  # short gained as price fell
+    assert closed["transaction_cost"] > 0
+    assert closed["realized_pnl"] == pytest.approx(10000.0 - closed["transaction_cost"])
 
 
 def test_time_stop_when_stalled():

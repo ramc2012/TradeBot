@@ -29,6 +29,47 @@ def _utc_now() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
+def _net_long_premium(
+    *,
+    symbol: str,
+    instrument_type: str,
+    entry_premium: float,
+    exit_premium: float,
+    quantity: int,
+    slippage_bps: float,
+) -> tuple[float, float, float, float]:
+    """Mark gross, statutory charges, slippage drag, and net P&L.
+
+    Auction paper used to book ``(exit − entry) × qty`` with no costs. Gate B
+    already haircuts offline validation; the live book now uses the same
+    statutory model as the other lanes plus this lane's configured slippage.
+    Slippage is applied adversely on both legs (pay more, receive less).
+    """
+    qty = int(quantity or 0)
+    entry = float(entry_premium or 0.0)
+    exit_ = float(exit_premium or 0.0)
+    gross = round((exit_ - entry) * qty, 2)
+    rate = max(float(slippage_bps or 0.0), 0.0) / 10_000.0
+    entry_fill = entry * (1.0 + rate)
+    exit_fill = exit_ * (1.0 - rate)
+    slippage_cost = round(gross - ((exit_fill - entry_fill) * qty), 2)
+    try:
+        from paper_engine.costs import round_trip_charges
+
+        charges = round_trip_charges(
+            symbol=symbol,
+            instrument_type=instrument_type,
+            entry_price=entry_fill,
+            exit_price=exit_fill,
+            qty=qty,
+            entry_action="BUY",
+        )
+    except Exception:
+        charges = 0.0
+    net = round((exit_fill - entry_fill) * qty - charges, 2)
+    return gross, round(float(charges), 2), slippage_cost, net
+
+
 def _normalize_underlying(value: str | None) -> str:
     return str(value or "").upper().replace(" FUT", "").strip()
 
@@ -89,6 +130,21 @@ class PaperPositionBook:
         #   max_symbol_capital_fraction -> clamp qty so premium outgo <= frac * capital.
         #   hard_stop_premium_fraction  -> exit when the option premium falls this far.
         self.limits = dict(limits or {})
+
+    def _slippage_bps(self) -> float:
+        raw = self.limits.get("slippage_bps")
+        if raw is not None:
+            try:
+                return float(raw)
+            except (TypeError, ValueError):
+                return 0.0
+        try:
+            from auction_intelligence.config import clone_default_config
+
+            paper = clone_default_config().get("paper_trading") or {}
+            return float(paper.get("slippage_bps", 1.0))
+        except Exception:
+            return 1.0
 
     def _exit_signal_confirmed(self, position: dict[str, Any], action: str, *, now: str) -> bool:
         """Require minimum hold time and repeated flat/flip observations."""
@@ -667,7 +723,18 @@ class PaperPositionBook:
         position["latest_spot_price"] = exit_spot
         position["regime_last"] = str(bundle.regime.label)
         position["unrealized_pnl"] = 0.0
-        position["realized_pnl"] = round((exit_premium - entry_premium) * quantity, 2)
+        gross, charges, slippage_cost, net = _net_long_premium(
+            symbol=str(position.get("trading_symbol") or position.get("instrument_key") or position.get("underlying_symbol") or ""),
+            instrument_type=str(position.get("option_type") or position.get("instrument_type") or "CE"),
+            entry_premium=entry_premium,
+            exit_premium=exit_premium,
+            quantity=quantity,
+            slippage_bps=self._slippage_bps(),
+        )
+        position["realized_pnl_gross"] = gross
+        position["transaction_cost"] = charges
+        position["slippage_cost"] = slippage_cost
+        position["realized_pnl"] = net
         try:
             await paper_trade_recorder.record_event(
                 strategy="auction_intelligence",

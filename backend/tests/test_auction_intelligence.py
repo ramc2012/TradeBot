@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import asyncio
 import json
+
+import pytest
 from dataclasses import replace
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
@@ -1167,6 +1169,7 @@ def test_service_records_option_paper_proposal(tmp_path, monkeypatch) -> None:
 
 
 def test_paper_position_book_closes_open_position_on_flat_signal(tmp_path, monkeypatch) -> None:
+    monkeypatch.setattr("paper_engine.costs.PAPER_APPLY_COSTS", True)
     service = PaperTradingService(str(tmp_path))
     service.book.limits.update(
         {"min_hold_seconds": 0, "exit_confirmation_cycles": 2}
@@ -1263,11 +1266,19 @@ def test_paper_position_book_closes_open_position_on_flat_signal(tmp_path, monke
     assert close_summary["open_count"] == 0
     assert close_summary["closed_count"] == 1
     assert state["open_positions"] == []
-    assert state["closed_positions"][0]["close_reason"] == "flat_signal"
-    assert state["closed_positions"][0]["realized_pnl"] == 750.0
+    closed = state["closed_positions"][0]
+    assert closed["close_reason"] == "flat_signal"
+    assert closed["realized_pnl_gross"] == 750.0
+    assert closed["transaction_cost"] > 0
+    assert closed["slippage_cost"] > 0
+    assert closed["realized_pnl"] == pytest.approx(
+        closed["realized_pnl_gross"] - closed["transaction_cost"] - closed["slippage_cost"]
+    )
+    assert closed["realized_pnl"] < closed["realized_pnl_gross"]
 
 
 def test_paper_position_book_closes_on_underlying_stop_without_reopening(tmp_path, monkeypatch) -> None:
+    monkeypatch.setattr("paper_engine.costs.PAPER_APPLY_COSTS", True)
     service = PaperTradingService(str(tmp_path))
     premiums = iter([82.0, 68.0, 68.0])
 
@@ -1347,8 +1358,12 @@ def test_paper_position_book_closes_on_underlying_stop_without_reopening(tmp_pat
 
     assert close_summary["open_count"] == 0
     assert close_summary["closed_count"] == 1
-    assert state["closed_positions"][0]["close_reason"] == "stop_loss"
-    assert state["closed_positions"][0]["realized_pnl"] == -1050.0
+    closed = state["closed_positions"][0]
+    assert closed["close_reason"] == "stop_loss"
+    assert closed["realized_pnl_gross"] == -1050.0
+    assert closed["transaction_cost"] > 0
+    assert closed["slippage_cost"] > 0
+    assert closed["realized_pnl"] < closed["realized_pnl_gross"]
 
 
 def test_swing_agent_uses_contract_aware_margin_sizing() -> None:

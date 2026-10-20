@@ -2757,20 +2757,12 @@ class ATMWatchlistService:
         )
         if not closes and fallback_close > 0:
             closes = [fallback_close]
-        # Append a synthetic forming-bar close using the current LTP so
-        # MACD reacts intra-bar instead of waiting for the 30-minute bar
-        # to close. Without this the watchlist's MACD value is frozen
-        # between bar closes (09:15 → 09:45 → 10:15 etc.), and S1 can't
-        # detect a fresh zero-cross until the bar closes — which means
-        # zero entries possible in the first 30 minutes of the session.
-        #
-        # Only append when the LTP differs meaningfully from the last
-        # closed-bar close, otherwise the synthetic bar just duplicates
-        # state and doesn't move the MACD.
-        if closes and fallback_close > 0:
-            last_close = closes[-1]
-            if last_close > 0 and abs(fallback_close - last_close) / last_close > 0.001:
-                closes = list(closes) + [fallback_close]
+        # Completed 30-minute bars only. S1 is a 30-minute premium MACD
+        # zero-cross: splicing the live LTP on as a synthetic forming bar
+        # moved MACD before the bar closed, so a cross could print and then
+        # vanish. The exit series is persisted closes only, and the two
+        # disagreed inside the entry bar. The first signal of a session is
+        # the first *closed* 30-minute bar (09:45), which is the strategy.
         return latest_macd_rsi(closes)
 
     async def _load_persisted_watchlist_rows(

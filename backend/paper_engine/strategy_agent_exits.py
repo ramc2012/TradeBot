@@ -42,13 +42,10 @@ from db.database import AsyncSessionLocal
 # time-based window_end backstop still enforces terminal exits.
 _MARK_STALE_SECONDS = int(getattr(settings, "MACD_STRATEGY_MARK_STALE_SECONDS", 1200))
 
-# Minimum hold before macd_reversal_30m may fire. Entries open on a 30m up-cross
-# assembled with a SYNTHETIC forming bar (live LTP), while the exit MACD is built
-# from PERSISTED 30m closes only — so within the entry bar the two series can
-# disagree and the reversal exit churns the position out of the bar it just
-# entered. Requiring one completed 30m bar means the reversal decision is made on
-# a completed close both series agree on, resolving both the churn and the series
-# divergence. hard_stop / target / window_end still fire regardless.
+# Minimum hold before macd_reversal_30m may fire. Entry and exit both read
+# completed 30-minute closes (no synthetic forming bar). One bar of hold still
+# stops a reversal from churning a position out of the bar it was entered on.
+# hard_stop / target / window_end still fire regardless.
 _MACD_REVERSAL_MIN_HOLD_SECONDS = int(getattr(settings, "MACD_STRATEGY_REVERSAL_MIN_HOLD_SECONDS", 1800))
 from market_data import option_history_service
 from paper_engine.base_strategy_agent import IST, _now_ist, _parse_iso_timestamp, _round_or_none

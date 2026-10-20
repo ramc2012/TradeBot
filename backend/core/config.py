@@ -708,8 +708,8 @@ class Settings(BaseSettings):
     # exits that cycle so a frozen mark can't misfire hard_stop/macd_reversal.
     MACD_STRATEGY_MARK_STALE_SECONDS: int = 1200
     # S1: minimum hold before macd_reversal_30m may fire (one 30m bar). Entry
-    # uses a synthetic forming bar while the exit MACD is persisted-close only;
-    # this stops the reversal exit from churning a position out of its entry bar.
+    # and exit both read completed 30-minute closes; the hold still blocks a
+    # reversal from churning a position out of the bar it was entered on.
     MACD_STRATEGY_REVERSAL_MIN_HOLD_SECONDS: int = 1800
     # Lane signal-correctness audit (audits framework) — post-close once-daily
     # replay-parity / gate-attribution / reconciliation for every registered
