@@ -208,7 +208,7 @@ class OptionHistoryService:
         return (now_ist - latest_seen) > stale_after
 
     @staticmethod
-    def _aggregate_rows(rows: list[dict[str, Any]], interval_minutes: int) -> list[dict[str, Any]]:
+    def _aggregate_rows(rows: list[dict[str, Any]], interval_minutes: int, *, origin_minutes: int = 0) -> list[dict[str, Any]]:
         if not rows or interval_minutes <= 1:
             return rows
 
@@ -218,11 +218,12 @@ class OptionHistoryService:
 
         for row in sorted(rows, key=lambda item: str(item.get("time") or "")):
             ts = _parse_time(row.get("time"))
-            current_start = ts.replace(
-                minute=(ts.minute // interval_minutes) * interval_minutes,
+            shifted = ts - timedelta(minutes=origin_minutes)
+            current_start = shifted.replace(
+                minute=(shifted.minute // interval_minutes) * interval_minutes,
                 second=0,
                 microsecond=0,
-            )
+            ) + timedelta(minutes=origin_minutes)
 
             if bucket_start != current_start:
                 if bucket is not None:
@@ -544,6 +545,7 @@ class OptionHistoryService:
         interval: str = "30minute",
         limit: int = 80,
         allow_broker_refresh: bool = True,
+        completed_only: bool = False,
     ) -> list[dict[str, Any]]:
         async with AsyncSessionLocal() as session:
             merged: "OrderedDict[str, dict[str, Any]]" = OrderedDict()
@@ -737,6 +739,10 @@ class OptionHistoryService:
             (r for r in canon.values() if sess_lo <= str(r.get("time", ""))[11:16] <= sess_hi),
             key=lambda row: row["time"],
         )
+        if completed_only:
+            from market_data.completed_candles import completed_candles
+
+            candles = completed_candles(candles, interval)
         return candles[-limit:]
 
     async def _load_snapshot_candles(
@@ -829,7 +835,10 @@ class OptionHistoryService:
         except KeyError:
             aggregate_minutes = 1
         if aggregate_minutes > 1:
-            rows = self._aggregate_rows(rows, aggregate_minutes)
+            rows = self._aggregate_rows(
+                rows, aggregate_minutes,
+                origin_minutes=0 if "MCX" in str(instrument_key or "").upper() else 15,
+            )
         return rows[-limit:]
 
     async def _persist_broker_candles(

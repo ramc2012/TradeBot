@@ -751,7 +751,7 @@ class GannTPDeltaPaperAgent:
 
             charges = round_trip_charges(
                 symbol=str(position.get("trading_symbol") or position.get("instrument_key") or position.get("underlying") or ""),
-                instrument_type=str(position.get("instrument_type") or position.get("option_type") or "FUT"),
+                instrument_type=str(position.get("option_type") or position.get("instrument_type") or "FUT"),
                 entry_price=entry,
                 exit_price=exit_price,
                 qty=qty_units,

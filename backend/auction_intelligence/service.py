@@ -55,7 +55,10 @@ class AuctionIntelligenceService:
             self.config.get("options_mapping", {}),
             self.config.get("contract_specs", {}),
         )
-        self.paper = PaperTradingService(self.config["paper_trading"]["journal_root"])
+        self.paper = PaperTradingService(
+            self.config["paper_trading"]["journal_root"],
+            slippage_bps=float(self.config["paper_trading"].get("slippage_bps", 1.0)),
+        )
         self.validation = GateAValidator(self.config)
 
     def analyze(

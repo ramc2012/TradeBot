@@ -40,11 +40,22 @@ import os
 import tempfile
 from pathlib import Path
 
+# Unit tests must never inherit the application's localhost paper database.
+# Integration runs may opt into a separately provisioned TEST database only.
+_test_db = os.environ.get("TRADEBOT_TEST_DATABASE_URL", "postgresql+asyncpg://test:test@127.0.0.1:1/tradebot_test")
+from urllib.parse import urlparse as _urlparse
+
+if "test" not in _urlparse(_test_db).path.lower():
+    raise RuntimeError("TRADEBOT_TEST_DATABASE_URL must name a separate test database")
+os.environ["DATABASE_URL"] = _test_db
+
 # NOTE: this runs at conftest import (before test modules, hence before the backend
 # modules they import), so _resolve_strategy_state_file() sees the throwaway path.
 _TEST_STATE_DIR = Path(tempfile.mkdtemp(prefix="tradebot-test-state-"))
 _TEST_NSE_STATE_FILE = _TEST_STATE_DIR / "nse_strategy_state.json"
 os.environ["NSE_STRATEGY_STATE_FILE"] = str(_TEST_NSE_STATE_FILE)
+os.environ["CREDENTIALS_FILE"] = str(_TEST_STATE_DIR / "credentials.json")
+os.environ["REDIS_URL"] = os.environ.get("TRADEBOT_TEST_REDIS_URL", "redis://127.0.0.1:1/15")
 
 # NOTE: must be set before numpy is first imported anywhere in the process —
 # OpenBLAS reads it once, when the shared library initialises (see docstring #3).

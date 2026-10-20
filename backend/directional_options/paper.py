@@ -223,6 +223,7 @@ class DirectionalOptionsPaperStore:
         planned_stop_pct: float = 0.30,
         profit_target_pct: float = 0.45,
         expiry_guard_days: float = 0.8,
+        execution_config: dict[str, Any] | None = None,
     ):
         self.root = Path(root)
         if not self.root.is_absolute():
@@ -237,6 +238,9 @@ class DirectionalOptionsPaperStore:
         self.min_hold_bars = int(min_hold_bars)
         self.one_position_per_symbol = bool(one_position_per_symbol)
         self.policy = policy
+        from directional_options.config import DEFAULT_CONFIG
+
+        self.execution_config = dict(DEFAULT_CONFIG["execution"] if execution_config is None else execution_config)
         # Protective MTM exits (the lane previously had NONE — only flat/flip
         # closes). Apply to BOTH legacy and positional books.
         self.planned_stop_pct = float(planned_stop_pct)
@@ -1105,9 +1109,7 @@ class DirectionalOptionsPaperStore:
         # Stops and targets still read the raw mark; the booked P&L does not.
         # Charges are then taken on the slipped fills, same statutory model
         # as the rest of the paper desk. Directional is long-premium (BUY).
-        from directional_options.config import DEFAULT_CONFIG
-
-        exec_cfg = DEFAULT_CONFIG.get("execution") or {}
+        exec_cfg = self.execution_config
         entry_slip = max(float(exec_cfg.get("entry_slippage_pct") or 0.0), 0.0)
         exit_slip = max(float(exec_cfg.get("exit_slippage_pct") or 0.0), 0.0)
         entry_fill = entry_premium * (1.0 + entry_slip)
