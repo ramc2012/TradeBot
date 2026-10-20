@@ -141,15 +141,26 @@ def _isolate_store(
     return state, journal
 
 
+def _future_expiry() -> str:
+    """Far enough out that the calendar expiry backstop does not close the row.
+
+    A hardcoded 2026-08-27 became an expiry_roll the day the wall clock passed
+    it, which emptied the book before flip confirmation could run.
+    """
+    return (datetime.now(timezone.utc) + timedelta(days=40)).date().isoformat()
+
+
 def _open_row(
     *,
     underlying: str = "NIFTY",
     direction: str = "CE",
     opened_seconds_ago: float = 3600.0,
     entry_premium: float = 132.0,
-    expiry: str = "2026-08-27",
+    expiry: str | None = None,
     position_id: str = "pos-1",
 ) -> dict:
+    if expiry is None:
+        expiry = _future_expiry()
     now = datetime.now(timezone.utc)
     opened = (now - timedelta(seconds=opened_seconds_ago)).isoformat()
     return {
@@ -231,7 +242,7 @@ def _actionable_payload(
                 "trading_symbol": f"{underlying} {int(strike)} {direction}",
                 "instrument_key": f"NSE:{underlying}{int(strike)}{direction}",
                 "option_type": direction,
-                "expiry": "2026-08-27",
+                "expiry": _future_expiry(),
                 "strike": strike,
                 "option_price": option_price,
                 "expected_pnl": 1800.0,

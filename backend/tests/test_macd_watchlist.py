@@ -952,6 +952,18 @@ def test_release_repicks_on_the_cycle_expiry_not_the_held_one(monkeypatch) -> No
         symbol="RELIANCE", kind="STOCK", spot_instrument_key="NSE_EQ|X",
         underlying_key="NSE_EQ|X",
     )
+    # Stock monthlies roll forward once the active month is inside the
+    # trading-day window. With the wall clock past 2026-08-25 that roll
+    # turned this cycle into September. Pin "today" inside August, before
+    # the window, so the cycle under test stays the August contract.
+    real_date = aw.date
+
+    class _AugustClock(real_date):
+        @classmethod
+        def today(cls):
+            return real_date(2026, 8, 3)
+
+    monkeypatch.setattr(aw, "date", _AugustClock)
     # The cycle resolves the post-roll August contract; the frozen row is July.
     asyncio.run(
         svc._build_row(meta, "2026-08-25", date(2026, 8, 25), _Adapter(), None)

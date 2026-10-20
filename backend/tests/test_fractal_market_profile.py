@@ -1126,7 +1126,9 @@ async def test_paper_store_trains_fmp_policy_on_closed_position(tmp_path: Path) 
 
     await store.record_signal(open_snapshot)
     _backdate_open(store, minutes=10)
-    _bump_latest_premium(store, delta=0.5)
+    # 0.5pt on one lot is smaller than statutory charges, so the net reward
+    # the policy trains on is a loss. The bump has to clear those charges.
+    _bump_latest_premium(store, delta=8.0)
     await store.record_signal(_flat_followup_snapshot())
 
     positions = await store.list_positions(symbol="NIFTY", status="closed", limit=10)
